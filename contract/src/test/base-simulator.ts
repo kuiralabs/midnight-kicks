@@ -19,53 +19,31 @@ export interface PenaltyContractModule {
   ledger: (state: any) => any;
 }
 
-// Default deadline far in the future (no timeout during tests)
 const FAR_FUTURE = 9999999999n;
 
 export class BasePenaltySimulator {
   readonly contract: Contract<PenaltyPrivateState>;
   circuitContext: CircuitContext<PenaltyPrivateState>;
   private readonly ledgerFn: (state: any) => any;
-  private readonly hasDeadlineConstructor: boolean;
 
   constructor(
     contractModule: PenaltyContractModule,
     secretKey: Uint8Array,
     choices: Choices,
     nonce: Uint8Array,
-    deadlineSecs: bigint = FAR_FUTURE,
   ) {
     this.contract = new contractModule.Contract(witnesses);
     this.ledgerFn = contractModule.ledger;
-
-    // V2 constructor takes deadlineSecs, V1 doesn't
-    // Try with deadline first, fall back to no-arg
-    let initResult;
-    try {
-      initResult = this.contract.initialState(
-        createConstructorContext(
-          { secretKey, choices, nonce },
-          "0".repeat(64),
-        ),
-        deadlineSecs,
-      );
-      this.hasDeadlineConstructor = true;
-    } catch {
-      initResult = this.contract.initialState(
-        createConstructorContext(
-          { secretKey, choices, nonce },
-          "0".repeat(64),
-        ),
-      );
-      this.hasDeadlineConstructor = false;
-    }
-
     const {
       currentPrivateState,
       currentContractState,
       currentZswapLocalState,
-    } = initResult;
-
+    } = this.contract.initialState(
+      createConstructorContext(
+        { secretKey, choices, nonce },
+        "0".repeat(64),
+      ),
+    );
     this.circuitContext = {
       currentPrivateState,
       currentZswapLocalState,
@@ -98,15 +76,25 @@ export class BasePenaltySimulator {
   }
 
   joinMatch(commitDeadlineSecs: bigint = FAR_FUTURE) {
-    if (this.hasDeadlineConstructor) {
+    // V2 (fixed) takes commitDeadlineSecs, V1 (vulnerable) doesn't.
+    // Always try with the arg first — if the contract doesn't accept
+    // it, fall back to no-arg. Re-throw contract assertion errors
+    // (e.g., "Cannot join your own match") so tests can catch them.
+    try {
       this.circuitContext = this.contract.impureCircuits.joinMatch(
         this.circuitContext,
         commitDeadlineSecs,
       ).context;
-    } else {
-      this.circuitContext = this.contract.impureCircuits.joinMatch(
-        this.circuitContext,
-      ).context;
+    } catch (e: any) {
+      const msg = String(e?.message ?? e ?? "");
+      // If the error is about wrong arg count, retry without arg
+      if (msg.includes("argument") && (msg.includes("expected") || msg.includes("received"))) {
+        this.circuitContext = this.contract.impureCircuits.joinMatch(
+          this.circuitContext,
+        ).context;
+      } else {
+        throw e; // contract assertion error — re-throw for tests
+      }
     }
     return this.getLedger();
   }

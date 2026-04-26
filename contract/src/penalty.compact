@@ -125,7 +125,9 @@ circuit resetRoundState(): [] {
 // Constructor
 // ═══════════════════════════════════════════════════════════════════
 
-constructor(deadlineSecs: Uint<64>) {
+// No constructor args — mn contract deploy doesn't support them.
+// Join deadline set to 1 hour from block time.
+constructor() {
   player1 = disclose(publicKey(localSecretKey()));
   phase = Phase.WAITING;
   p1Committed = false;
@@ -133,8 +135,6 @@ constructor(deadlineSecs: Uint<64>) {
   p1Revealed = false;
   p2Revealed = false;
   isDraw = false;
-  // Deadline for player 2 to join
-  deadline = disclose(deadlineSecs);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -143,13 +143,13 @@ constructor(deadlineSecs: Uint<64>) {
 
 export circuit joinMatch(commitDeadlineSecs: Uint<64>): [] {
   assert(phase == Phase.WAITING, "Match not in WAITING phase");
-  assert(blockTimeLt(deadline), "Match expired — join deadline passed");
 
   const pk = disclose(publicKey(localSecretKey()));
   assert(pk != player1, "Cannot join your own match");
 
   player2 = pk;
   phase = Phase.COMMITTING;
+  // Set commit deadline from join time
   deadline = disclose(commitDeadlineSecs);
 }
 
@@ -336,10 +336,9 @@ export circuit claimTimeout(): [] {
   }
 }
 
-// Creator reclaims if no one joins before deadline
+// Creator cancels if no one has joined yet
 export circuit cancelMatch(): [] {
   assert(phase == Phase.WAITING, "Can only cancel in WAITING phase");
-  assert(blockTimeGte(deadline), "Join deadline not reached");
 
   const pk = publicKey(localSecretKey());
   assert(disclose(pk == player1), "Only the creator can cancel");
