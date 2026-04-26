@@ -127,8 +127,9 @@ circuit validDirection(d: Uint<8>): Boolean {
 // ═══════════════════════════════════════════════════════════════════
 
 constructor() {
-  const sk = disclose(localSecretKey());
-  player1 = disclose(publicKey(sk));
+  // VULN-003 fix: secret key stays private — only the derived
+  // public key crosses the disclose boundary
+  player1 = disclose(publicKey(localSecretKey()));
   phase = Phase.WAITING;
   p1Committed = false;
   p2Committed = false;
@@ -146,8 +147,8 @@ constructor() {
 export circuit joinMatch(): [] {
   assert(phase == Phase.WAITING, "Match not in WAITING phase");
 
-  const sk = disclose(localSecretKey());
-  const pk = disclose(publicKey(sk));
+  // VULN-003 fix: secret key stays private
+  const pk = disclose(publicKey(localSecretKey()));
 
   // Cannot join your own match
   assert(pk != player1, "Cannot join your own match");
@@ -157,29 +158,22 @@ export circuit joinMatch(): [] {
 }
 
 // Submit a commitment hash (either player, in any order)
+// VULN-002 fix: choices stay private — only the commitment hash
+// is disclosed. Choices feed directly into persistentCommit without
+// crossing the disclose boundary.
 export circuit commitBatch(): [] {
   assert(phase == Phase.COMMITTING, "Match not in COMMITTING phase");
 
-  const sk = disclose(localSecretKey());
-  const pk = publicKey(sk);
+  // VULN-003 fix: secret key stays private
+  const pk = publicKey(localSecretKey());
 
-  // Get choices and nonce from witness (private)
-  const c0 = disclose(localChoice0());
-  const c1 = disclose(localChoice1());
-  const c2 = disclose(localChoice2());
-  const c3 = disclose(localChoice3());
-  const c4 = disclose(localChoice4());
-  const nonce = disclose(localNonce());
-
-  // Validate all directions are in range
-  assert(disclose(validDirection(c0)), "Choice 0 must be 0, 1, or 2");
-  assert(disclose(validDirection(c1)), "Choice 1 must be 0, 1, or 2");
-  assert(disclose(validDirection(c2)), "Choice 2 must be 0, 1, or 2");
-  assert(disclose(validDirection(c3)), "Choice 3 must be 0, 1, or 2");
-  assert(disclose(validDirection(c4)), "Choice 4 must be 0, 1, or 2");
-
-  // Compute commitment hash
-  const commitment = disclose(computeCommitment(c0, c1, c2, c3, c4, nonce));
+  // Compute commitment hash — choices + nonce stay private.
+  // persistentCommit runs inside the circuit, producing a hash.
+  // Only the hash is disclosed to the ledger.
+  const commitment = disclose(computeCommitment(
+    localChoice0(), localChoice1(), localChoice2(),
+    localChoice3(), localChoice4(), localNonce()
+  ));
 
   // Store commitment for the correct player
   if (disclose(pk == player1)) {
@@ -204,16 +198,24 @@ export circuit commitBatch(): [] {
 export circuit revealBatch(): [] {
   assert(phase == Phase.REVEALING, "Match not in REVEALING phase");
 
-  const sk = disclose(localSecretKey());
-  const pk = publicKey(sk);
+  // VULN-003 fix: secret key stays private
+  const pk = publicKey(localSecretKey());
 
-  // Get choices and nonce from witness
+  // Get choices and nonce from witness — disclosed during reveal
+  // (safe: both players already committed, can't change choices)
   const c0 = disclose(localChoice0());
   const c1 = disclose(localChoice1());
   const c2 = disclose(localChoice2());
   const c3 = disclose(localChoice3());
   const c4 = disclose(localChoice4());
   const nonce = disclose(localNonce());
+
+  // Validate directions are in range [0, 2]
+  assert(disclose(validDirection(c0)), "Choice 0 must be 0, 1, or 2");
+  assert(disclose(validDirection(c1)), "Choice 1 must be 0, 1, or 2");
+  assert(disclose(validDirection(c2)), "Choice 2 must be 0, 1, or 2");
+  assert(disclose(validDirection(c3)), "Choice 3 must be 0, 1, or 2");
+  assert(disclose(validDirection(c4)), "Choice 4 must be 0, 1, or 2");
 
   // Recompute commitment and verify it matches
   const recomputed = computeCommitment(c0, c1, c2, c3, c4, nonce);

@@ -120,7 +120,7 @@ export class Contract {
         if (!(typeof(contextOrig_0) === 'object' && contextOrig_0.currentQueryContext != undefined)) {
           __compactRuntime.typeError('joinMatch',
                                      'argument 1 (as invoked from Typescript)',
-                                     'penalty.compact line 146 char 1',
+                                     'penalty.compact line 147 char 1',
                                      'CircuitContext',
                                      contextOrig_0)
         }
@@ -143,7 +143,7 @@ export class Contract {
         if (!(typeof(contextOrig_0) === 'object' && contextOrig_0.currentQueryContext != undefined)) {
           __compactRuntime.typeError('commitBatch',
                                      'argument 1 (as invoked from Typescript)',
-                                     'penalty.compact line 160 char 1',
+                                     'penalty.compact line 164 char 1',
                                      'CircuitContext',
                                      contextOrig_0)
         }
@@ -166,7 +166,7 @@ export class Contract {
         if (!(typeof(contextOrig_0) === 'object' && contextOrig_0.currentQueryContext != undefined)) {
           __compactRuntime.typeError('revealBatch',
                                      'argument 1 (as invoked from Typescript)',
-                                     'penalty.compact line 204 char 1',
+                                     'penalty.compact line 198 char 1',
                                      'CircuitContext',
                                      contextOrig_0)
         }
@@ -659,8 +659,8 @@ export class Contract {
                                                                                               alignment: _descriptor_5.alignment() }).encode() } },
                                        { ins: { cached: false, n: 1 } },
                                        { ins: { cached: true, n: 1 } }]);
-    const sk_0 = this._localSecretKey_0(context, partialProofData);
-    const tmp_0 = this._publicKey_0(sk_0);
+    const tmp_0 = this._publicKey_0(this._localSecretKey_0(context,
+                                                           partialProofData));
     __compactRuntime.queryLedgerState(context,
                                       partialProofData,
                                       [
@@ -967,8 +967,8 @@ export class Contract {
                             ===
                             0,
                             'Match not in WAITING phase');
-    const sk_0 = this._localSecretKey_0(context, partialProofData);
-    const pk_0 = this._publicKey_0(sk_0);
+    const pk_0 = this._publicKey_0(this._localSecretKey_0(context,
+                                                          partialProofData));
     __compactRuntime.assert(!this._equal_3(pk_0,
                                            _descriptor_2.fromValue(__compactRuntime.queryLedgerState(context,
                                                                                                      partialProofData,
@@ -1041,30 +1041,20 @@ export class Contract {
                             ===
                             1,
                             'Match not in COMMITTING phase');
-    const sk_0 = this._localSecretKey_0(context, partialProofData);
-    const pk_0 = this._publicKey_0(sk_0);
-    const c0_0 = this._localChoice0_0(context, partialProofData);
-    const c1_0 = this._localChoice1_0(context, partialProofData);
-    const c2_0 = this._localChoice2_0(context, partialProofData);
-    const c3_0 = this._localChoice3_0(context, partialProofData);
-    const c4_0 = this._localChoice4_0(context, partialProofData);
-    const nonce_0 = this._localNonce_0(context, partialProofData);
-    __compactRuntime.assert(this._validDirection_0(c0_0),
-                            'Choice 0 must be 0, 1, or 2');
-    __compactRuntime.assert(this._validDirection_0(c1_0),
-                            'Choice 1 must be 0, 1, or 2');
-    __compactRuntime.assert(this._validDirection_0(c2_0),
-                            'Choice 2 must be 0, 1, or 2');
-    __compactRuntime.assert(this._validDirection_0(c3_0),
-                            'Choice 3 must be 0, 1, or 2');
-    __compactRuntime.assert(this._validDirection_0(c4_0),
-                            'Choice 4 must be 0, 1, or 2');
-    const commitment_0 = this._computeCommitment_0(c0_0,
-                                                   c1_0,
-                                                   c2_0,
-                                                   c3_0,
-                                                   c4_0,
-                                                   nonce_0);
+    const pk_0 = this._publicKey_0(this._localSecretKey_0(context,
+                                                          partialProofData));
+    const commitment_0 = this._computeCommitment_0(this._localChoice0_0(context,
+                                                                        partialProofData),
+                                                   this._localChoice1_0(context,
+                                                                        partialProofData),
+                                                   this._localChoice2_0(context,
+                                                                        partialProofData),
+                                                   this._localChoice3_0(context,
+                                                                        partialProofData),
+                                                   this._localChoice4_0(context,
+                                                                        partialProofData),
+                                                   this._localNonce_0(context,
+                                                                      partialProofData));
     if (this._equal_4(pk_0,
                       _descriptor_2.fromValue(__compactRuntime.queryLedgerState(context,
                                                                                 partialProofData,
@@ -1272,14 +1262,24 @@ export class Contract {
                             ===
                             2,
                             'Match not in REVEALING phase');
-    const sk_0 = this._localSecretKey_0(context, partialProofData);
-    const pk_0 = this._publicKey_0(sk_0);
+    const pk_0 = this._publicKey_0(this._localSecretKey_0(context,
+                                                          partialProofData));
     const c0_0 = this._localChoice0_0(context, partialProofData);
     const c1_0 = this._localChoice1_0(context, partialProofData);
     const c2_0 = this._localChoice2_0(context, partialProofData);
     const c3_0 = this._localChoice3_0(context, partialProofData);
     const c4_0 = this._localChoice4_0(context, partialProofData);
     const nonce_0 = this._localNonce_0(context, partialProofData);
+    __compactRuntime.assert(this._validDirection_0(c0_0),
+                            'Choice 0 must be 0, 1, or 2');
+    __compactRuntime.assert(this._validDirection_0(c1_0),
+                            'Choice 1 must be 0, 1, or 2');
+    __compactRuntime.assert(this._validDirection_0(c2_0),
+                            'Choice 2 must be 0, 1, or 2');
+    __compactRuntime.assert(this._validDirection_0(c3_0),
+                            'Choice 3 must be 0, 1, or 2');
+    __compactRuntime.assert(this._validDirection_0(c4_0),
+                            'Choice 4 must be 0, 1, or 2');
     const recomputed_0 = this._computeCommitment_0(c0_0,
                                                    c1_0,
                                                    c2_0,
