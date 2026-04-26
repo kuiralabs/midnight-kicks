@@ -57,7 +57,6 @@ export type Ledger = {
   readonly p2Score: bigint;
   readonly winner: Uint8Array;
   readonly isDraw: boolean;
-  readonly matchSeq: bigint;
 }
 
 export type ContractReferenceLocations = any;

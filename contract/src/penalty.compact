@@ -77,9 +77,6 @@ export ledger p2Score: Counter;
 export ledger winner: Bytes<32>;
 export ledger isDraw: Boolean;
 
-// Sequence counter (for domain separation in commitment hash)
-export ledger matchSeq: Counter;
-
 // ═══════════════════════════════════════════════════════════════════
 // Witnesses (private inputs from the app layer)
 // ═══════════════════════════════════════════════════════════════════
@@ -136,7 +133,6 @@ constructor() {
   p1Revealed = false;
   p2Revealed = false;
   isDraw = false;
-  matchSeq.increment(1);
 }
 
 // ═══════════════════════════════════════════════════════════════════
