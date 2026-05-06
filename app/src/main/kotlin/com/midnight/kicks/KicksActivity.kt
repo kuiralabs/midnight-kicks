@@ -80,10 +80,9 @@ class KicksActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun launchUnityChoicePhase() {
+    private fun ensureSdkReady(then: () -> Unit) {
         scope.launch {
             try {
-                // Init SDK if needed
                 if (matchManager == null) {
                     statusMessage.value = "Initializing SDK..."
                     val manager = MatchManager(
@@ -91,29 +90,29 @@ class KicksActivity : ComponentActivity() {
                         network = MidnightNetwork.UNDEPLOYED,
                         seed = TEST_SEED,
                     )
-                    manager.initSdk { statusMessage.value = it }
+                    manager.initSdk { runOnUiThread { statusMessage.value = it } }
                     matchManager = manager
+                    statusMessage.value = "SDK ready"
                 }
-
-                // Deploy contract
-                statusMessage.value = "Deploying match contract..."
-                val address = matchManager!!.createMatch { statusMessage.value = it }
-                statusMessage.value = "Match: ${address.take(16)}..."
-
-                // Launch Unity for choice phase
-                Log.i(TAG, "Launching Unity for choice phase...")
-                val intent = Intent(this@KicksActivity, com.unity3d.player.UnityPlayerGameActivity::class.java)
-                startActivity(intent)
-
-                // Send choice phase message after Unity loads
-                window.decorView.postDelayed({
-                    UnityBridge.sendChoicePhase(round = "regulation", playerRole = "shooter")
-                    statusMessage.value = "Pick your 5 directions!"
-                }, 2000)
+                runOnUiThread { then() }
             } catch (e: Exception) {
-                Log.e(TAG, "Create match failed", e)
+                Log.e(TAG, "SDK init failed", e)
                 statusMessage.value = "Error: ${e.message}"
             }
+        }
+    }
+
+    private fun launchUnityChoicePhase() {
+        ensureSdkReady {
+            statusMessage.value = "Pick your 5 directions!"
+            Log.i(TAG, "Launching Unity for choice phase...")
+
+            val intent = Intent(this@KicksActivity, com.unity3d.player.UnityPlayerGameActivity::class.java)
+            startActivity(intent)
+
+            window.decorView.postDelayed({
+                UnityBridge.sendChoicePhase(round = "regulation", playerRole = "shooter")
+            }, 2000)
         }
     }
 
@@ -129,26 +128,55 @@ class KicksActivity : ComponentActivity() {
                     val labels = choiceList.map { when (it) { 0 -> "L"; 1 -> "C"; 2 -> "R"; else -> "?" } }
 
                     Log.i(TAG, "Player choices: $labels")
-                    lastChoices.value = "Choices: ${labels.joinToString(" ")}"
-                    statusMessage.value = "Committing to blockchain..."
+                    lastChoices.value = "You picked: ${labels.joinToString(" ")}"
+                    statusMessage.value = "Running match on blockchain..."
 
-                    // Commit choices to blockchain
+                    // Run full game loop against AI
                     scope.launch {
                         try {
-                            matchManager?.commitBatch(
-                                choices = choiceList.toIntArray(),
-                                onProgress = { statusMessage.value = it },
+                            val result = matchManager!!.playAgainstAi(
+                                playerChoices = choiceList.toIntArray(),
+                                onProgress = { runOnUiThread { statusMessage.value = it } },
                             )
-                            statusMessage.value = "Committed! Waiting for opponent..."
+
+                            val (p1Score, p2Score) = result.scores()
+                            val winner = when {
+                                p1Score > p2Score -> "P1"
+                                p2Score > p1Score -> "P2"
+                                else -> null
+                            }
+
+                            Log.i(TAG, "Match result: P1=$p1Score P2=$p2Score winner=$winner")
+                            statusMessage.value = "You $p1Score - $p2Score AI"
+
+                            val aiLabels = result.aiChoices.map { when (it) { 0 -> "L"; 1 -> "C"; 2 -> "R"; else -> "?" } }
+                            lastChoices.value = "You: ${labels.joinToString(" ")}  AI: ${aiLabels.joinToString(" ")}"
+
+                            // Send replay to Unity
+                            UnityBridge.sendReplay(
+                                rounds = result.toRoundResults(),
+                                p1Score = p1Score,
+                                p2Score = p2Score,
+                                winner = winner,
+                            )
                         } catch (e: Exception) {
-                            Log.e(TAG, "Commit failed", e)
-                            statusMessage.value = "Commit failed: ${e.message}"
+                            Log.e(TAG, "Match failed", e)
+                            statusMessage.value = "Match failed: ${e.message}"
                         }
                     }
                 }
                 "replayComplete" -> {
                     Log.i(TAG, "Replay finished")
-                    statusMessage.value = "Replay complete."
+                    val result = matchManager?.lastResult
+                    if (result != null) {
+                        val (p1, p2) = result.scores()
+                        val winText = when {
+                            p1 > p2 -> "YOU WIN!"
+                            p2 > p1 -> "AI WINS"
+                            else -> "DRAW"
+                        }
+                        statusMessage.value = "$winText  ($p1 - $p2)"
+                    }
                 }
             }
         } catch (e: Exception) {

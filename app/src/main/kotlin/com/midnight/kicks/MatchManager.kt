@@ -7,14 +7,15 @@ import com.midnight.kuira.core.compact.MidnightContract
 import com.midnight.kuira.core.compact.WitnessResult
 import com.midnight.kuira.core.network.MidnightNetwork
 import com.midnight.kuira.sdk.MidnightSdk
+import kotlinx.coroutines.delay
 import java.io.File
 import java.security.SecureRandom
 
 /**
- * Manages the penalty match lifecycle — deploy, join, commit, reveal, claim.
+ * Manages the penalty match lifecycle.
  *
- * Wraps MidnightSdk and MidnightContract to provide match-specific operations.
- * Each match is a new contract instance deployed on-chain.
+ * Supports Player vs AI mode: both players run on the same device.
+ * P1 = human (picks directions in Unity), P2 = AI (random choices).
  */
 class MatchManager(
     private val context: Context,
@@ -22,17 +23,18 @@ class MatchManager(
     private val seed: ByteArray,
 ) {
     private var sdk: MidnightSdk? = null
-    private var contract: MidnightContract? = null
     private var contractAddress: String? = null
 
-    // Match state
-    private var secretKey: ByteArray = ByteArray(32).also { SecureRandom().nextBytes(it) }
-    private var currentChoices: IntArray? = null
-    private var currentNonce: ByteArray? = null
+    // P1 (human) keys
+    private val p1SecretKey = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
-    /**
-     * Initialize the SDK (derive keys, set up wallet).
-     */
+    // P2 (AI) keys — separate identity
+    private val p2SecretKey = ByteArray(32).also { SecureRandom().nextBytes(it) }
+
+    // Last match result
+    var lastResult: MatchResult? = null
+        private set
+
     suspend fun initSdk(onProgress: (String) -> Unit) {
         onProgress("Initializing SDK...")
         installProvingKeys()
@@ -42,169 +44,194 @@ class MatchManager(
             .seed(seed)
             .build()
         sdk = midnightSdk
-        Log.i(TAG, "SDK initialized, wallet address: ${midnightSdk.walletAddress}")
-
-        // Download wallet proving keys if needed (dust/zswap provers)
-        if (!midnightSdk.provingKeyManager.hasWalletKeys()) {
-            onProgress("Downloading wallet proving keys...")
-            midnightSdk.provingKeyManager.downloadWalletKeys { progress ->
-                onProgress("Downloading keys: ${(progress * 100).toInt()}%")
-            }
-        }
+        Log.i(TAG, "SDK initialized, wallet: ${midnightSdk.walletAddress}")
+        Log.i(TAG, "Wallet keys installed: ${midnightSdk.provingKeyManager.hasWalletKeys()}")
     }
 
     /**
-     * Deploy a new penalty contract (create match).
-     *
-     * @return Contract address of the deployed match
+     * Full Player vs AI game loop:
+     * 1. Deploy contract (P1 creates match)
+     * 2. AI joins as P2
+     * 3. Player picks 5 directions (passed in)
+     * 4. AI picks 5 random directions
+     * 5. P1 commits, P2 commits
+     * 6. P1 reveals, P2 reveals (auto-resolves)
+     * 7. Returns match result
      */
-    suspend fun createMatch(onProgress: (String) -> Unit): String {
+    suspend fun playAgainstAi(
+        playerChoices: IntArray,
+        onProgress: (String) -> Unit,
+    ): MatchResult {
+        require(playerChoices.size == 5) { "Need 5 choices" }
         val midnightSdk = requireNotNull(sdk) { "Call initSdk first" }
-        onProgress("Deploying penalty contract...")
 
+        // AI picks random directions
+        val aiChoices = IntArray(5) { SecureRandom().nextInt(3) }
+        val aiLabels = aiChoices.map { when (it) { 0 -> "L"; 1 -> "C"; 2 -> "R"; else -> "?" } }
+        Log.i(TAG, "AI choices: $aiLabels")
+
+        // Step 1: Deploy contract (P1 creates match)
+        onProgress("Deploying match...")
+        val address = deployMatch(p1SecretKey, onProgress)
+        Log.i(TAG, "Match at: $address")
+
+        // Force dust resync — deploy consumed a UTXO, need fresh state for next tx
+        onProgress("Resyncing dust...")
+        midnightSdk.wallet.forceResyncDust()
+
+        // Wait for indexer to catch up with the deployed contract
+        onProgress("Waiting for indexer...")
+        var joined = false
+        for (attempt in 1..10) {
+            delay(2000)
+            try {
+                onProgress("AI joining match (attempt $attempt)...")
+                callCircuit(p2SecretKey, address, "joinMatch", arrayOf(COMMIT_DEADLINE_SECS), onProgress)
+                joined = true
+                break
+            } catch (e: Exception) {
+                if (e.message?.contains("not found") == true && attempt < 10) {
+                    Log.w(TAG, "Indexer not ready, retrying in 2s...")
+                    continue
+                }
+                throw e
+            }
+        }
+        if (!joined) throw IllegalStateException("Failed to join match after 10 attempts")
+        Log.i(TAG, "AI joined")
+
+        // Step 3: P1 commits
+        onProgress("Committing your choices...")
+        val p1Nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        commitChoices(p1SecretKey, address, playerChoices, p1Nonce, onProgress)
+        Log.i(TAG, "P1 committed")
+
+        // Step 4: P2 (AI) commits
+        onProgress("AI committing...")
+        val p2Nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        commitChoices(p2SecretKey, address, aiChoices, p2Nonce, onProgress)
+        Log.i(TAG, "P2 committed")
+
+        // Step 5: P1 reveals
+        onProgress("Revealing your choices...")
+        revealChoices(p1SecretKey, address, playerChoices, p1Nonce, onProgress)
+        Log.i(TAG, "P1 revealed")
+
+        // Step 6: P2 (AI) reveals — contract auto-resolves
+        onProgress("AI revealing...")
+        revealChoices(p2SecretKey, address, aiChoices, p2Nonce, onProgress)
+        Log.i(TAG, "P2 revealed — match resolved!")
+
+        // Build result
+        val result = MatchResult(
+            playerChoices = playerChoices,
+            aiChoices = aiChoices,
+            contractAddress = address,
+        )
+        lastResult = result
+
+        onProgress("Match complete!")
+        return result
+    }
+
+    // ── Contract operations ──
+
+    private suspend fun deployMatch(
+        secretKey: ByteArray,
+        onProgress: (String) -> Unit,
+    ): String {
+        val midnightSdk = requireNotNull(sdk)
         val verifierKeys = loadVerifierKeys()
 
-        val dummyChoice = byteArrayOf(0)
-        val dummyNonce = ByteArray(32)
-
-        val penaltyContract = MidnightContract.create(midnightSdk.config) {
-            name = "penalty"
-            contractJs = context.assets.open("runtime/penalty-contract.js")
-            witness("localSecretKey") { WitnessResult(null, secretKey.copyOf()) }
-            witness("localChoice0") { WitnessResult(null, dummyChoice.copyOf()) }
-            witness("localChoice1") { WitnessResult(null, dummyChoice.copyOf()) }
-            witness("localChoice2") { WitnessResult(null, dummyChoice.copyOf()) }
-            witness("localChoice3") { WitnessResult(null, dummyChoice.copyOf()) }
-            witness("localChoice4") { WitnessResult(null, dummyChoice.copyOf()) }
-            witness("localNonce") { WitnessResult(null, dummyNonce.copyOf()) }
-            initialPrivateState = mapOf(
-                "secretKey" to secretKey.copyOf(),
-            )
-            coinPublicKey = midnightSdk.coinPublicKey
-            circuitVerifierKeys = verifierKeys
-        }
-
-        val result = penaltyContract.deploy { stage ->
-            val label = stageLabel(stage)
-            Log.i(TAG, "Deploy: $label")
-            onProgress(label)
+        val contract = createContractHandle(midnightSdk, secretKey, address = null, verifierKeys = verifierKeys)
+        val result = contract.deploy { stage ->
+            onProgress(stageLabel(stage))
         }
 
         contractAddress = result.contractAddress
-        contract = penaltyContract
-        Log.i(TAG, "Match deployed at: ${result.contractAddress}")
-        onProgress("Match deployed!")
-
         return result.contractAddress
     }
 
-    /**
-     * Connect to an existing match (join).
-     */
-    suspend fun joinMatch(address: String, onProgress: (String) -> Unit) {
-        val midnightSdk = requireNotNull(sdk) { "Call initSdk first" }
-        contractAddress = address
+    private suspend fun callCircuit(
+        secretKey: ByteArray,
+        address: String,
+        circuitName: String,
+        args: Array<Any?> = emptyArray(),
+        onProgress: (String) -> Unit,
+    ) {
+        val midnightSdk = requireNotNull(sdk)
+        val contract = createContractHandle(midnightSdk, secretKey, address)
+        contract.call(circuitName, *args) { stage ->
+            onProgress(stageLabel(stage))
+        }
+    }
 
-        onProgress("Connecting to match...")
-        val penaltyContract = MidnightContract.create(midnightSdk.config) {
+    private suspend fun commitChoices(
+        secretKey: ByteArray,
+        address: String,
+        choices: IntArray,
+        nonce: ByteArray,
+        onProgress: (String) -> Unit,
+    ) {
+        val midnightSdk = requireNotNull(sdk)
+        val contract = createContractHandle(midnightSdk, secretKey, address, choices, nonce)
+        contract.call("commitBatch") { stage ->
+            onProgress(stageLabel(stage))
+        }
+    }
+
+    private suspend fun revealChoices(
+        secretKey: ByteArray,
+        address: String,
+        choices: IntArray,
+        nonce: ByteArray,
+        onProgress: (String) -> Unit,
+    ) {
+        val midnightSdk = requireNotNull(sdk)
+        val contract = createContractHandle(midnightSdk, secretKey, address, choices, nonce)
+        contract.call("revealBatch") { stage ->
+            onProgress(stageLabel(stage))
+        }
+    }
+
+    /**
+     * Creates a contract handle with the given identity and optional choices/nonce.
+     */
+    private fun createContractHandle(
+        midnightSdk: MidnightSdk,
+        secretKey: ByteArray,
+        address: String?,
+        choices: IntArray? = null,
+        nonce: ByteArray? = null,
+        verifierKeys: Map<String, ByteArray>? = null,
+    ): MidnightContract {
+        val dummyChoice = byteArrayOf(0)
+        val dummyNonce = ByteArray(32)
+
+        return MidnightContract.create(midnightSdk.config) {
             name = "penalty"
             contractJs = context.assets.open("runtime/penalty-contract.js")
-            this.address = address
+            if (address != null) this.address = address
+
             witness("localSecretKey") { WitnessResult(null, secretKey.copyOf()) }
+            witness("localChoice0") { WitnessResult(null, choices?.let { byteArrayOf(it[0].toByte()) } ?: dummyChoice) }
+            witness("localChoice1") { WitnessResult(null, choices?.let { byteArrayOf(it[1].toByte()) } ?: dummyChoice) }
+            witness("localChoice2") { WitnessResult(null, choices?.let { byteArrayOf(it[2].toByte()) } ?: dummyChoice) }
+            witness("localChoice3") { WitnessResult(null, choices?.let { byteArrayOf(it[3].toByte()) } ?: dummyChoice) }
+            witness("localChoice4") { WitnessResult(null, choices?.let { byteArrayOf(it[4].toByte()) } ?: dummyChoice) }
+            witness("localNonce") { WitnessResult(null, nonce ?: dummyNonce) }
+
             initialPrivateState = mapOf("secretKey" to secretKey.copyOf())
             coinPublicKey = midnightSdk.coinPublicKey
+            if (verifierKeys != null) circuitVerifierKeys = verifierKeys
         }
-        contract = penaltyContract
-
-        onProgress("Joining match...")
-        penaltyContract.call("joinMatch", COMMIT_DEADLINE_SECS) { stage ->
-            onProgress(stageLabel(stage))
-        }
-        Log.i(TAG, "Joined match at: $address")
-        onProgress("Joined match!")
-    }
-
-    /**
-     * Commit a batch of 5 choices to the contract.
-     *
-     * @param choices 5 direction values (0=left, 1=center, 2=right)
-     */
-    suspend fun commitBatch(choices: IntArray, onProgress: (String) -> Unit) {
-        require(choices.size == 5) { "Must provide exactly 5 choices" }
-        val penaltyContract = requireNotNull(contract) { "No active match" }
-        val midnightSdk = requireNotNull(sdk)
-
-        currentChoices = choices.copyOf()
-        val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }
-        currentNonce = nonce
-
-        Log.i(TAG, "Committing choices: ${choices.toList()}, nonce: ${nonce.take(8).joinToString("") { "%02x".format(it) }}...")
-
-        // Rebuild contract with choice + nonce witnesses for this commit
-        val commitContract = MidnightContract.create(midnightSdk.config) {
-            name = "penalty"
-            contractJs = context.assets.open("runtime/penalty-contract.js")
-            address = contractAddress
-            witness("localSecretKey") { WitnessResult(null, secretKey.copyOf()) }
-            witness("localChoice0") { WitnessResult(null, byteArrayOf(choices[0].toByte())) }
-            witness("localChoice1") { WitnessResult(null, byteArrayOf(choices[1].toByte())) }
-            witness("localChoice2") { WitnessResult(null, byteArrayOf(choices[2].toByte())) }
-            witness("localChoice3") { WitnessResult(null, byteArrayOf(choices[3].toByte())) }
-            witness("localChoice4") { WitnessResult(null, byteArrayOf(choices[4].toByte())) }
-            witness("localNonce") { WitnessResult(null, nonce) }
-            initialPrivateState = mapOf(
-                "secretKey" to secretKey.copyOf(),
-            )
-            coinPublicKey = midnightSdk.coinPublicKey
-        }
-
-        onProgress("Committing choices...")
-        commitContract.call("commitBatch") { stage ->
-            val label = stageLabel(stage)
-            Log.i(TAG, "Commit: $label")
-            onProgress(label)
-        }
-        Log.i(TAG, "Batch committed!")
-        onProgress("Choices committed on-chain!")
-    }
-
-    /**
-     * Reveal previously committed choices.
-     */
-    suspend fun revealBatch(onProgress: (String) -> Unit) {
-        val midnightSdk = requireNotNull(sdk)
-        val choices = requireNotNull(currentChoices) { "No choices to reveal" }
-        val nonce = requireNotNull(currentNonce) { "No nonce to reveal" }
-
-        val revealContract = MidnightContract.create(midnightSdk.config) {
-            name = "penalty"
-            contractJs = context.assets.open("runtime/penalty-contract.js")
-            address = contractAddress
-            witness("localSecretKey") { WitnessResult(null, secretKey.copyOf()) }
-            witness("localChoice0") { WitnessResult(null, byteArrayOf(choices[0].toByte())) }
-            witness("localChoice1") { WitnessResult(null, byteArrayOf(choices[1].toByte())) }
-            witness("localChoice2") { WitnessResult(null, byteArrayOf(choices[2].toByte())) }
-            witness("localChoice3") { WitnessResult(null, byteArrayOf(choices[3].toByte())) }
-            witness("localChoice4") { WitnessResult(null, byteArrayOf(choices[4].toByte())) }
-            witness("localNonce") { WitnessResult(null, nonce) }
-            initialPrivateState = mapOf(
-                "secretKey" to secretKey.copyOf(),
-            )
-            coinPublicKey = midnightSdk.coinPublicKey
-        }
-
-        onProgress("Revealing choices...")
-        revealContract.call("revealBatch") { stage ->
-            onProgress(stageLabel(stage))
-        }
-        Log.i(TAG, "Batch revealed!")
-        onProgress("Choices revealed!")
     }
 
     fun close() {
         sdk?.close()
         sdk = null
-        secretKey.fill(0)
+        p1SecretKey.fill(0)
+        p2SecretKey.fill(0)
     }
 
     // ── Internal ──
@@ -217,13 +244,15 @@ class MatchManager(
     }
 
     private fun installProvingKeys() {
-        val tempDir = File("/data/local/tmp/bboard_keys")
         val keysDir = File(context.filesDir, "proving_keys")
         keysDir.mkdirs()
+        File(keysDir, "zswap").mkdirs()
+        File(keysDir, "dust").mkdirs()
 
-        // Copy BLS params from temp (shared with BBoard)
+        // BLS params from bboard temp dir
+        val blsDir = File("/data/local/tmp/bboard_keys")
         listOf("bls_midnight_2p13", "bls_midnight_2p14", "bls_midnight_2p15").forEach { name ->
-            val src = File(tempDir, name)
+            val src = File(blsDir, name)
             val dst = File(keysDir, name)
             if (src.exists() && !dst.exists()) {
                 src.copyTo(dst)
@@ -231,23 +260,34 @@ class MatchManager(
             }
         }
 
-        // Copy penalty proving keys from assets
+        // Wallet keys (zswap/dust) from pre-pushed temp dir
+        val walletDir = File("/data/local/tmp/wallet_keys")
+        listOf("zswap/spend", "zswap/output", "zswap/sign", "dust/spend").forEach { base ->
+            listOf("prover", "verifier", "bzkir").forEach { ext ->
+                val src = File(walletDir, "$base.$ext")
+                val dst = File(keysDir, "$base.$ext")
+                if (src.exists() && !dst.exists()) {
+                    dst.parentFile?.mkdirs()
+                    src.copyTo(dst)
+                    Log.d(TAG, "Installed wallet key: $base.$ext")
+                }
+            }
+        }
+
+        // Contract proving keys from app assets
         val assetKeys = context.assets.list("keys") ?: emptyArray()
-        assetKeys.filter { it.endsWith(".prover") || it.endsWith(".bzkir") }.forEach { name ->
+        assetKeys.filter { it.endsWith(".prover") || it.endsWith(".bzkir") || it.endsWith(".verifier") }.forEach { name ->
             val dst = File(keysDir, name)
             if (!dst.exists()) {
                 context.assets.open("keys/$name").use { input ->
                     dst.outputStream().use { output -> input.copyTo(output) }
                 }
-                Log.d(TAG, "Installed key: $name")
+                Log.d(TAG, "Installed contract key: $name")
             }
         }
 
-        // Write version.txt
         val versionFile = File(keysDir, "version.txt")
-        if (!versionFile.exists()) {
-            versionFile.writeText("9")
-        }
+        if (!versionFile.exists()) versionFile.writeText("9")
     }
 
     private fun stageLabel(stage: ContractCallStage): String = when (stage) {
@@ -261,6 +301,40 @@ class MatchManager(
 
     companion object {
         private const val TAG = "MatchManager"
-        private const val COMMIT_DEADLINE_SECS = 300L // 5 minutes
+        private val COMMIT_DEADLINE_SECS = java.math.BigInteger.valueOf(300)
+    }
+}
+
+/**
+ * Result of a completed match — used to build the replay data for Unity.
+ */
+data class MatchResult(
+    val playerChoices: IntArray,
+    val aiChoices: IntArray,
+    val contractAddress: String,
+) {
+    /** Build round results for Unity replay. */
+    fun toRoundResults(): List<RoundResult> {
+        return (0 until 5).map { i ->
+            val isPlayerShooting = i % 2 == 0
+            val shootDir = if (isPlayerShooting) playerChoices[i] else aiChoices[i]
+            val keepDir = if (isPlayerShooting) aiChoices[i] else playerChoices[i]
+            val isGoal = shootDir != keepDir
+
+            RoundResult(
+                round = i + 1,
+                shooter = if (isPlayerShooting) "P1" else "P2",
+                shootDir = shootDir,
+                keepDir = keepDir,
+                result = if (isGoal) "goal" else "save",
+            )
+        }
+    }
+
+    fun scores(): Pair<Int, Int> {
+        val rounds = toRoundResults()
+        val p1Goals = rounds.count { it.shooter == "P1" && it.result == "goal" }
+        val p2Goals = rounds.count { it.shooter == "P2" && it.result == "goal" }
+        return p1Goals to p2Goals
     }
 }
