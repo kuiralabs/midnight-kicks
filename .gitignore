@@ -17,5 +17,17 @@ dist/
 contract/src/managed/
 contract/midnight-level-db/
 
+# Unity generated (only Assets/, Packages/, ProjectSettings/ are source)
+unity/Library/
+unity/Temp/
+unity/Logs/
+unity/UserSettings/
+unity/build/
+unity/*.csproj
+unity/*.slnx
+unity/*.apk
+unity/*_BackUpThisFolder_ButDontShipItWithYourGame/
+unity/*_BurstDebugInformation_DoNotShip/
+
 # OS
 .DS_Store
