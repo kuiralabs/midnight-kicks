@@ -29,5 +29,9 @@ unity/*.apk
 unity/*_BackUpThisFolder_ButDontShipItWithYourGame/
 unity/*_BurstDebugInformation_DoNotShip/
 
+# Unity AI Assistant scratch cache (regenerates every use, noisy diffs)
+unity/Assets/AI Toolkit/Temp/
+unity/Assets/AI Toolkit/Temp.meta
+
 # OS
 .DS_Store

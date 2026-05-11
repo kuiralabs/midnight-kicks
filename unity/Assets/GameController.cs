@@ -44,14 +44,18 @@ public class GameController : MonoBehaviour
     private int[] choices = new int[5];
     private int currentChoice = 0;
     private bool inChoicePhase = false;
-    private bool waitingForMessage = true; // Start in waiting state
+    private bool waitingForMessage = true;
     private string currentRound = "regulation";
     private string playerRole = "shooter";
 
     // Replay state
     private bool inReplay = false;
-    private List<RoundData> replayRounds = new List<RoundData>();
-    private int replayIndex = 0;
+    private ShotManager shotManager;
+
+    void Start()
+    {
+        EnsureShotManager();
+    }
 
     /// <summary>
     /// Entry point for messages from Kotlin.
@@ -95,13 +99,13 @@ public class GameController : MonoBehaviour
         choices = new int[5];
         inChoicePhase = true;
         waitingForMessage = false;
+        inReplay = false;
 
         Debug.Log($"[GameController] Choice phase: round={currentRound}, role={playerRole}");
     }
 
     void OnGUI()
     {
-        // Waiting for Kotlin to send a message
         if (!inChoicePhase && !inReplay)
         {
             var style = new GUIStyle(GUI.skin.label);
@@ -119,7 +123,6 @@ public class GameController : MonoBehaviour
         float btnHeight = 80f;
         float y = Screen.height - 200f;
 
-        // Show current round number
         var labelStyle = new GUIStyle(GUI.skin.label);
         labelStyle.fontSize = 20;
         labelStyle.alignment = TextAnchor.MiddleCenter;
@@ -139,7 +142,6 @@ public class GameController : MonoBehaviour
         if (GUI.Button(new Rect(Screen.width / 2 + btnWidth / 2, y, btnWidth, btnHeight), "RIGHT"))
             MakeChoice(2);
 
-        // Show choices made so far
         string choicesSoFar = "";
         for (int i = 0; i < currentChoice; i++)
         {
@@ -174,32 +176,74 @@ public class GameController : MonoBehaviour
 
     // ── Replay ──
 
+    private void EnsureShotManager()
+    {
+        if (shotManager != null) return;
+
+        shotManager = FindFirstObjectByType<ShotManager>();
+        if (shotManager == null)
+        {
+            var go = new GameObject("ShotManager");
+            shotManager = go.AddComponent<ShotManager>();
+            shotManager.ballKicker = FindFirstObjectByType<BallKicker>();
+            shotManager.keeper = FindFirstObjectByType<Keeper>();
+            Debug.Log("[GameController] Auto-created ShotManager");
+        }
+    }
+
     private void StartReplay(string json)
     {
-        // Parse rounds manually (JsonUtility doesn't handle nested arrays well)
         Debug.Log($"[GameController] Starting replay");
+        var msg = JsonUtility.FromJson<ReplayMessage>(json);
+
         inReplay = true;
-        // TODO: parse rounds from JSON, animate each round
-        // For now, just send replayComplete after a delay
-        StartCoroutine(SimulateReplay());
+        inChoicePhase = false;
+
+        EnsureShotManager();
+
+        if (shotManager != null)
+        {
+            StartCoroutine(shotManager.PlayReplay(msg.rounds, OnReplayComplete));
+        }
+        else
+        {
+            Debug.LogError("[GameController] ShotManager not found even after auto-setup!");
+            StartCoroutine(SimulateReplay());
+        }
     }
 
     private void StartSuddenDeathReplay(string json)
     {
         Debug.Log($"[GameController] Starting sudden death replay");
+        var msg = JsonUtility.FromJson<ReplayMessage>(json);
+
         inReplay = true;
-        StartCoroutine(SimulateReplay());
+        inChoicePhase = false;
+
+        EnsureShotManager();
+
+        if (shotManager != null)
+        {
+            StartCoroutine(shotManager.PlayReplay(msg.rounds, OnReplayComplete));
+        }
+        else
+        {
+            Debug.LogError("[GameController] ShotManager not found even after auto-setup!");
+            StartCoroutine(SimulateReplay());
+        }
+    }
+
+    private void OnReplayComplete()
+    {
+        inReplay = false;
+        string json = "{\"type\":\"replayComplete\"}";
+        SendToKotlin(json);
     }
 
     private IEnumerator SimulateReplay()
     {
-        // Placeholder: wait 3 seconds then signal complete
-        // TODO: animate each round with ball physics
         yield return new WaitForSeconds(3f);
-        inReplay = false;
-
-        string json = "{\"type\":\"replayComplete\"}";
-        SendToKotlin(json);
+        OnReplayComplete();
     }
 
     // ── Kotlin Communication ──
@@ -247,6 +291,13 @@ public class StatusMessage
 {
     public string type;
     public string message;
+}
+
+[System.Serializable]
+public class ReplayMessage
+{
+    public string type;
+    public List<RoundData> rounds;
 }
 
 [System.Serializable]

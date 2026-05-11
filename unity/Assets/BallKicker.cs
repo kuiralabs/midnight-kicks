@@ -3,47 +3,52 @@
 
   public class BallKicker : MonoBehaviour                                                                                                 
   {              
-      public float kickForce = 12f;                                                                                                       
+      public float kickForce = 18f;                                                                                                       
                                                                                                                                         
       private Rigidbody rb;
       private bool hasKicked = false;
 
-      void Start()
+      void Awake()
       {
           rb = GetComponent<Rigidbody>();
+          if (rb != null) rb.mass = 0.45f;
       }
-                                                                                                                                          
-      void OnGUI()
-      {                                                                                                                                   
-          if (hasKicked) return;                                                                                                        
 
-          float btnWidth = Screen.width / 4f;
-          float btnHeight = 80f;
-          float y = Screen.height - 120f;
-                                                                                                                                          
-          if (GUI.Button(new Rect(Screen.width/2 - btnWidth*1.5f, y, btnWidth, btnHeight), "LEFT"))
-              Kick(new Vector3(-1.5f, 1.5f, 10f));                                                                                        
-                                                                                                                                          
-          if (GUI.Button(new Rect(Screen.width/2 - btnWidth/2, y, btnWidth, btnHeight), "CENTER"))
-              Kick(new Vector3(0, 1.5f, 10f));                                                                                            
-                                                                                                                                        
-          if (GUI.Button(new Rect(Screen.width/2 + btnWidth/2, y, btnWidth, btnHeight), "RIGHT"))                                         
-              Kick(new Vector3(1.5f, 1.5f, 10f));
-      }                                                                                                                                   
-                                                                                                                                        
+      void Start()
+      {
+          if (rb == null) rb = GetComponent<Rigidbody>();
+      }
+
+      public void KickTo(int directionIndex)
+      {
+          if (rb == null) rb = GetComponent<Rigidbody>();
+          // 0: Left, 1: Center, 2: Right
+          float xOffset = (directionIndex - 1) * 2.0f;
+          Vector3 target = new Vector3(xOffset, 1.8f, 10f);
+          Kick(target);
+      }
+
+      public void ResetBall()
+      {
+          CancelInvoke("Reset");
+          Reset();
+      }
+
       void Kick(Vector3 target)                                                                                                           
       {          
+          if (rb == null) rb = GetComponent<Rigidbody>();
           Vector3 direction = (target - transform.position).normalized;                                                                   
           rb.AddForce(direction * kickForce, ForceMode.Impulse);                                                                        
-          hasKicked = true;
+hasKicked = true;
           Invoke("Reset", 3f);
       }                                                                                                                                   
-                 
+               
       void Reset()                                                                                                                        
       {                                                                                                                                 
+          if (rb == null) rb = GetComponent<Rigidbody>();
           rb.linearVelocity = Vector3.zero;
-          rb.angularVelocity = Vector3.zero;
+rb.angularVelocity = Vector3.zero;
           transform.position = new Vector3(0, 0.5f, 0);
           hasKicked = false;                                                                                                              
-      }          
+      }
   }      
