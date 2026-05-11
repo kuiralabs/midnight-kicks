@@ -203,11 +203,12 @@ public class GameController : MonoBehaviour
 
         if (shotManager != null)
         {
+            Debug.Log("[GameController] Dispatching to ShotManager.PlayReplay");
             StartCoroutine(shotManager.PlayReplay(msg.rounds, OnReplayComplete));
         }
         else
         {
-            Debug.LogError("[GameController] ShotManager not found even after auto-setup!");
+            Debug.LogError("[GameController] ShotManager not found even after auto-setup — falling back to SimulateReplay");
             StartCoroutine(SimulateReplay());
         }
     }
@@ -224,11 +225,12 @@ public class GameController : MonoBehaviour
 
         if (shotManager != null)
         {
+            Debug.Log("[GameController] Dispatching to ShotManager.PlayReplay (SD)");
             StartCoroutine(shotManager.PlayReplay(msg.rounds, OnReplayComplete));
         }
         else
         {
-            Debug.LogError("[GameController] ShotManager not found even after auto-setup!");
+            Debug.LogError("[GameController] ShotManager not found even after auto-setup — falling back to SimulateReplay (SD)");
             StartCoroutine(SimulateReplay());
         }
     }

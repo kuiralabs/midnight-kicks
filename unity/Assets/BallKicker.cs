@@ -3,8 +3,13 @@
 
   public class BallKicker : MonoBehaviour                                                                                                 
   {              
-      public float kickForce = 18f;                                                                                                       
-                                                                                                                                        
+      public float kickForce = 18f;
+      // Ball rests just in front of where the shooter's run-up ends so the
+      // kick animation's foot extension naturally meets the ball. ShotManager
+      // ends the run at z=-0.3; foot extends ~0.5m forward, so the ball
+      // sits at z=0.2 to be where the foot lands.
+      public Vector3 restPosition = new Vector3(0f, 0.11f, 0.2f);
+
       private Rigidbody rb;
       private bool hasKicked = false;
 
@@ -43,12 +48,12 @@ hasKicked = true;
           Invoke("Reset", 3f);
       }                                                                                                                                   
                
-      void Reset()                                                                                                                        
-      {                                                                                                                                 
+      void Reset()
+      {
           if (rb == null) rb = GetComponent<Rigidbody>();
           rb.linearVelocity = Vector3.zero;
-rb.angularVelocity = Vector3.zero;
-          transform.position = new Vector3(0, 0.11f, 0);
-          hasKicked = false;                                                                                                              
+          rb.angularVelocity = Vector3.zero;
+          transform.position = restPosition;
+          hasKicked = false;
       }
   }      
