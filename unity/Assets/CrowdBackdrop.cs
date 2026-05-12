@@ -1,47 +1,45 @@
 using UnityEngine;
 
 /// <summary>
-/// Builds a procedural cylindrical stadium ring around the pitch and textures
-/// it with a stadium-stand image. The texture is loaded from
-/// <c>Assets/Resources/StadiumCrowd.(png|jpg)</c> at runtime.
+/// Curved crowd backdrop placed behind the goal — not a full cylinder.
 ///
-/// Drop any tileable stadium / tribune / crowd texture at that path and
-/// Unity will pick it up automatically. If the texture is missing the script
-/// logs a warning and leaves the ring untextured (visible as a flat tinted
-/// cylinder so the absence is obvious).
+/// The full ring was wasteful: half of it sat behind the camera, and the
+/// single-wrap texture had to stretch around the whole field which made
+/// each spectator tiny. A curved wall behind the goal gives us:
+///
+///   - Tiled texture (3× horizontal) so each face / shirt is bigger
+///   - One seamless region instead of a forced wrap seam
+///   - 7 quads instead of 36, fewer draw calls
+///   - All visible from the gameplay camera, no wasted geometry
+///
+/// Drop a tileable stadium-crowd texture at
+/// <c>Assets/Resources/StadiumCrowd.(png|jpg)</c>. The script tiles it
+/// horizontally across the curved wall.
 ///
 /// Self-attaches at scene load. No scene edits required.
-///
-/// Recommended sources (CC0 / free):
-///   - ambientcg.com (search "stadium", "tribune")
-///   - polyhaven.com (search "stadium")
-///   - opengameart.org
 /// </summary>
 public class CrowdBackdrop : MonoBehaviour
 {
-    // Resources path — no extension, no leading "Resources/".
     private const string CrowdTextureResource = "StadiumCrowd";
 
-    // ── Ring geometry ──
-    private const int PanelCount = 36;
-    private const float Radius = 45f;
-    private const float PanelHeight = 22f;
+    // ── Wall geometry ──
+    // The wall is a gentle arc spanning ~120° centered behind the goal.
+    // 7 panels gives enough curvature to feel wrapping without polygon waste.
+    private const int PanelCount = 7;
+    private const float ArcSpanDegrees = 120f;       // total horizontal sweep
+    private const float Radius = 30f;                // distance from center to wall
+    private const float WallHeight = 30f;            // generous so it fills FOV
     private const float BaseY = 0f;
-    private static readonly Vector3 RingCenter = new Vector3(0f, 0f, 4f);
+    // Center of the arc — placed behind the goal at z=9.5 + ~20m, on x=0.
+    // Camera at (-4, 1.7, -3) looking toward +Z sees this directly forward.
+    private static readonly Vector3 ArcCenter = new Vector3(0f, 0f, 30f);
 
-    // How many times the texture tiles around the ring. At 1.0 the source
-    // texture wraps the ring exactly once — uses every pixel, no repetition.
-    // The downside is a single visible seam where U=0 meets U=1; we offset
-    // U so that seam sits at the back of the ring (behind the gameplay
-    // camera) where it never enters the view.
-    private const float TilingU = 1f;
+    // ── Texture tiling ──
+    // Tile multiple times so the source image's detail is preserved per
+    // spectator rather than stretched flat across a 60m wide wall.
+    private const float TilingU = 3f;
     private const float TilingV = 1f;
-    // 0.75 puts the seam at the -Z side of the ring (behind a camera that
-    // looks toward +Z). Panel angle 0 = +X; angle 270° = -Z = 0.75 around.
-    private const float USeamOffset = 0.75f;
 
-    // Fallback color when no texture is found — drab dark blue so the missing
-    // texture is unambiguous rather than rendering as magenta or white.
     private static readonly Color FallbackTint = new Color(0.22f, 0.26f, 0.32f, 1f);
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
@@ -59,49 +57,55 @@ public class CrowdBackdrop : MonoBehaviour
         if (crowdTex == null)
         {
             Debug.LogWarning(
-                $"[CrowdBackdrop] No Texture2D found at Resources/{CrowdTextureResource}. " +
-                "Drop a tileable stadium texture (PNG or JPG) at " +
-                "unity/Assets/Resources/StadiumCrowd.png. Falling back to flat tinted ring.");
+                $"[CrowdBackdrop] No Texture2D at Resources/{CrowdTextureResource}. " +
+                "Drop a tileable stadium texture at unity/Assets/Resources/StadiumCrowd.png. " +
+                "Falling back to flat tinted wall.");
         }
-
-        BuildRing(crowdTex);
+        BuildWall(crowdTex);
     }
 
-    private void BuildRing(Texture2D crowdTex)
+    private void BuildWall(Texture2D crowdTex)
     {
-        var mesh = new Mesh { name = "CrowdRing" };
+        var mesh = new Mesh { name = "CrowdWall" };
         const int vertsPerPanel = 4;
         int vertCount = PanelCount * vertsPerPanel;
         var vertices = new Vector3[vertCount];
         var uvs = new Vector2[vertCount];
         var triangles = new int[PanelCount * 6];
 
+        // The arc faces the field center (which sits at -Z direction from
+        // ArcCenter — the goal and field are in -Z relative to it). We build
+        // the arc around an axis pointing back toward the field.
+        float arcSpan = ArcSpanDegrees * Mathf.Deg2Rad;
+        float arcStart = Mathf.PI - arcSpan * 0.5f;   // centered on -Z direction
+
         for (int i = 0; i < PanelCount; i++)
         {
-            float a0 = (i / (float)PanelCount) * Mathf.PI * 2f;
-            float a1 = ((i + 1) / (float)PanelCount) * Mathf.PI * 2f;
-            // U tiles TilingU times around the ring so the source texture
-            // doesn't get stretched flat across 360°.
-            float u0 = ((i / (float)PanelCount) + USeamOffset) * TilingU;
-            float u1 = (((i + 1) / (float)PanelCount) + USeamOffset) * TilingU;
+            float t0 = i / (float)PanelCount;
+            float t1 = (i + 1) / (float)PanelCount;
+            float a0 = arcStart + t0 * arcSpan;
+            float a1 = arcStart + t1 * arcSpan;
 
+            // Points on the arc relative to ArcCenter.
             Vector3 left  = new Vector3(Mathf.Cos(a0) * Radius, BaseY, Mathf.Sin(a0) * Radius);
             Vector3 right = new Vector3(Mathf.Cos(a1) * Radius, BaseY, Mathf.Sin(a1) * Radius);
-            Vector3 up = Vector3.up * PanelHeight;
+            Vector3 up = Vector3.up * WallHeight;
 
             int v = i * vertsPerPanel;
-            vertices[v + 0] = left;          uvs[v + 0] = new Vector2(u0, 0f);
-            vertices[v + 1] = right;         uvs[v + 1] = new Vector2(u1, 0f);
-            vertices[v + 2] = right + up;    uvs[v + 2] = new Vector2(u1, TilingV);
-            vertices[v + 3] = left + up;     uvs[v + 3] = new Vector2(u0, TilingV);
+            vertices[v + 0] = left;          uvs[v + 0] = new Vector2(t0 * TilingU, 0f);
+            vertices[v + 1] = right;         uvs[v + 1] = new Vector2(t1 * TilingU, 0f);
+            vertices[v + 2] = right + up;    uvs[v + 2] = new Vector2(t1 * TilingU, TilingV);
+            vertices[v + 3] = left + up;     uvs[v + 3] = new Vector2(t0 * TilingU, TilingV);
 
-            // Inside-facing winding so the camera (which sits inside the ring)
-            // sees the texture. _Cull = 0 on the material draws both sides
-            // anyway, but starting with the right winding helps the shader
-            // sample lighting normals consistently.
-            int t = i * 6;
-            triangles[t + 0] = v + 0; triangles[t + 1] = v + 2; triangles[t + 2] = v + 1;
-            triangles[t + 3] = v + 0; triangles[t + 4] = v + 3; triangles[t + 5] = v + 2;
+            // Inside-facing winding (camera is on the -Z side of the wall,
+            // looking +Z toward it).
+            int tIdx = i * 6;
+            triangles[tIdx + 0] = v + 0;
+            triangles[tIdx + 1] = v + 2;
+            triangles[tIdx + 2] = v + 1;
+            triangles[tIdx + 3] = v + 0;
+            triangles[tIdx + 4] = v + 3;
+            triangles[tIdx + 5] = v + 2;
         }
 
         mesh.vertices = vertices;
@@ -110,9 +114,9 @@ public class CrowdBackdrop : MonoBehaviour
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
 
-        var child = new GameObject("CrowdRing");
+        var child = new GameObject("CrowdWall");
         child.transform.SetParent(transform, worldPositionStays: false);
-        child.transform.position = RingCenter;
+        child.transform.position = ArcCenter;
 
         var mf = child.AddComponent<MeshFilter>();
         mf.sharedMesh = mesh;
@@ -121,7 +125,7 @@ public class CrowdBackdrop : MonoBehaviour
         var shader = Shader.Find("Universal Render Pipeline/Unlit")
                   ?? Shader.Find("Unlit/Texture")
                   ?? Shader.Find("Sprites/Default");
-        var mat = new Material(shader) { name = "Crowd_Stadium" };
+        var mat = new Material(shader) { name = "Crowd_Wall" };
         if (crowdTex != null)
         {
             crowdTex.wrapMode = TextureWrapMode.Repeat;

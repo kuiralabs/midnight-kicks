@@ -21,23 +21,25 @@ using UnityEngine;
 public class StadiumFloodlights : MonoBehaviour
 {
     // ── Sun (the scene's existing Directional Light, re-tinted) ──
-    // Slight warm bias to read as midday rather than overcast.
-    private static readonly Color SunColor = new Color(1.00f, 0.96f, 0.90f, 1f);
-    private const float SunIntensity = 1.4f;
-    private static readonly Vector3 SunEulerAngles = new Vector3(50f, -30f, 0f); // afternoon angle
+    private static readonly Color SunColor = new Color(1.00f, 0.97f, 0.92f, 1f);
+    private const float SunIntensity = 1.8f;          // bumped — was 1.4
+    private const float ShadowDistanceMeters = 25f;   // shadows only cast within 25m of camera
+                                                      // (default ~150 was projecting a long shadow
+                                                      // of the shooter onto the crowd ring)
+    private static readonly Vector3 SunEulerAngles = new Vector3(70f, 25f, 0f); // higher in sky
 
-    // ── Ambient ──
-    // Trilight gradient so the field surface and the crowd ring pick up
-    // slightly different tones. Bright enough that nothing is in shadow.
-    private static readonly Color AmbientSkyColor    = new Color(0.55f, 0.70f, 0.95f, 1f);
-    private static readonly Color AmbientEquatorColor = new Color(0.55f, 0.60f, 0.65f, 1f);
-    private static readonly Color AmbientGroundColor = new Color(0.30f, 0.34f, 0.28f, 1f);
+    // ── Ambient (Color mode for predictability — Trilight was being
+    //    interpreted unevenly by URP across surfaces) ──
+    private static readonly Color AmbientColor = new Color(0.65f, 0.70f, 0.75f, 1f);
+    private const float AmbientIntensity = 1.4f;
 
-    // ── Sky (procedural skybox) ──
-    private static readonly Color SkyTint = new Color(0.55f, 0.75f, 1.00f, 1f);
-    private static readonly Color SkyGroundColor = new Color(0.45f, 0.55f, 0.55f, 1f);
-    private const float SkyAtmosphereThickness = 1.0f;
-    private const float SkyExposure = 1.3f;
+    // ── Sky (procedural skybox, NO visible sun disc) ──
+    // _SunSize = 0 prevents the bright sun disc from blowing out the view
+    // through the goal opening. Sky still renders as a soft blue gradient.
+    private static readonly Color SkyTint = new Color(0.60f, 0.78f, 1.00f, 1f);
+    private static readonly Color SkyGroundColor = new Color(0.48f, 0.55f, 0.58f, 1f);
+    private const float SkyAtmosphereThickness = 0.8f;
+    private const float SkyExposure = 0.75f;          // reduced — was 1.3, blew out the center
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void AutoCreate()
@@ -69,7 +71,12 @@ public class StadiumFloodlights : MonoBehaviour
         directional.intensity = SunIntensity;
         directional.transform.rotation = Quaternion.Euler(SunEulerAngles);
         directional.shadows = LightShadows.Soft;
-        directional.shadowStrength = 0.7f;
+        directional.shadowStrength = 0.6f;
+        directional.flare = null;            // no lens flare halo blob
+
+        // Limit shadow draw distance so the directional doesn't project a
+        // long character shadow onto the crowd backdrop in the distance.
+        QualitySettings.shadowDistance = ShadowDistanceMeters;
     }
 
     private static Light FindDirectionalLight()
@@ -84,11 +91,11 @@ public class StadiumFloodlights : MonoBehaviour
 
     private static void SetAmbientToDay()
     {
-        RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Trilight;
-        RenderSettings.ambientSkyColor = AmbientSkyColor;
-        RenderSettings.ambientEquatorColor = AmbientEquatorColor;
-        RenderSettings.ambientGroundColor = AmbientGroundColor;
-        RenderSettings.ambientIntensity = 1f;
+        // Plain Color mode — predictable across all surfaces. Trilight was
+        // producing inconsistent shading on the Mixamo character materials.
+        RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
+        RenderSettings.ambientLight = AmbientColor;
+        RenderSettings.ambientIntensity = AmbientIntensity;
     }
 
     private static void DisableFog()
@@ -116,8 +123,10 @@ public class StadiumFloodlights : MonoBehaviour
         skyMat.SetColor("_GroundColor", SkyGroundColor);
         skyMat.SetFloat("_AtmosphereThickness", SkyAtmosphereThickness);
         skyMat.SetFloat("_Exposure", SkyExposure);
-        skyMat.SetFloat("_SunSize", 0.04f);
-        skyMat.SetFloat("_SunSizeConvergence", 5f);
+        // _SunSize = 0 hides the sun disc entirely — was causing the bright
+        // white oval bleeding through the goal opening.
+        skyMat.SetFloat("_SunSize", 0f);
+        skyMat.SetFloat("_SunSizeConvergence", 0f);
 
         RenderSettings.skybox = skyMat;
         cam.clearFlags = CameraClearFlags.Skybox;
