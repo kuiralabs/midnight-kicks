@@ -29,10 +29,16 @@ public class CrowdBackdrop : MonoBehaviour
     private const float BaseY = 0f;
     private static readonly Vector3 RingCenter = new Vector3(0f, 0f, 4f);
 
-    // How many times the texture tiles around the ring. Adjust if the texture
-    // shows obvious repetition or if the people-density looks wrong.
-    private const float TilingU = 2f;
+    // How many times the texture tiles around the ring. At 1.0 the source
+    // texture wraps the ring exactly once — uses every pixel, no repetition.
+    // The downside is a single visible seam where U=0 meets U=1; we offset
+    // U so that seam sits at the back of the ring (behind the gameplay
+    // camera) where it never enters the view.
+    private const float TilingU = 1f;
     private const float TilingV = 1f;
+    // 0.75 puts the seam at the -Z side of the ring (behind a camera that
+    // looks toward +Z). Panel angle 0 = +X; angle 270° = -Z = 0.75 around.
+    private const float USeamOffset = 0.75f;
 
     // Fallback color when no texture is found — drab dark blue so the missing
     // texture is unambiguous rather than rendering as magenta or white.
@@ -76,8 +82,8 @@ public class CrowdBackdrop : MonoBehaviour
             float a1 = ((i + 1) / (float)PanelCount) * Mathf.PI * 2f;
             // U tiles TilingU times around the ring so the source texture
             // doesn't get stretched flat across 360°.
-            float u0 = (i / (float)PanelCount) * TilingU;
-            float u1 = ((i + 1) / (float)PanelCount) * TilingU;
+            float u0 = ((i / (float)PanelCount) + USeamOffset) * TilingU;
+            float u1 = (((i + 1) / (float)PanelCount) + USeamOffset) * TilingU;
 
             Vector3 left  = new Vector3(Mathf.Cos(a0) * Radius, BaseY, Mathf.Sin(a0) * Radius);
             Vector3 right = new Vector3(Mathf.Cos(a1) * Radius, BaseY, Mathf.Sin(a1) * Radius);
