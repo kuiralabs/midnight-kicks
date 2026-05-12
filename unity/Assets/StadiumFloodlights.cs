@@ -25,14 +25,24 @@ public class StadiumFloodlights : MonoBehaviour
     };
 
     // Warm-white floodlight color, slightly desaturated.
-    private static readonly Color FloodlightColor = new Color(1.0f, 0.96f, 0.86f, 1f);
-    private const float FloodlightIntensity = 2.5f;
-    private const float FloodlightRange = 60f;
-    private const float FloodlightSpotAngle = 65f;
+    private static readonly Color FloodlightColor = new Color(1.0f, 0.97f, 0.88f, 1f);
+    private const float FloodlightIntensity = 8f;     // Stadium lights are bright — make them feel it
+    private const float FloodlightRange = 90f;
+    private const float FloodlightSpotAngle = 100f;   // wide enough that the four cones overlap on the pitch
 
-    // Moonlit override for the scene's existing Directional Light.
-    private static readonly Color MoonlightColor = new Color(0.45f, 0.55f, 0.75f, 1f);
-    private const float MoonlightIntensity = 0.35f;
+    // Moonlit override for the scene's existing Directional Light. Keep a
+    // gentle fill — at near-zero you lose all the model surface shading.
+    private static readonly Color MoonlightColor = new Color(0.55f, 0.65f, 0.85f, 1f);
+    private const float MoonlightIntensity = 0.8f;
+
+    // Ambient: low enough to read as night, high enough that nothing is true
+    // black. Skybox-gradient via RenderSettings.ambientSkyColor below.
+    private static readonly Color AmbientSkyColor    = new Color(0.10f, 0.13f, 0.20f, 1f);
+    private static readonly Color AmbientEquatorColor = new Color(0.08f, 0.10f, 0.14f, 1f);
+    private static readonly Color AmbientGroundColor = new Color(0.04f, 0.06f, 0.05f, 1f);
+    // Camera background — replace the default black with a dark blue so the
+    // void around the crowd ring reads as deep night sky.
+    private static readonly Color NightSkyColor = new Color(0.03f, 0.05f, 0.10f, 1f);
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void AutoCreate()
@@ -48,6 +58,7 @@ public class StadiumFloodlights : MonoBehaviour
         SpawnFloodlights();
         TintDirectionalLightToNight();
         SetAmbientToNight();
+        TintCameraBackground();
     }
 
     private void SpawnFloodlights()
@@ -96,7 +107,24 @@ public class StadiumFloodlights : MonoBehaviour
 
     private static void SetAmbientToNight()
     {
-        // Drop ambient so floodlight pools read against the dark surround.
-        RenderSettings.ambientLight = new Color(0.06f, 0.08f, 0.12f, 1f);
+        // Use a three-color gradient so the field surface and the crowd ring
+        // pick up slightly different ambient tones (sky tint above, grass tint
+        // below). This makes the void around the floodlight pools feel like
+        // night atmosphere rather than dead black.
+        RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Trilight;
+        RenderSettings.ambientSkyColor = AmbientSkyColor;
+        RenderSettings.ambientEquatorColor = AmbientEquatorColor;
+        RenderSettings.ambientGroundColor = AmbientGroundColor;
+        RenderSettings.ambientIntensity = 1f;
+    }
+
+    private static void TintCameraBackground()
+    {
+        // Camera defaults to clear-to-black on URP. Replace with deep night
+        // blue so the area above the crowd ring reads as sky.
+        var cam = Camera.main;
+        if (cam == null) return;
+        cam.clearFlags = CameraClearFlags.SolidColor;
+        cam.backgroundColor = NightSkyColor;
     }
 }
