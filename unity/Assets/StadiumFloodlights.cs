@@ -13,13 +13,15 @@ public class StadiumFloodlights : MonoBehaviour
     // Field center the floodlights aim at (matches camera LookAt target).
     private static readonly Vector3 FieldCenter = new Vector3(0f, 0f, 4f);
 
-    // Four corner positions. Y high enough to read as stadium-tower lights.
+    // Four corner tower positions, set just outside the 50×40m playing surface
+    // (GrassPitch enlarges Field to scale (5,1,4); pitch bounds X=±25, Z=-20..+20).
+    // Y high enough to read as stadium-tower lights.
     private static readonly Vector3[] TowerPositions = new Vector3[]
     {
-        new Vector3(-15f, 18f, -8f),
-        new Vector3( 15f, 18f, -8f),
-        new Vector3(-15f, 18f, 16f),
-        new Vector3( 15f, 18f, 16f),
+        new Vector3(-30f, 22f, -25f),
+        new Vector3( 30f, 22f, -25f),
+        new Vector3(-30f, 22f,  25f),
+        new Vector3( 30f, 22f,  25f),
     };
 
     // Warm-white floodlight color, slightly desaturated.

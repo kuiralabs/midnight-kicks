@@ -11,20 +11,22 @@ using UnityEngine;
 /// </summary>
 public class PitchMarkings : MonoBehaviour
 {
-    // FIFA dimensions are 16.5m × 40.32m penalty box; our playable half is
-    // only ~13m deep (shooter z=-3.5 → goal z=9.5) so we shrink proportionally.
-    private const float PenaltyAreaWidth = 13f;
-    private const float PenaltyAreaDepth = 8f;
-    private const float GoalAreaWidth = 6f;
-    private const float GoalAreaDepth = 3f;
+    // True FIFA dimensions. GrassPitch resizes the Field plane to 50×40m to
+    // accommodate the 40.32m penalty-area width and the penalty arc that
+    // extends 9.15m toward the shooter from the penalty spot.
+    private const float PenaltyAreaWidth = 40.32f;
+    private const float PenaltyAreaDepth = 16.5f;
+    private const float GoalAreaWidth = 18.32f;
+    private const float GoalAreaDepth = 5.5f;
 
-    private const float PenaltySpotZ = 2f;            // distance from goal line toward shooter
-    private const float PenaltyArcRadius = 4f;
-    private const int PenaltyArcSegments = 24;
+    private const float PenaltySpotDistance = 11f;    // FIFA: 11m from goal line
+    private const float PenaltyArcRadius = 9.15f;     // FIFA: 9.15m
+    private const int PenaltyArcSegments = 48;
+    private const float PenaltySpotMarkerRadius = 0.11f; // 0.22m diameter spot
 
     private const float GoalLineZ = 9.5f;             // matches Keeper z position
     private const float LineHeight = 0.02f;           // above field to avoid z-fighting
-    private const float LineWidth = 0.08f;
+    private const float LineWidth = 0.12f;            // slightly wider — FIFA chalk lines are ~12cm
 
     private static readonly Color LineColor = new Color(0.95f, 0.95f, 0.95f, 1f);
 
@@ -84,32 +86,43 @@ public class PitchMarkings : MonoBehaviour
 
     private void DrawPenaltySpot()
     {
-        const int segments = 16;
-        const float radius = 0.15f;
+        const int segments = 20;
         var points = new Vector3[segments + 1];
-        float spotZ = GoalLineZ - PenaltySpotZ;
+        float spotZ = GoalLineZ - PenaltySpotDistance;
         for (int i = 0; i <= segments; i++)
         {
             float angle = (i / (float)segments) * Mathf.PI * 2f;
-            points[i] = new Vector3(Mathf.Cos(angle) * radius, LineHeight, spotZ + Mathf.Sin(angle) * radius);
+            points[i] = new Vector3(
+                Mathf.Cos(angle) * PenaltySpotMarkerRadius,
+                LineHeight,
+                spotZ + Mathf.Sin(angle) * PenaltySpotMarkerRadius);
         }
         DrawLineLoop("PenaltySpot", points, closed: false);
     }
 
     private void DrawPenaltyArc()
     {
-        // Arc opens away from goal (toward shooter). Half-circle around the spot.
+        // The penalty arc is the portion of a 9.15m-radius circle (centered on
+        // the penalty spot) that lies OUTSIDE the penalty area. Geometrically:
+        // distance from spot to the penalty-area front line is
+        // (PenaltyAreaDepth - PenaltySpotDistance) = 5.5m. Half-angle from
+        // the -Z axis at which the circle exits the penalty area is
+        // asin(sqrt(r² - d²) / r). Below, θ runs from -halfAngle to +halfAngle
+        // measured from the -Z axis (toward the shooter).
+        float spotZ = GoalLineZ - PenaltySpotDistance;
+        float frontGap = PenaltyAreaDepth - PenaltySpotDistance;
+        float halfWidthAtFront = Mathf.Sqrt(PenaltyArcRadius * PenaltyArcRadius - frontGap * frontGap);
+        float halfAngle = Mathf.Asin(halfWidthAtFront / PenaltyArcRadius);
+
         var points = new Vector3[PenaltyArcSegments + 1];
-        float spotZ = GoalLineZ - PenaltySpotZ;
         for (int i = 0; i <= PenaltyArcSegments; i++)
         {
-            // Start at the left point of the arc, sweep down through center, to the right.
             float t = i / (float)PenaltyArcSegments;
-            float angle = Mathf.PI + t * Mathf.PI;   // π → 2π
+            float theta = -halfAngle + t * (halfAngle * 2f);
             points[i] = new Vector3(
-                Mathf.Cos(angle) * PenaltyArcRadius,
+                Mathf.Sin(theta) * PenaltyArcRadius,
                 LineHeight,
-                spotZ + Mathf.Sin(angle) * PenaltyArcRadius);
+                spotZ - Mathf.Cos(theta) * PenaltyArcRadius);
         }
         DrawLineLoop("PenaltyArc", points, closed: false);
     }
