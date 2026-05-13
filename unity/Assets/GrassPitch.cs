@@ -1,8 +1,9 @@
 using UnityEngine;
 
 /// <summary>
-/// Builds the grass pitch surface: resizes the Field plane to 50×40m so it
-/// holds true-FIFA-proportion markings, then textures it.
+/// Builds the grass pitch surface: resizes the Field plane to ~68×60m
+/// (full FIFA pitch width, with enough length to hold the penalty area and
+/// a generous shooter run-up area), then textures it.
 ///
 /// Texture source order:
 ///   1. <c>Assets/Resources/GrassField.(png|jpg)</c> — drop in a real tileable
@@ -57,11 +58,13 @@ public class GrassPitch : MonoBehaviour
             return;
         }
 
-        // Resize the Field plane to fit true-FIFA-proportion markings.
+        // Resize the Field plane to hold true-FIFA proportions WITH margin.
         // Penalty area is 40.32m wide × 16.5m deep, arc extends a further
-        // ~9.15m toward the shooter — we need ~45m × 30m of ground at minimum.
-        // Unity's plane primitive is 10×10 at scale 1, so (5, 1, 4) = 50×40m.
-        field.transform.localScale = new Vector3(5f, 1f, 4f);
+        // ~9.15m back from the spot. A real pitch is 68m wide × 105m long;
+        // we only render the half visible to the camera, so 68m × 60m gives
+        // full FIFA width + plenty of green around the markings.
+        // Unity's plane primitive is 10×10 at scale 1, so (6.8, 1, 6) = 68×60m.
+        field.transform.localScale = new Vector3(6.8f, 1f, 6f);
 
         var renderer = field.GetComponent<MeshRenderer>();
         if (renderer == null)

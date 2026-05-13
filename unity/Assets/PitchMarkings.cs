@@ -19,14 +19,22 @@ public class PitchMarkings : MonoBehaviour
     private const float GoalAreaWidth = 18.32f;
     private const float GoalAreaDepth = 5.5f;
 
-    private const float PenaltySpotDistance = 11f;    // FIFA: 11m from goal line
     private const float PenaltyArcRadius = 9.15f;     // FIFA: 9.15m
     private const int PenaltyArcSegments = 48;
-    private const float PenaltySpotMarkerRadius = 0.11f; // 0.22m diameter spot
+    private const float PenaltySpotMarkerRadius = 0.11f; // matches ball footprint
+    private const float PenaltySpotLineWidth = 0.04f;    // thin painted ring, not a fat chalk band
+
+    // The penalty spot sits directly under the ball at z=0 — real soccer
+    // pitches paint the spot exactly where the ball rests for the kick.
+    // Our ball is at (0, 0.11, 0); placing the spot here means the ball
+    // covers it during idle and only the thin painted ring is visible.
+    // This is a deliberate departure from FIFA's "11m from goal" distance
+    // (our 50m-long field doesn't preserve full-scale FIFA distances anyway).
+    private const float SpotZ = 0f;
 
     private const float GoalLineZ = 9.5f;             // matches Keeper z position
     private const float LineHeight = 0.02f;           // above field to avoid z-fighting
-    private const float LineWidth = 0.12f;            // slightly wider — FIFA chalk lines are ~12cm
+    private const float LineWidth = 0.12f;            // FIFA chalk lines are ~12cm
 
     private static readonly Color LineColor = new Color(0.95f, 0.95f, 0.95f, 1f);
 
@@ -88,29 +96,28 @@ public class PitchMarkings : MonoBehaviour
     {
         const int segments = 20;
         var points = new Vector3[segments + 1];
-        float spotZ = GoalLineZ - PenaltySpotDistance;
         for (int i = 0; i <= segments; i++)
         {
             float angle = (i / (float)segments) * Mathf.PI * 2f;
             points[i] = new Vector3(
                 Mathf.Cos(angle) * PenaltySpotMarkerRadius,
                 LineHeight,
-                spotZ + Mathf.Sin(angle) * PenaltySpotMarkerRadius);
+                SpotZ + Mathf.Sin(angle) * PenaltySpotMarkerRadius);
         }
-        DrawLineLoop("PenaltySpot", points, closed: false);
+        DrawLineLoop("PenaltySpot", points, closed: false, width: PenaltySpotLineWidth);
     }
 
     private void DrawPenaltyArc()
     {
         // The penalty arc is the portion of a 9.15m-radius circle (centered on
-        // the penalty spot) that lies OUTSIDE the penalty area. Geometrically:
-        // distance from spot to the penalty-area front line is
-        // (PenaltyAreaDepth - PenaltySpotDistance) = 5.5m. Half-angle from
-        // the -Z axis at which the circle exits the penalty area is
-        // asin(sqrt(r² - d²) / r). Below, θ runs from -halfAngle to +halfAngle
+        // the penalty spot) that lies OUTSIDE the penalty area. With the spot
+        // moved to the ball position (SpotZ), distance from spot to the
+        // penalty-area front line is SpotZ - (GoalLineZ - PenaltyAreaDepth).
+        // Half-angle where the circle exits the penalty area is
+        // asin(sqrt(r² - d²) / r). θ runs from -halfAngle to +halfAngle
         // measured from the -Z axis (toward the shooter).
-        float spotZ = GoalLineZ - PenaltySpotDistance;
-        float frontGap = PenaltyAreaDepth - PenaltySpotDistance;
+        float penaltyAreaFrontZ = GoalLineZ - PenaltyAreaDepth;
+        float frontGap = SpotZ - penaltyAreaFrontZ;
         float halfWidthAtFront = Mathf.Sqrt(PenaltyArcRadius * PenaltyArcRadius - frontGap * frontGap);
         float halfAngle = Mathf.Asin(halfWidthAtFront / PenaltyArcRadius);
 
@@ -122,7 +129,7 @@ public class PitchMarkings : MonoBehaviour
             points[i] = new Vector3(
                 Mathf.Sin(theta) * PenaltyArcRadius,
                 LineHeight,
-                spotZ - Mathf.Cos(theta) * PenaltyArcRadius);
+                SpotZ - Mathf.Cos(theta) * PenaltyArcRadius);
         }
         DrawLineLoop("PenaltyArc", points, closed: false);
     }
@@ -138,15 +145,15 @@ public class PitchMarkings : MonoBehaviour
         }, closed: false);
     }
 
-    private void DrawLineLoop(string name, Vector3[] points, bool closed)
+    private void DrawLineLoop(string name, Vector3[] points, bool closed, float width = LineWidth)
     {
         var child = new GameObject(name);
         child.transform.SetParent(transform, worldPositionStays: false);
 
         var lr = child.AddComponent<LineRenderer>();
         lr.material = lineMaterial;
-        lr.startWidth = LineWidth;
-        lr.endWidth = LineWidth;
+        lr.startWidth = width;
+        lr.endWidth = width;
         lr.useWorldSpace = true;
         lr.loop = closed;
         lr.positionCount = points.Length;

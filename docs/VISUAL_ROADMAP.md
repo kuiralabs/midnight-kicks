@@ -64,38 +64,40 @@ Lowest effort, often biggest visual jump per hour.
   Going from robot mannequin to recognizable footballer transforms perception
   of the game.
 
-- **First: try the prefabs we already have.** The project already contains
-  multiple authored variants we haven't put on screen yet:
-  ```
-  Assets/Models/
-    Shooter_Final.prefab          Goalkeeper 1.prefab
-    Shooter_HQ.prefab             Goalkeeper_Final.prefab
-    Shooter_Professional.prefab   Goalkeeper_Professional.prefab
-    Shooter_V3.prefab             Goalkeeper_V2.prefab
-    ShooterPlayer.prefab          Goalkeeper_V3.prefab
-    ShooterPlayer_V2.prefab
-  Assets/Models/_Archive/          (earlier versions, kept for reference)
-  ```
-  The current `Shooter` and `Keeper` PrefabInstances in `SampleScene.unity`
-  both reference Mixamo `X Bot.fbx`. Existing prefabs were likely set aside
-  because the rig type wasn't Humanoid, so the `ShooterController` /
-  `KeeperController` Animator state machines (Idle / Run / Kick / Dive*)
-  couldn't drive them.
+- **The existing project prefabs (`Shooter_Professional`, `Shooter_HQ`, `Goalkeeper_V3`,
+  etc.) can't be used as-is.** They reference `.glb` files from Tripo3D
+  (the AI 3D-model generator — node names start with `tripo_node_*`). Inspecting
+  the GLB binary: **skins = 0, animations = 0**. They are pure static meshes
+  with no skeleton and no bone weights, which means the `ShooterController` /
+  `KeeperController` Animator state machines can't deform them. The `_Archive/`
+  folder of earlier versions confirms we hit this wall before and ended up
+  keeping the rigged Mixamo `X Bot.fbx` for both Shooter and Keeper.
 
-- **Test workflow before downloading new assets:**
-  1. Open `SampleScene.unity` in Unity Editor.
-  2. Select the `Shooter` GameObject in the Hierarchy → drag-replace its
-     source prefab with `Shooter_Professional.prefab` (or another candidate).
-  3. If it appears in T-pose and doesn't animate: select the source prefab's
-     model FBX in Assets/Models → Inspector → Rig tab → set Animation Type =
-     **Humanoid**, click Apply.
-  4. Re-test that Idle/Run/Kick play during a match.
-  5. Same for `Keeper` and `Goalkeeper_Professional`.
+- **Two real paths forward** (do one, not both):
 
-- **If the existing prefabs don't work out** (rig issues, missing textures, etc.),
-  fall back to a fresh Mixamo download: free with an Adobe account, pick a
-  humanoid like `Adam` / `Lewis` / `Y Bot`, download FBX in T-pose, drop into
-  `Assets/Models/`, set Rig type to Humanoid, assign to the PrefabInstances.
+  **Path A — Pre-rigged Mixamo character (recommended).** Free with Adobe ID.
+  Mixamo's character library has ~70 humanoid characters that already have the
+  same Humanoid rig X Bot uses, with the mesh skinned to it. The existing
+  `ShooterController` / `KeeperController` animation clips work without any
+  rebinding. Workflow: mixamo.com → Characters tab → pick (e.g. Adam, Liam,
+  Lewis) → Download FBX Binary, T-pose, With Skin → drop into
+  `Assets/Models/` → set Rig type to Humanoid → replace the `Shooter` and
+  `Keeper` GameObjects in `SampleScene.unity` with the new model, reassign the
+  ShooterController/KeeperController, uncheck Apply Root Motion. ~10 minutes
+  per character.
+
+  **Path B — Mixamo Auto-Rigger on the existing Tripo meshes.** Honors the
+  AI-generated likenesses we already produced, but adds a conversion step
+  (Mixamo doesn't accept GLB) and an Auto-Rigger pass with manual marker
+  placement. Result quality depends on the Tripo mesh's anatomical accuracy.
+  Workflow: GLB → FBX (via Blender's glTF Import + FBX Export, or an online
+  converter) → mixamo.com → Upload Character → place 6 markers (chin, wrists,
+  elbows, knees, groin) → wait for auto-rig → Download FBX, T-pose, With Skin
+  → drop into Unity, set Rig to Humanoid → replace in scene. ~25 minutes per
+  character.
+
+  Recommendation is Path A — Path B can be retried later if specific Tripo
+  characters are needed for branding reasons.
 
 ---
 

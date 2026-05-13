@@ -39,10 +39,30 @@ public class ShotManager : MonoBehaviour
     private const float CelebrationHops = 2f;
     private const float DefeatLeanDegrees = 20f;
 
-    // ── Camera framing ──
-    private static readonly Vector3 GoalLookTarget = new Vector3(0, 1.4f, 11f);
-    private static readonly Vector3 IntroStartCam = new Vector3(-6f, 2.5f, -1f);
-    private static readonly Vector3 PlayCamPos = new Vector3(-4f, 1.7f, -3f);
+    // ── Camera framing — two anchors per kick (FC25-style off-axis cam) ──
+    // Behind-the-shooter cams hide the ball because the shooter occludes it.
+    // Solution: position the wide shot 30° off-axis (rotated around the
+    // shooter) so we see past the shooter's shoulder to the ball at his feet.
+    //
+    // EstablishingCam: 30° off-axis, high cherry-picker. Wide cinematic
+    // outside angle showing the whole penalty area + arc + ball + goal.
+    // ActionCam: ~15° off-axis (small offset so the ball stays visible),
+    // eye-level, telephoto. Tight focus on the ball-and-goal axis.
+    //
+    // The dolly runs across the FULL pre-kick window (PreRunHold + Run +
+    // KickWindup ≈ 2.85s) for a slow, cinematic push-in. Peak zoom hits
+    // exactly when the ball is struck. After the reaction, PlayRound snaps
+    // back to EstablishingCam for the next round.
+    //
+    // CameraSetup.cs places the camera at EstablishingCam at scene load so
+    // the menu / idle pose matches the in-play wide shot. Keep both in sync.
+    private static readonly Vector3 IntroStartCam    = new Vector3( 12f, 11f, -22f);
+    private static readonly Vector3 EstablishingCam  = new Vector3(  7f,  7f, -15f);
+    private static readonly Vector3 EstablishingLook = new Vector3(  0f, 0.5f,  4f);
+    private const float              EstablishingFov = 60f;
+    private static readonly Vector3 ActionCam        = new Vector3(2.5f, 2.5f, -8f);
+    private static readonly Vector3 ActionLook       = new Vector3(  0f, 0.8f, 9.5f);
+    private const float              ActionFov       = 35f;
 
     // ── UI style font sizes ──
     private const int ScoreFontSize = 32;
@@ -54,6 +74,7 @@ public class ShotManager : MonoBehaviour
     private Animator shooterAnim;
     private Quaternion shooterInitialRotation;
     private Camera mainCamera;
+    private Coroutine cameraDolly;
     private GUIStyle scoreStyle;
     private GUIStyle resultStyle;
     private GUIStyle feedbackStyle;
@@ -150,26 +171,62 @@ public class ShotManager : MonoBehaviour
         currentFeedback = "GET READY...";
         float elapsed = 0f;
 
-        // `Camera.main` does a tag-search internally; cache the transform.
-        Transform cam = mainCamera != null ? mainCamera.transform : null;
-        if (cam == null)
+        if (mainCamera == null)
         {
             currentFeedback = "";
             yield break;
         }
+        Transform cam = mainCamera.transform;
+        mainCamera.fieldOfView = EstablishingFov;
 
         while (elapsed < IntroDuration)
         {
             elapsed += Time.deltaTime;
             float t = Mathf.SmoothStep(0f, 1f, elapsed / IntroDuration);
-            cam.position = Vector3.Lerp(IntroStartCam, PlayCamPos, t);
-            cam.LookAt(GoalLookTarget);
+            cam.position = Vector3.Lerp(IntroStartCam, EstablishingCam, t);
+            cam.LookAt(EstablishingLook);
             yield return null;
         }
 
-        cam.position = PlayCamPos;
-        cam.LookAt(GoalLookTarget);
+        ApplyCamera(EstablishingCam, EstablishingLook, EstablishingFov);
         currentFeedback = "";
+    }
+
+    /// <summary>
+    /// Snap the camera to a position + look-at + FOV in one call. Keeps the
+    /// per-frame interpolation in <see cref="DollyToAction"/> readable.
+    /// </summary>
+    private void ApplyCamera(Vector3 pos, Vector3 lookAt, float fov)
+    {
+        if (mainCamera == null) return;
+        mainCamera.transform.position = pos;
+        mainCamera.transform.LookAt(lookAt);
+        mainCamera.fieldOfView = fov;
+    }
+
+    /// <summary>
+    /// Slow cinematic push-in from EstablishingCam to ActionCam. Runs in
+    /// parallel with PlayRound so the dolly arrives at peak zoom exactly at
+    /// the moment of impact. Lerps position, look-at, and FOV simultaneously
+    /// with SmoothStep easing so it's gentle at start and end.
+    /// </summary>
+    private IEnumerator DollyToAction(float duration)
+    {
+        if (mainCamera == null) yield break;
+        Transform cam = mainCamera.transform;
+
+        float elapsed = 0f;
+        while (elapsed < duration)
+        {
+            elapsed += Time.deltaTime;
+            float t = Mathf.SmoothStep(0f, 1f, elapsed / duration);
+            cam.position = Vector3.Lerp(EstablishingCam, ActionCam, t);
+            cam.LookAt(Vector3.Lerp(EstablishingLook, ActionLook, t));
+            mainCamera.fieldOfView = Mathf.Lerp(EstablishingFov, ActionFov, t);
+            yield return null;
+        }
+        ApplyCamera(ActionCam, ActionLook, ActionFov);
+        cameraDolly = null;
     }
 
     private IEnumerator PlayRound(RoundData round)
@@ -182,6 +239,13 @@ public class ShotManager : MonoBehaviour
             shooter.transform.rotation = shooterInitialRotation;
             if (shooterAnim != null) shooterAnim.Play(AnimIdle);
         }
+
+        // Snap to the wide establishing shot, then start the slow push-in.
+        // Dolly runs across the entire pre-kick window (PreRunHold + Run +
+        // KickWindup) so peak zoom lands exactly when the ball is struck.
+        if (cameraDolly != null) StopCoroutine(cameraDolly);
+        ApplyCamera(EstablishingCam, EstablishingLook, EstablishingFov);
+        cameraDolly = StartCoroutine(DollyToAction(PreRunHold + RunDuration + KickWindupDuration));
 
         currentFeedback = "";
         yield return new WaitForSeconds(PreRunHold);

@@ -17,20 +17,20 @@ public class CrowdBackdrop : MonoBehaviour
 
     // ── Wall placement ──
     // Goal line is at z=9.5; wall sits ~8m behind that. From the camera at
-    // (0, 2.2, -8) looking at (0, 1.4, 9.5), the wall is ~25m forward — far
-    // enough to feel "in the distance" without dominating the frame.
+    // (0, 4.5, -13) the wall is ~30.5m forward and ~56m wide at frame edges
+    // (FOV 55° vertical, 16:9 → ~86° horizontal). Wall extends past that so
+    // the green pitch never shows behind the goal at the frame edges.
     private const float WallZ = 17.5f;
-    // Wall dimensions — wide and tall enough to fill the camera FOV at this
-    // distance (FOV 55° at 25m gives ~26m horizontal × ~18m vertical visible).
-    private const float WallWidth = 40f;
-    private const float WallHeight = 26f;
+    private const float WallWidth = 80f;
+    private const float WallHeight = 30f;
     private const float WallBaseY = 0f;
 
     // ── Texture tiling ──
-    // Tile so each "section" of the source crowd is repeated for higher
-    // per-pixel detail per spectator. 3× horizontal is the FC25 trick —
-    // they use 5-8 copies of a crowd asset across the wall.
-    private const float TilingU = 3f;
+    // Lower tiling = bigger per-spectator pixels = more visible detail per
+    // face. 1.5 keeps the image wider than the wall (so the wall doesn't
+    // show repeating seams in the camera frame) while letting each
+    // spectator render at ~2× the previous resolution.
+    private const float TilingU = 1.5f;
     private const float TilingV = 1f;
 
     private static readonly Color FallbackTint = new Color(0.22f, 0.26f, 0.32f, 1f);
@@ -112,7 +112,13 @@ public class CrowdBackdrop : MonoBehaviour
         if (crowdTex != null)
         {
             crowdTex.wrapMode = TextureWrapMode.Repeat;
-            crowdTex.filterMode = FilterMode.Bilinear;
+            // Trilinear smooths mip transitions; anisotropic filtering keeps
+            // the texture sharp when sampled at oblique angles — and the
+            // crowd wall IS at an oblique angle from the off-axis FC25 cam.
+            // Without this, Bilinear blurs spectator faces toward the
+            // edges of the frame.
+            crowdTex.filterMode = FilterMode.Trilinear;
+            crowdTex.anisoLevel = 8;
             if (mat.HasProperty("_BaseMap")) mat.SetTexture("_BaseMap", crowdTex);
             if (mat.HasProperty("_MainTex")) mat.SetTexture("_MainTex", crowdTex);
         }

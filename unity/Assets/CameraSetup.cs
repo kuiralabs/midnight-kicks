@@ -11,13 +11,15 @@ using UnityEngine;
 /// </summary>
 public class CameraSetup : MonoBehaviour
 {
-    // Shooter ends its run-up at approximately (0, 0, -0.3); the ball sits
-    // at z=0.2; the goal line is at z=9.5. A camera 8m behind the shooter,
-    // at chest+ height, looking down the goal axis matches the penalty
-    // broadcast framing.
-    private static readonly Vector3 CameraPosition = new Vector3(0f, 2.2f, -8f);
-    private static readonly Vector3 LookAtTarget   = new Vector3(0f, 1.4f, 9.5f);
-    private const float FieldOfView = 55f;            // slightly narrower than default 60° — tighter framing
+    // FC25-style penalty cam: 30° off-axis from the shooter (rotated around
+    // his position) so the ball is visible past his shoulder — a straight-
+    // behind cam hides the ball behind the shooter's body. High cherry-
+    // picker framing so the whole penalty area, arc, ball, and goal are in
+    // shot. Must match ShotManager.EstablishingCam exactly — otherwise this
+    // sets the menu pose, then PlayRound snaps somewhere else on first kick.
+    private static readonly Vector3 CameraPosition = new Vector3(7f, 7f, -15f);
+    private static readonly Vector3 LookAtTarget   = new Vector3(0f, 0.5f,  4f);
+    private const float FieldOfView = 60f;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void AutoCreate()
