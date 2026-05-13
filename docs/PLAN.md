@@ -96,7 +96,7 @@ Separate repo: `midnight-kicks/` (app/ + unity/ + contract/). Consumes Kuira SDK
   - [x] KicksActivity — main menu + deep link handler
   - [ ] GameController receiving choicePhase + sending choicesLocked (end-to-end)
   - [ ] Replay system (5 rounds from JSON) + stadium intro cinematic
-  - [ ] MatchManager — deploy/join/commit/reveal/claim circuit calls
+  - [x] MatchManager — deploy/join/commit/reveal/claim circuit calls (state-machine refactor 2026-05-12: discrete suspend transitions, `StateFlow<MatchState>` as source of truth, `KicksActivity` is now a thin presenter over the SDK)
   - [ ] StatePoller — watch opponent actions via indexer
 - [ ] **Phase 4 — Full two-player game**
   - [ ] Onboarding (passkey → biometric → play)
@@ -128,6 +128,27 @@ Every friction point building BBoard standalone → becomes SDK improvement.
 | 8 | WebSocket backpressure OOM on 250k events | Medium | File streaming, Rust native memory. |
 | 9 | No contract deployment API | Medium | ✅ FIXED. `MidnightContract.deploy()` + FFI. |
 | 10 | Content behind system status bar | Low | WindowInsets padding. |
+
+---
+
+## SDK connector — wishlist (non-blockers)
+
+These don't block Kicks shipping, but Kicks is forcing patterns that the
+Kuira connector SDK should bake in so the next dApp doesn't reinvent
+them. Add to this list whenever a MatchManager-style workaround appears.
+
+| # | Wish | Why it'd help | Today's workaround |
+|---|------|---------------|--------------------|
+| 1 | `awaitIndexerSynced(blockHeight)` primitive | Replace fixed `delay(5000)` waits between deploy → first call and between sequential tx. Reduces total match time and makes flow deterministic. | Hard-coded 3–8s sleeps in MatchManager (INDEXER_SETTLE_MS, POST_JOIN_SETTLE_MS). |
+| 2 | `MidnightContract.stateFlow(): Flow<ContractState>` | StatePoller becomes a one-liner. Lets UI react to opponent actions without polling boilerplate. | Caller writes a polling loop against the indexer GraphQL. |
+| 3 | Retry policy on `contract.call(...)` | "Indexer says contract not found, wait + retry" is a near-universal pattern after deploy. Bake retry-with-backoff into the call surface. | MatchManager.aiJoin loops 10× by hand, matching on `"not found"` substring. |
+| 4 | Serializable state snapshot for BlockStore backup | A `MatchState` snapshot (address + nonces + commit/reveal flags) should round-trip to bytes for Google BlockStore so a player can resume after process death or device hop. | Manual serialization in the app layer. |
+| 5 | First-class `Player` / `Identity` abstraction | The two-player witness pattern (P1 secret key, P2 secret key, swap on each call) is a recurring shape. A `Player` with `secretKey` + `coinPublicKey` + witness-registration helper would shrink each call site. | MatchManager passes raw `ByteArray` secrets through every helper. |
+| 6 | Auto force-resync of dust around contract calls | Every tx after a deploy or another tx needs `wallet.forceResyncDust()` to see the new UTXO state. Should happen inside `contract.call` when needed. | Manual `forceResyncDust()` between every tx in MatchManager. |
+| 7 | Deadline / timeout helper | `BigInteger.valueOf(System.currentTimeMillis() / 1000 + N)` for unix-second deadlines is everywhere a circuit takes a deadline. | Computed by hand in MatchManager.aiJoin. |
+| 8 | "Test-mode seed" path | The shared test seed (`TEST_SEED` in KicksActivity) for fast iteration on faucet networks should be a single SDK opt-in, not a literal in every example app. | Hex literal in KicksActivity. |
+
+Promote items to the friction log once they hit a real user-visible bug.
 
 ---
 

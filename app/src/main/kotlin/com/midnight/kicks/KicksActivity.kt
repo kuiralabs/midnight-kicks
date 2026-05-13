@@ -8,6 +8,7 @@ import androidx.activity.compose.setContent
 import com.midnight.kuira.core.network.MidnightNetwork
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -49,6 +50,7 @@ class KicksActivity : ComponentActivity() {
     private val lastChoices = mutableStateOf<String?>(null)
     private var matchManager: MatchManager? = null
     private val scope = CoroutineScope(Dispatchers.Main)
+    private var stateCollector: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,6 +79,7 @@ class KicksActivity : ComponentActivity() {
 
     override fun onDestroy() {
         UnityBridge.onMessageFromUnity = null
+        stateCollector?.cancel()
         super.onDestroy()
     }
 
@@ -84,17 +87,22 @@ class KicksActivity : ComponentActivity() {
         scope.launch {
             try {
                 if (matchManager == null) {
-                    statusMessage.value = "Initializing SDK..."
                     val manager = MatchManager(
                         context = applicationContext,
                         network = MidnightNetwork.UNDEPLOYED,
                         seed = TEST_SEED,
                     )
-                    manager.initSdk { runOnUiThread { statusMessage.value = it } }
+                    // Bind statusMessage to the SDK's published state — this
+                    // is the canonical way to surface progress in a Kuira dApp.
+                    // One StateFlow drives every label the user sees.
+                    stateCollector?.cancel()
+                    stateCollector = scope.launch {
+                        manager.state.collect { statusMessage.value = it.label }
+                    }
+                    manager.initSdk()
                     matchManager = manager
-                    statusMessage.value = "SDK ready"
                 }
-                runOnUiThread { then() }
+                then()
             } catch (e: Exception) {
                 Log.e(TAG, "SDK init failed", e)
                 statusMessage.value = "Error: ${e.message}"
@@ -129,14 +137,13 @@ class KicksActivity : ComponentActivity() {
 
                     Log.i(TAG, "Player choices: $labels")
                     lastChoices.value = "You picked: ${labels.joinToString(" ")}"
-                    statusMessage.value = "Running match on blockchain..."
-
-                    // Run full game loop against AI
+                    // No progress callback needed — `manager.state` is
+                    // already bound to statusMessage via the stateCollector
+                    // we set up in ensureSdkReady().
                     scope.launch {
                         try {
                             val result = matchManager!!.playAgainstAi(
                                 playerChoices = choiceList.toIntArray(),
-                                onProgress = { runOnUiThread { statusMessage.value = it } },
                             )
 
                             val (p1Score, p2Score) = result.scores()
