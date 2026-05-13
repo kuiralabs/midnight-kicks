@@ -10,12 +10,13 @@ This repo is a separate GitHub project (`nel349/midnight-kicks`) that consumes t
 
 ## Documentation map
 
-Three documents, three concerns. Look at the one that matches what you're doing.
+Four documents, four concerns. Look at the one that matches what you're doing.
 
 | Document | Use when you need… | Update cadence |
 |---|---|---|
 | **[`docs/PLAN.md`](docs/PLAN.md)** | Project journal — concept, target dates, architecture, **progress checklist**, SDK friction log, decision log | Per milestone |
 | **[`docs/GAME_DESIGN.md`](docs/GAME_DESIGN.md)** | Specification — match state machine, batch commit-reveal protocol, contract circuits, screen IA, Unity↔Kotlin bridge JSON, edge cases | When the game rules or bridge protocol change |
+| **[`docs/VISUAL_ROADMAP.md`](docs/VISUAL_ROADMAP.md)** | Plan for lifting visuals toward FC25 / FIFA quality — tiered asset drop-ins, lighting & post-FX, stadium environment, polish. The "what would it take" list | When a visual milestone closes or priorities shift |
 | **[`ROADMAP.md`](ROADMAP.md)** | Visible-work checklist — Unity asset phases (environment, animation, UI, audio, ship). Frequently edited, low ceremony | Per session |
 
 **Quick navigation:**
@@ -24,6 +25,7 @@ Three documents, three concerns. Look at the one that matches what you're doing.
 - *"What's the contract API surface?"* → GAME_DESIGN §3 (circuits)
 - *"What's left to ship?"* → PLAN (Phase tracker) + ROADMAP (Unity work)
 - *"Why does the SDK do X?"* → PLAN (SDK friction log + Decision log)
+- *"What would it take to look like FIFA?"* → VISUAL_ROADMAP (tiered asset/lighting/audio plan)
 
 ---
 
