@@ -58,10 +58,44 @@ Lowest effort, often biggest visual jump per hour.
 - **Drop-in:** Replace the Ball GameObject's mesh + material. Keep the `BallKicker` script attached.
 
 ### 1D. Real player models  ⭐ (biggest visual jump for least effort)
-- **What:** Swap the Mixamo X Bot (generic robot) for real-looking characters in soccer kits.
-- **Why high impact:** Players are on-screen the entire match, foreground, large. Going from robot mannequin to recognizable footballer transforms perception of the game.
-- **Sources:** [Mixamo character library](https://mixamo.com) (free with Adobe account): characters like `Adam`, `Lewis`, `Y Bot`, or any humanoid you like. Same Humanoid rig as X Bot, so all existing animations work without rebinding.
-- **Workflow:** Mixamo → Download as FBX (T-pose, no skin) → drop into `unity/Assets/Models/` → set Rig type to Humanoid → assign to the `Shooter` and `Keeper` PrefabInstances in the scene.
+- **What:** Swap the Mixamo X Bot (generic robot) currently used for both `Shooter`
+  and `Keeper` for real-looking characters in soccer kits.
+- **Why high impact:** Players are on-screen the entire match, foreground, large.
+  Going from robot mannequin to recognizable footballer transforms perception
+  of the game.
+
+- **First: try the prefabs we already have.** The project already contains
+  multiple authored variants we haven't put on screen yet:
+  ```
+  Assets/Models/
+    Shooter_Final.prefab          Goalkeeper 1.prefab
+    Shooter_HQ.prefab             Goalkeeper_Final.prefab
+    Shooter_Professional.prefab   Goalkeeper_Professional.prefab
+    Shooter_V3.prefab             Goalkeeper_V2.prefab
+    ShooterPlayer.prefab          Goalkeeper_V3.prefab
+    ShooterPlayer_V2.prefab
+  Assets/Models/_Archive/          (earlier versions, kept for reference)
+  ```
+  The current `Shooter` and `Keeper` PrefabInstances in `SampleScene.unity`
+  both reference Mixamo `X Bot.fbx`. Existing prefabs were likely set aside
+  because the rig type wasn't Humanoid, so the `ShooterController` /
+  `KeeperController` Animator state machines (Idle / Run / Kick / Dive*)
+  couldn't drive them.
+
+- **Test workflow before downloading new assets:**
+  1. Open `SampleScene.unity` in Unity Editor.
+  2. Select the `Shooter` GameObject in the Hierarchy → drag-replace its
+     source prefab with `Shooter_Professional.prefab` (or another candidate).
+  3. If it appears in T-pose and doesn't animate: select the source prefab's
+     model FBX in Assets/Models → Inspector → Rig tab → set Animation Type =
+     **Humanoid**, click Apply.
+  4. Re-test that Idle/Run/Kick play during a match.
+  5. Same for `Keeper` and `Goalkeeper_Professional`.
+
+- **If the existing prefabs don't work out** (rig issues, missing textures, etc.),
+  fall back to a fresh Mixamo download: free with an Adobe account, pick a
+  humanoid like `Adam` / `Lewis` / `Y Bot`, download FBX in T-pose, drop into
+  `Assets/Models/`, set Rig type to Humanoid, assign to the PrefabInstances.
 
 ---
 
