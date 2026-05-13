@@ -22,6 +22,7 @@ public class Keeper : MonoBehaviour
         initialRotation = transform.rotation;
         targetPosition = initialPosition;
         animator = GetComponent<Animator>();
+        Debug.Log($"[Keeper] Start gameObject={gameObject.name} active={gameObject.activeInHierarchy} pos={initialPosition} animator={(animator!=null)} hasController={(animator!=null && animator.runtimeAnimatorController!=null)}");
     }
 
     void Update()
@@ -49,11 +50,17 @@ public class Keeper : MonoBehaviour
         diveTimer = 0f;
         isDiving = true;
 
+        Debug.Log($"[Keeper] Dive direction={direction} from={initialPosition} → target={targetPosition} duration={duration}");
+
         if (animator != null)
         {
-            if (direction == 0) animator.Play("DiveLeft");
-            else if (direction == 1) animator.Play("JumpCenter");
-            else if (direction == 2) animator.Play("DiveRight");
+            string state = direction == 0 ? "DiveLeft" : direction == 1 ? "JumpCenter" : "DiveRight";
+            animator.Play(state);
+            Debug.Log($"[Keeper] Animator.Play('{state}') — applyRootMotion={animator.applyRootMotion}");
+        }
+        else
+        {
+            Debug.LogWarning("[Keeper] Dive: animator is null — no animation will play");
         }
     }
 
@@ -63,6 +70,7 @@ public class Keeper : MonoBehaviour
         transform.rotation = initialRotation;
         targetPosition = initialPosition;
         isDiving = false;
+        Debug.Log($"[Keeper] Reset → {initialPosition}");
         if (animator != null) animator.Play("Idle");
     }
 }

@@ -16,6 +16,7 @@ public class ShotManager : MonoBehaviour
 
     // ── Scene lookup ──
     private const string ShooterObjectName = "Shooter";
+    private const string KeeperObjectName = "Keeper";
 
     // ── Animator state names. Must match ShooterController / KeeperController ──
     private const string AnimIdle = "Idle";
@@ -110,7 +111,23 @@ public class ShotManager : MonoBehaviour
         }
 
         if (ballKicker == null) ballKicker = FindAnyObjectByType<BallKicker>();
-        if (keeper == null) keeper = FindAnyObjectByType<Keeper>();
+
+        // Always prefer the GameObject named exactly KeeperObjectName so we
+        // pick the new keeper even if (a) a stale Inspector reference still
+        // points at a renamed backup like "Keeper_old", or (b) the backup
+        // is still active in the scene. Falls back to FindAnyObjectByType
+        // only when no GameObject named "Keeper" exists.
+        var keeperGO = GameObject.Find(KeeperObjectName);
+        if (keeperGO != null)
+        {
+            var foundKeeper = keeperGO.GetComponent<Keeper>();
+            if (foundKeeper != null) keeper = foundKeeper;
+        }
+        else if (keeper == null)
+        {
+            keeper = FindAnyObjectByType<Keeper>();
+        }
+
         if (mainCamera == null) mainCamera = Camera.main;
 
         Debug.Log($"[ShotManager] CacheShooter: shooter={(shooter != null)} " +
