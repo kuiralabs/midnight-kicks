@@ -15,8 +15,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.math.BigInteger
 import java.security.SecureRandom
@@ -146,16 +149,11 @@ class MatchManager(
         delay(INDEXER_SETTLE_MS)
         requireSdk.wallet.forceResyncDust()
 
-        // NOTE: StatePoller is NOT started here. The poller calls
-        // ContractRuntime.stateCreate/stateReadFields/stateFree on the IO
-        // dispatcher, and those FFI calls race with the orchestrator's
-        // own balance / submit pipeline on the main coroutine — which
-        // surfaced as error 170 ("Invalid Transaction") on subsequent
-        // circuit submissions. Until the SDK exposes reentrant-safe
-        // contract-state reads (PLAN.md wishlist #10), the poller only
-        // runs when the orchestrator is in a wait state (a future
-        // waitForP2Committed/Revealed helper will start it and stop it
-        // around the actual wait window). PvAI has no real wait windows.
+        // StatePoller is NOT started here. It's only relevant for PvP, and
+        // even then only during explicit wait windows (see waitForP2*).
+        // PvAI has no real wait windows — both players' transactions are
+        // submitted from this device, and `nodeRpcClient.submitAndWaitForFinalization`
+        // already guarantees finality before each transition returns.
 
         deploy.contractAddress
     }
@@ -237,6 +235,82 @@ class MatchManager(
         MatchResult(playerChoices = p1c, aiChoices = p2c, contractAddress = prev.address).also {
             lastResult = it
         }
+    }
+
+    // ── PvP wait helpers (observe opponent via chain) ───────────────────
+    //
+    // In PvP, P2 commits and reveals from their own device — we don't have
+    // a local copy of their tx to wait on. We discover their actions by
+    // polling the contract state. Helpers below start a [StatePoller] only
+    // for the duration of the wait so it doesn't run continuously (battery,
+    // indexer load) and never overlaps an orchestrator-driven submission.
+    //
+    // PvAI does NOT use these — see [playAgainstAi].
+
+    /**
+     * Wait for the on-chain contract state to satisfy [predicate]. Starts the
+     * [StatePoller] if not already running (and stops it before returning if
+     * this call was the one that started it).
+     *
+     * Throws [kotlinx.coroutines.TimeoutCancellationException] if [timeoutMs]
+     * elapses before a matching snapshot arrives.
+     */
+    private suspend fun awaitContractState(
+        timeoutMs: Long,
+        predicate: (ContractStateSnapshot) -> Boolean,
+    ): ContractStateSnapshot {
+        val address = state.value.address
+            ?: error("awaitContractState called before deploy — no address")
+
+        val startedHere = pollerJob == null
+        if (startedHere) startStatePoller(address)
+        return try {
+            withTimeout(timeoutMs) {
+                contractState.filterNotNull().first(predicate)
+            }
+        } finally {
+            if (startedHere) {
+                pollerJob?.cancel()
+                pollerJob = null
+            }
+        }
+    }
+
+    /**
+     * P2 committed on their device — wait for that to land on chain.
+     * Transitions [P1Committed] → [BothCommitted].
+     */
+    suspend fun waitForP2Committed(
+        timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
+    ) = transitionFrom<MatchState.P1Committed, Unit>(
+        inProgress = { it },  // stay on P1Committed visually; the label drives UX
+        onSuccess = { prev, _ -> MatchState.BothCommitted(prev.address) },
+    ) {
+        awaitContractState(timeoutMs) { it.p2Committed }
+        Unit
+    }
+
+    /**
+     * P2 revealed on their device — wait for that to land on chain. The
+     * contract auto-resolves on the second reveal, so this also produces
+     * the final [MatchResult] by reading p2's choices from the snapshot
+     * (we don't have them locally in PvP).
+     *
+     * Transitions [P1Revealed] → [Resolved].
+     */
+    suspend fun waitForP2Revealed(
+        timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
+    ): MatchResult = transitionFrom<MatchState.P1Revealed, MatchResult>(
+        inProgress = { it },
+        onSuccess = { _, result -> MatchState.Resolved(result) },
+    ) { prev ->
+        val snap = awaitContractState(timeoutMs) { it.p2Revealed }
+        val p1c = requireNotNull(p1Choices) { "No P1 choices captured" }
+        MatchResult(
+            playerChoices = p1c,
+            aiChoices = snap.p2Choices,  // historical field name; in PvP it's the friend's
+            contractAddress = prev.address,
+        ).also { lastResult = it }
     }
 
     // ── Orchestrators ───────────────────────────────────────────────────
@@ -502,6 +576,13 @@ class MatchManager(
         /** Retry budget for indexer-not-ready errors when joining. */
         private const val JOIN_RETRY_LIMIT = 10
         private const val JOIN_RETRY_DELAY_MS = 2_000L
+
+        /**
+         * How long to wait for an opponent's tx to surface on chain before
+         * giving up. 5 minutes matches [COMMIT_DEADLINE_DURATION_SECS] —
+         * past that, the contract's own timeout kicks in.
+         */
+        private const val DEFAULT_OPPONENT_WAIT_MS = 5L * 60L * 1_000L
     }
 }
 

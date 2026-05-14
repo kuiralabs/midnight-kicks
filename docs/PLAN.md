@@ -97,7 +97,8 @@ Separate repo: `midnight-kicks/` (app/ + unity/ + contract/). Consumes Kuira SDK
   - [ ] GameController receiving choicePhase + sending choicesLocked (end-to-end)
   - [ ] Replay system (5 rounds from JSON) + stadium intro cinematic
   - [x] MatchManager — deploy/join/commit/reveal/claim circuit calls (state-machine refactor 2026-05-12: discrete suspend transitions, `StateFlow<MatchState>` as source of truth, `KicksActivity` is now a thin presenter over the SDK)
-  - [x] StatePoller — watch opponent actions via indexer (2026-05-13: 3s poll on `MidnightConfig.queryState`, parses `penalty.compact` ledger via verified cell indices, exposed on `MatchManager.contractState: StateFlow`. Observer-only this commit; next commit wires `waitForP2Committed/Revealed` into the orchestrator)
+  - [x] StatePoller — watch opponent actions via indexer (2026-05-13: 3s poll on `MidnightConfig.queryState`, parses `penalty.compact` ledger via verified cell indices, exposed on `MatchManager.contractState: StateFlow`)
+  - [x] PvP wait helpers — `MatchManager.waitForP2Committed()` / `waitForP2Revealed()` spin up the StatePoller only for the wait window (not continuously), then transition the state machine when chain state matches; `waitForP2Revealed` also reads `p2Choices` from the snapshot to build the final `MatchResult` (we never see the friend's choices locally in PvP). Unblocks Phase 4.
 - [ ] **Phase 4 — Full two-player game**
   - [ ] Onboarding (passkey → biometric → play)
   - [ ] Matchmaking (QR code + deep link)
@@ -118,7 +119,7 @@ Every friction point building BBoard standalone → becomes SDK improvement.
 
 | # | Friction | Severity | Fix |
 |---|---------|----------|-----|
-| 1 | Fee fallback to INITIAL_PARAMETERS → 66T specks → imbalanced tx → error 170 | Critical | Zero-fee detection. Need convergence loop for mainnet. |
+| 1 | Wall-clock `ctime` passed to dust spend caused error 170 (InvalidDustSpendProof) on every contract call after the first. Chain validates dust proof against `root_history.get(ctime)`, a predecessor lookup keyed by block timestamps — wall-clock returned the chain's tip-root, which never matched our locally-replayed root. | Critical | ✅ FIXED 2026-05-13 (commit `868e0d9`). `MidnightWallet.tryBalance` now uses `blockInfo.timestamp` (already fetched for ledgerParameters). Mirrors TS wallet's `currentTime ?? blockData.timestamp`. |
 | 2 | DustLocalState serialize/deserialize corrupts Merkle roots | High | In-memory only workaround. Needs SCALE codec fix. |
 | 3 | Full dust sync 60s on PREPROD (253k events) | Medium | Background sync + progress bar. Optimize later. |
 | 4 | `fromId: null` skips early events (indexer treats null ≠ 0) | Critical | Always pass `id: 0`. |
