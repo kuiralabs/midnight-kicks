@@ -171,6 +171,46 @@ class MatchManager(
         }
     }
 
+    /**
+     * P2 (real opponent) joins an existing deployed match by [address].
+     * Transitions [SdkReady] → [JoiningAsP2(address)] → [Joined(address)].
+     *
+     * Mirror of [aiJoin] but for the join-side device — the address comes
+     * from outside (deep link / QR scan / paste) instead of from a local
+     * [deployMatch] call. The retry loop is the same indexer-readiness
+     * pattern (`"not found"` substring match): the create-side's deploy
+     * has to land + be ingested before this call succeeds.
+     */
+    suspend fun joinAsP2(address: String) = transitionFrom<MatchState.SdkReady, Unit>(
+        inProgress = { MatchState.JoiningAsP2(address) },
+        onSuccess = { _, _ -> MatchState.Joined(address) },
+    ) {
+        val deadline = BigInteger.valueOf(
+            System.currentTimeMillis() / 1000 + COMMIT_DEADLINE_DURATION_SECS
+        )
+        retryUntilIndexerReady(JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS) {
+            callCircuit(p2SecretKey, address, "joinMatch", arrayOf(deadline))
+        }
+    }
+
+    /**
+     * P1 (create-side) waits for the opponent's [joinAsP2] transaction to
+     * land on chain. Transitions [Deployed] → [Joined] when chain state
+     * reports `matchJoined`.
+     *
+     * The state poller is started lazily by [awaitContractState] and torn
+     * down when this returns — no background polling outside the wait.
+     */
+    suspend fun awaitOpponentJoin(
+        timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
+    ) = transitionFrom<MatchState.Deployed, Unit>(
+        inProgress = { it },  // stay on Deployed; the label drives UX
+        onSuccess = { prev, _ -> MatchState.Joined(prev.address) },
+    ) {
+        awaitContractState(timeoutMs) { it.matchJoined }
+        Unit
+    }
+
     /** P1 commits their five choices. Transitions [Joined] → [P1Committed]. */
     suspend fun submitP1Choices(choices: IntArray) {
         require(choices.size == ROUNDS_PER_BATCH) { "Need $ROUNDS_PER_BATCH choices" }

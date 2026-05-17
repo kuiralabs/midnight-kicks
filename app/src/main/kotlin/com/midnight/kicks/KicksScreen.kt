@@ -19,5 +19,19 @@ package com.midnight.kicks
 sealed class KicksScreen {
     data object Menu : KicksScreen()
     data class Creating(val address: String? = null) : KicksScreen()
-    data class Joining(val prefilledAddress: String? = null) : KicksScreen()
+    data class Joining(
+        val prefilledAddress: String? = null,
+        /** True while the joinMatch circuit is in flight. */
+        val inFlight: Boolean = false,
+    ) : KicksScreen()
+    /**
+     * Both players are in the contract; the next tap launches Unity. [role]
+     * tells the gameplay orchestrator (next-session work) which side to
+     * play. [address] is the contract address so the orchestrator can call
+     * commit/reveal on it without re-deriving from state.
+     */
+    data class MatchReady(val address: String, val role: Player) : KicksScreen()
 }
+
+/** Which side of the match this device represents. */
+enum class Player { P1, P2 }

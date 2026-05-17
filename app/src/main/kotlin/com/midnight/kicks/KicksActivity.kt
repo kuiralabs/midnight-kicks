@@ -83,8 +83,19 @@ class KicksActivity : FragmentActivity() {
                 )
                 is KicksScreen.Joining -> JoinMatchScreen(
                     prefilledAddress = s.prefilledAddress,
+                    inFlight = s.inFlight,
                     onBack = { screen.value = KicksScreen.Menu },
                     onJoin = ::startJoinMatch,
+                )
+                is KicksScreen.MatchReady -> MatchReadyScreen(
+                    address = s.address,
+                    role = s.role,
+                    onBack = { screen.value = KicksScreen.Menu },
+                    onContinue = {
+                        Log.i(TAG, "CONTINUE: role=${s.role} address=${s.address} — PvP gameplay = step 3")
+                        statusMessage.value = "Match ready as ${s.role}. PvP play orchestrator pending."
+                        screen.value = KicksScreen.Menu
+                    },
                 )
             }
         }
@@ -96,10 +107,16 @@ class KicksActivity : FragmentActivity() {
     }
 
     /**
-     * P1 entry point. Switches to [KicksScreen.Creating] in the deploying
-     * state, then asynchronously deploys the penalty contract and updates
-     * the screen with the resulting address. Wait-for-opponent + Unity
-     * handoff is Phase 4 step 2.
+     * P1 entry point. Deploys a fresh penalty contract, then waits in the
+     * background for the opponent's `joinMatch` transaction to land on
+     * chain. While deploying, [CreateMatchScreen] shows a spinner. Once
+     * the address is known the screen renders the QR + COPY for sharing,
+     * and a state-poller-backed wait fires. On opponent join we transition
+     * to [KicksScreen.MatchReady]; the next tap will hand off to Unity
+     * (orchestrator coming in step 3).
+     *
+     * Errors at any stage drop the user back to the menu with a status
+     * line — `awaitOpponentJoin` can also time out (`DEFAULT_OPPONENT_WAIT_MS`).
      */
     private fun startCreateMatch() {
         screen.value = KicksScreen.Creating(address = null)
@@ -110,9 +127,15 @@ class KicksActivity : FragmentActivity() {
                     val address = manager.deployMatch()
                     Log.i(TAG, "Deployed match: $address")
                     screen.value = KicksScreen.Creating(address = address)
+
+                    // Wait for opponent's join — StatePoller is launched
+                    // inside awaitOpponentJoin and torn down on return.
+                    manager.awaitOpponentJoin()
+                    Log.i(TAG, "Opponent joined: $address")
+                    screen.value = KicksScreen.MatchReady(address, Player.P1)
                 } catch (e: Exception) {
-                    Log.e(TAG, "deployMatch failed", e)
-                    statusMessage.value = "Deploy failed: ${e.message}"
+                    Log.e(TAG, "Create-match flow failed", e)
+                    statusMessage.value = "Create failed: ${e.message}"
                     screen.value = KicksScreen.Menu
                 }
             }
@@ -120,15 +143,31 @@ class KicksActivity : FragmentActivity() {
     }
 
     /**
-     * P2 entry point. Phase 4 step 2 will plumb this into
-     * `MatchManager.joinAsP2(address)` and transition into the Unity
-     * choice phase on success. For now we log + bounce back to the menu
-     * so the matchmaking nav can be tested in isolation.
+     * P2 entry point. Connects to an existing deployed match by [address]
+     * and submits the `joinMatch` circuit. Routes to [KicksScreen.MatchReady]
+     * on success; PvP gameplay orchestrator (per-role commit/reveal) is
+     * Phase 4 step 3.
+     *
+     * UI shows the "Joining…" in-flight state during the chain round-trip
+     * via [KicksScreen.Joining.inFlight].
      */
     private fun startJoinMatch(address: String) {
         Log.i(TAG, "Join requested for address: $address")
-        statusMessage.value = "Join not wired yet — Phase 4 step 2 (chain logic)"
-        screen.value = KicksScreen.Menu
+        screen.value = KicksScreen.Joining(prefilledAddress = address, inFlight = true)
+        ensureSdkReady {
+            lifecycleScope.launch {
+                try {
+                    val manager = matchManager ?: return@launch
+                    manager.joinAsP2(address)
+                    Log.i(TAG, "Joined as P2: $address")
+                    screen.value = KicksScreen.MatchReady(address, Player.P2)
+                } catch (e: Exception) {
+                    Log.e(TAG, "joinAsP2 failed", e)
+                    statusMessage.value = "Join failed: ${e.message}"
+                    screen.value = KicksScreen.Joining(prefilledAddress = address, inFlight = false)
+                }
+            }
+        }
     }
 
     override fun onDestroy() {

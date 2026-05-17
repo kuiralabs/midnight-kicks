@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -43,6 +44,7 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun JoinMatchScreen(
     prefilledAddress: String?,
+    inFlight: Boolean = false,
     onBack: () -> Unit,
     onJoin: (String) -> Unit,
 ) {
@@ -97,7 +99,7 @@ fun JoinMatchScreen(
 
             Spacer(modifier = Modifier.height(32.dp))
 
-            val enabled = address.startsWith("mn_addr_") && address.length > 30
+            val enabled = !inFlight && address.startsWith("mn_addr_") && address.length > 30
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -110,15 +112,31 @@ fun JoinMatchScreen(
                     .let { if (enabled) it.clickable { onJoin(address) } else it },
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    "JOIN MATCH",
-                    color = if (enabled) Color.White else Color.White.copy(alpha = 0.3f),
-                    fontSize = 14.sp,
-                    letterSpacing = 4.sp,
-                )
+                if (inFlight) {
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.height(24.dp),
+                    )
+                } else {
+                    Text(
+                        "JOIN MATCH",
+                        color = if (enabled) Color.White else Color.White.copy(alpha = 0.3f),
+                        fontSize = 14.sp,
+                        letterSpacing = 4.sp,
+                    )
+                }
             }
 
-            if (prefilledAddress != null) {
+            if (inFlight) {
+                Spacer(modifier = Modifier.height(20.dp))
+                Text(
+                    "Submitting joinMatch on chain…",
+                    color = Color.White.copy(alpha = 0.5f),
+                    fontSize = 12.sp,
+                    letterSpacing = 2.sp,
+                )
+            } else if (prefilledAddress != null) {
                 Spacer(modifier = Modifier.height(28.dp))
                 Text(
                     "↑ filled from deep link",
