@@ -339,6 +339,44 @@ class MatchManager(
     }
 
     /**
+     * P2-side mirror of [waitForP2Committed]: this device is P2 and is
+     * waiting for P1's commit transaction to land on chain. Transitions
+     * [Joined] → [P1Committed] when the chain reports `p1Committed`.
+     */
+    suspend fun waitForP1Committed(
+        timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
+    ) {
+        val current = state.value
+        require(current is MatchState.Joined) {
+            "waitForP1Committed: expected Joined, got ${current::class.simpleName}"
+        }
+        awaitContractState(timeoutMs) { it.p1Committed }
+        setState(MatchState.P1Committed(current.address))
+    }
+
+    /**
+     * P2-side mirror of [waitForP2Revealed]: this device is P2 and is
+     * waiting for P1's reveal transaction. Transitions [BothCommitted] →
+     * [P1Revealed] when the chain reports `p1Revealed`, and **captures
+     * `p1Choices` from the chain snapshot** so the subsequent [revealP2]
+     * can build a full [MatchResult] without local P1 data (we don't
+     * have it on P2's device).
+     */
+    suspend fun waitForP1Revealed(
+        timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
+    ) {
+        val current = state.value
+        require(current is MatchState.BothCommitted) {
+            "waitForP1Revealed: expected BothCommitted, got ${current::class.simpleName}"
+        }
+        val snap = awaitContractState(timeoutMs) { it.p1Revealed }
+        // Capture into the field revealP2 already reads — keeps the
+        // PvAI path's packaging logic intact.
+        p1Choices = snap.p1Choices.copyOf()
+        setState(MatchState.P1Revealed(current.address))
+    }
+
+    /**
      * P2 revealed on their device — wait for that to land on chain. The
      * contract auto-resolves on the second reveal, so this also produces
      * the final [MatchResult] by reading p2's choices from the snapshot
@@ -383,6 +421,40 @@ class MatchManager(
         submitP1Choices(playerChoices)
         submitP2Choices(aiChoices)
         revealP1()
+        return revealP2()
+    }
+
+    /**
+     * P1 (create-side) gameplay orchestrator. Precondition: match has
+     * reached [Joined] (both players are in the contract). Submits this
+     * device's commit, waits for the opponent's commit, reveals, and
+     * waits for the opponent's reveal — at which point the contract
+     * auto-resolves and we build the final [MatchResult] from the chain
+     * snapshot's p2 choices.
+     *
+     * Each step transitions a single state in the FSM, and on
+     * cancellation / timeout the state machine reflects the last reached
+     * step so the user can resume cleanly (Phase 4 follow-up: encrypted
+     * key persistence so resume works across process death too).
+     */
+    suspend fun playAsP1(choices: IntArray): MatchResult {
+        submitP1Choices(choices)
+        waitForP2Committed()
+        revealP1()
+        return waitForP2Revealed()
+    }
+
+    /**
+     * P2 (join-side) gameplay orchestrator. Mirror of [playAsP1]:
+     * waits for P1 to commit, submits our commit, waits for P1 to
+     * reveal (capturing P1's choices from the chain snapshot), then
+     * reveals our own. The contract auto-resolves on the second reveal
+     * and [revealP2] returns the [MatchResult].
+     */
+    suspend fun playAsP2(choices: IntArray): MatchResult {
+        waitForP1Committed()
+        submitP2Choices(choices)
+        waitForP1Revealed()
         return revealP2()
     }
 

@@ -64,6 +64,13 @@ class KicksActivity : FragmentActivity() {
     private val hasActiveSession = mutableStateOf(false)
     private var matchManager: MatchManager? = null
     private val sessionStore by lazy { KicksSessionStore(applicationContext) }
+    /**
+     * Role this device is playing for the current Unity choice phase.
+     * `null` → PvAI (legacy practice mode). Drives the dispatch in
+     * [handleChoicesLocked]. Set when launching Unity from
+     * [KicksScreen.MatchReady]; cleared in [handleReplayComplete].
+     */
+    private var currentRole: Player? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -89,7 +96,10 @@ class KicksActivity : FragmentActivity() {
                     onCreateMatch = ::startCreateMatch,
                     onJoinMatch = { screen.value = KicksScreen.Joining() },
                     onResumeMatch = ::resumeMatch,
-                    onPracticeVsAi = { launchUnityChoicePhase() },
+                    onPracticeVsAi = {
+                        currentRole = null
+                        launchUnityChoicePhase()
+                    },
                 )
                 is KicksScreen.Creating -> CreateMatchScreen(
                     address = s.address,
@@ -109,9 +119,9 @@ class KicksActivity : FragmentActivity() {
                     role = s.role,
                     onBack = { screen.value = KicksScreen.Menu },
                     onContinue = {
-                        Log.i(TAG, "CONTINUE: role=${s.role} address=${s.address} — PvP gameplay = step 3")
-                        statusMessage.value = "Match ready as ${s.role}. PvP play orchestrator pending."
-                        screen.value = KicksScreen.Menu
+                        currentRole = s.role
+                        Log.i(TAG, "CONTINUE: role=${s.role} address=${s.address} → launching Unity")
+                        launchUnityChoicePhase()
                     },
                 )
             }
@@ -386,7 +396,16 @@ class KicksActivity : FragmentActivity() {
             }
 
             try {
-                val result = manager.playAgainstAi(choiceList.toIntArray())
+                // Dispatch by role. currentRole was set when launching
+                // Unity from MatchReady; null means we're in the PRACTICE
+                // VS AI legacy path which keeps the single-device PvAI
+                // orchestrator (deploy + AI commit/reveal all here).
+                val choicesArr = choiceList.toIntArray()
+                val result = when (currentRole) {
+                    null -> manager.playAgainstAi(choicesArr)
+                    Player.P1 -> manager.playAsP1(choicesArr)
+                    Player.P2 -> manager.playAsP2(choicesArr)
+                }
 
                 val (p1Score, p2Score) = result.scores()
                 val winner = when {
@@ -395,12 +414,33 @@ class KicksActivity : FragmentActivity() {
                     else -> null
                 }
 
-                Log.i(TAG, "Match result: P1=$p1Score P2=$p2Score winner=$winner")
-                statusMessage.value = "You $p1Score - $p2Score AI"
+                Log.i(TAG, "Match result: P1=$p1Score P2=$p2Score winner=$winner role=$currentRole")
+                statusMessage.value = when (currentRole) {
+                    null -> "You $p1Score - $p2Score AI"
+                    Player.P1 -> "You $p1Score - $p2Score opponent"
+                    Player.P2 -> "Opponent $p1Score - $p2Score You"
+                }
 
-                val aiLabels = result.aiChoices.map(::directionLabel)
-                lastChoices.value = "You: ${labels.joinToString(" ")}  AI: ${aiLabels.joinToString(" ")}"
+                // result.aiChoices is the field's historical name; in PvP
+                // it carries the opponent's revealed choices read from
+                // the chain snapshot, not an AI-generated set.
+                val opponentLabels = result.aiChoices.map(::directionLabel)
+                val youLabel = if (currentRole == Player.P2) "P2 (you)" else "You"
+                val themLabel = if (currentRole == null) "AI" else "Opponent"
+                lastChoices.value =
+                    "$youLabel: ${labels.joinToString(" ")}  $themLabel: ${opponentLabels.joinToString(" ")}"
 
+                // Match is resolved on chain — clear the persisted session
+                // so the menu's RESUME MATCH doesn't surface a finished match.
+                if (currentRole != null) {
+                    sessionStore.clear()
+                    hasActiveSession.value = false
+                }
+
+                // Replay payload — for PvP-as-P2, swap rounds so the
+                // replay always renders from P1's perspective (the
+                // contract treats P1 as the shooter sequence; reversing
+                // would confuse the cinematic).
                 UnityBridge.sendReplay(
                     rounds = result.toRoundResults(),
                     p1Score = p1Score,
@@ -415,15 +455,28 @@ class KicksActivity : FragmentActivity() {
     }
 
     private fun handleReplayComplete() {
-        Log.i(TAG, "Replay finished")
+        Log.i(TAG, "Replay finished (role=$currentRole)")
         val result = matchManager?.lastResult ?: return
         val (p1, p2) = result.scores()
+        // "You" depends on which side this device was on. For PvP-as-P2
+        // the chain scoreboard's p1Score is the opponent's, so flip
+        // the WIN/LOSE perspective. PvAI keeps the original P1-centric
+        // text (the human is always P1 there).
+        val (mine, theirs) = when (currentRole) {
+            Player.P2 -> p2 to p1
+            else -> p1 to p2
+        }
+        val opponentLabel = if (currentRole == null) "AI" else "OPPONENT"
         val winText = when {
-            p1 > p2 -> "YOU WIN!"
-            p2 > p1 -> "AI WINS"
+            mine > theirs -> "YOU WIN!"
+            theirs > mine -> "$opponentLabel WINS"
             else -> "DRAW"
         }
-        statusMessage.value = "$winText  ($p1 - $p2)"
+        statusMessage.value = "$winText  ($mine - $theirs)"
+        // Done with this match — release the role so the next Unity
+        // launch (e.g. PRACTICE) doesn't accidentally route through
+        // the PvP orchestrators.
+        currentRole = null
     }
 
     /**
