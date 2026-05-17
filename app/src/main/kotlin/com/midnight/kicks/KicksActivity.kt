@@ -3,8 +3,8 @@ package com.midnight.kicks
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.fragment.app.FragmentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
+import com.midnight.example.common.PanelBar
 import com.midnight.kuira.core.network.MidnightNetwork
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -47,7 +48,7 @@ import org.json.JSONObject
  * Activity destruction. The owned [MatchManager] is closed in [onDestroy]
  * to release SDK / FFI resources and wipe key material.
  */
-class KicksActivity : ComponentActivity() {
+class KicksActivity : FragmentActivity() {
 
     private val statusMessage = mutableStateOf<String?>(null)
     private val lastChoices = mutableStateOf<String?>(null)
@@ -155,10 +156,21 @@ class KicksActivity : ComponentActivity() {
             when (json.getString("type")) {
                 "choicesLocked" -> handleChoicesLocked(json)
                 "replayComplete" -> handleReplayComplete()
+                "matchPaused" -> handleMatchPaused()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse Unity message: ${e.message}")
         }
+    }
+
+    /**
+     * Match paused from the Unity HUD. Unity has already called
+     * `currentActivity.finish()` on its side, so the user is back on this
+     * Activity with the wallet + sigil pills at the top. We just update
+     * the status line so they know what state they're in.
+     */
+    private fun handleMatchPaused() {
+        statusMessage.value = "Paused — tap CREATE MATCH to start a new match"
     }
 
     private fun handleChoicesLocked(json: JSONObject) {
@@ -258,63 +270,66 @@ fun KicksApp(
         modifier = Modifier.fillMaxSize(),
         color = Color(0xFF0A0A0A),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                "MIDNIGHT",
-                color = Color.White.copy(alpha = 0.4f),
-                fontSize = 14.sp,
-                letterSpacing = 6.sp,
-            )
-            Text(
-                "KICKS",
-                color = Color.White,
-                fontSize = 48.sp,
-                fontWeight = FontWeight.W200,
-                letterSpacing = 8.sp,
-            )
+        Box(modifier = Modifier.fillMaxSize()) {
+            PanelBar(network = MidnightNetwork.UNDEPLOYED)
 
-            Spacer(modifier = Modifier.height(64.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    "MIDNIGHT",
+                    color = Color.White.copy(alpha = 0.4f),
+                    fontSize = 14.sp,
+                    letterSpacing = 6.sp,
+                )
+                Text(
+                    "KICKS",
+                    color = Color.White,
+                    fontSize = 48.sp,
+                    fontWeight = FontWeight.W200,
+                    letterSpacing = 8.sp,
+                )
 
-            MenuButton("CREATE MATCH", onClick = onCreateMatch)
-            Spacer(modifier = Modifier.height(16.dp))
-            MenuButton("JOIN MATCH", onClick = onJoinMatch)
+                Spacer(modifier = Modifier.height(64.dp))
 
-            // Status area
-            if (statusMessage != null || lastChoices != null) {
+                MenuButton("CREATE MATCH", onClick = onCreateMatch)
+                Spacer(modifier = Modifier.height(16.dp))
+                MenuButton("JOIN MATCH", onClick = onJoinMatch)
+
+                if (statusMessage != null || lastChoices != null) {
+                    Spacer(modifier = Modifier.height(48.dp))
+                    if (lastChoices != null) {
+                        Text(
+                            lastChoices,
+                            color = Color(0xFF64B5F6),
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Medium,
+                            letterSpacing = 4.sp,
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    if (statusMessage != null) {
+                        Text(
+                            statusMessage,
+                            color = Color.White.copy(alpha = 0.5f),
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(48.dp))
-                if (lastChoices != null) {
-                    Text(
-                        lastChoices,
-                        color = Color(0xFF64B5F6),
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Medium,
-                        letterSpacing = 4.sp,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-                if (statusMessage != null) {
-                    Text(
-                        statusMessage,
-                        color = Color.White.copy(alpha = 0.5f),
-                        fontSize = 13.sp,
-                        textAlign = TextAlign.Center,
-                    )
-                }
+                Text(
+                    "World Cup 2026",
+                    color = Color.White.copy(alpha = 0.2f),
+                    fontSize = 12.sp,
+                    letterSpacing = 4.sp,
+                )
             }
-
-            Spacer(modifier = Modifier.height(48.dp))
-            Text(
-                "World Cup 2026",
-                color = Color.White.copy(alpha = 0.2f),
-                fontSize = 12.sp,
-                letterSpacing = 4.sp,
-            )
         }
     }
 }

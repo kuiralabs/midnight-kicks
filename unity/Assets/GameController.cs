@@ -106,6 +106,18 @@ public class GameController : MonoBehaviour
 
     void OnGUI()
     {
+        // Pause button — top-right corner, renders in every game state
+        // (waiting, choice phase, replay). Tapping it finishes the Unity
+        // activity so the user lands back on KicksActivity where the
+        // wallet + sigil pills live. Match state is not preserved — pause
+        // here is "exit match", documented in the panel adoption design.
+        float pauseSize = 64f;
+        float pauseMargin = 24f;
+        if (GUI.Button(new Rect(Screen.width - pauseSize - pauseMargin, pauseMargin, pauseSize, pauseSize), "II"))
+        {
+            RequestPause();
+        }
+
         if (!inChoicePhase && !inReplay)
         {
             var style = new GUIStyle(GUI.skin.label);
@@ -249,6 +261,33 @@ public class GameController : MonoBehaviour
     }
 
     // ── Kotlin Communication ──
+
+    /// <summary>
+    /// Tell Kotlin the match is being paused, then finish this Unity activity
+    /// so KicksActivity returns to the foreground with the wallet + sigil
+    /// pills visible. Match state is not preserved — see the panel adoption
+    /// design doc (option A) for the rationale.
+    /// </summary>
+    private void RequestPause()
+    {
+        Debug.Log("[GameController] Pause pressed — finishing Unity activity");
+        SendToKotlin("{\"type\":\"matchPaused\"}");
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+        try
+        {
+            using (var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
+            using (var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity"))
+            {
+                activity.Call("finish");
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"[GameController] Failed to finish activity: {e.Message}");
+        }
+#endif
+    }
 
     private void SendToKotlin(string json)
     {

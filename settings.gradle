@@ -14,10 +14,10 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // Local AARs from Kuira SDK build
-        flatDir {
-            dirs "${rootDir}/libs"
-        }
+        // Kuira SDK is published from the parent build via
+        // `./gradlew publishToMavenLocal`. POMs include transitive deps,
+        // so kicks doesn't have to redeclare zxing/bitcoinj/etc. by hand.
+        mavenLocal()
     }
 }
 

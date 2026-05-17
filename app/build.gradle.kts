@@ -51,38 +51,24 @@ dependencies {
     // Unity as a Library
     implementation(project(":unityLibrary"))
 
-    // Kuira SDK — local AARs built from the Kuira project
-    implementation(files("../libs/midnight-sdk-debug.aar"))
-    implementation(files("../libs/compact-engine-debug.aar"))
-    implementation(files("../libs/crypto-debug.aar"))
-    implementation(files("../libs/identity-debug.aar"))
-    implementation(files("../libs/network-debug.aar"))
-    implementation(files("../libs/indexer-debug.aar"))
-    implementation(files("../libs/ledger-debug.aar"))
-    implementation(files("../libs/auth-debug.aar"))
+    // Kuira SDK — consumed as Maven artifacts published to mavenLocal by the
+    // parent project (`./gradlew publishToMavenLocal`). POMs include all
+    // transitive deps (zxing, bitcoinj, ktor, room, credentials, etc.) so
+    // kicks no longer redeclares them. To pull in a new Kuira module, add a
+    // single line below — no AAR copy, no transitive bookkeeping.
+    implementation("com.midnight.kuira:common:0.1.0-SNAPSHOT")
+    implementation("com.midnight.kuira:midnight-sdk:0.1.0-SNAPSHOT")
+    // SDK uses `implementation(project(":core:*"))` so those types aren't
+    // exposed to its consumers transitively. Kicks references compact types
+    // directly (MidnightContract, MidnightConfig, WitnessResult) and the
+    // network enum, so declare them here.
+    implementation("com.midnight.kuira:compact-engine:0.1.0-SNAPSHOT")
+    implementation("com.midnight.kuira:network:0.1.0-SNAPSHOT")
 
-    // SDK transitive dependencies
-    implementation("io.ktor:ktor-client-core:2.3.13")
-    implementation("io.ktor:ktor-client-okhttp:2.3.13")
-    implementation("io.ktor:ktor-client-content-negotiation:2.3.13")
-    implementation("io.ktor:ktor-client-logging:2.3.13")
-    implementation("io.ktor:ktor-client-websockets:2.3.13")
-    implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.13")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.10.0")
-    implementation("io.github.dokar3:quickjs-kt:1.0.3")
-    implementation("org.java-websocket:Java-WebSocket:1.5.7")
-    implementation("org.bitcoinj:bitcoinj-core:0.15.10")
-    implementation("fr.acinq.secp256k1:secp256k1-kmp-jvm:0.18.0")
-    implementation("androidx.biometric:biometric:1.1.0")
-    implementation("androidx.room:room-runtime:2.8.4")
-    implementation("androidx.room:room-ktx:2.8.4")
-    implementation("androidx.datastore:datastore-preferences:1.1.1")
-    implementation("androidx.credentials:credentials:1.5.0")
-    implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
-    implementation("com.google.android.gms:play-services-auth-blockstore:16.4.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2")
-
-    // Compose
+    // AndroidX directly used by Kicks's own code (FragmentActivity host,
+    // Compose). Things Kuira pulls in transitively (biometric, credentials,
+    // room, etc.) come through the SDK/common POMs and don't need to be here.
+    implementation("androidx.fragment:fragment-ktx:1.8.4")  // FragmentActivity for biometric prompts
     implementation(platform("androidx.compose:compose-bom:2026.03.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")

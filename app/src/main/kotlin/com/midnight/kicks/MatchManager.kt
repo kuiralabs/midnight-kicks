@@ -147,7 +147,7 @@ class MatchManager(
         // Indexer needs a beat to ingest the deploy block, and the deploy
         // consumed a dust UTXO so we need to refresh the wallet's view.
         delay(INDEXER_SETTLE_MS)
-        requireSdk.wallet.forceResyncDust()
+        requireSdk.wallet.refresh()
 
         // StatePoller is NOT started here. It's only relevant for PvP, and
         // even then only during explicit wait windows (see waitForP2*).
@@ -179,7 +179,7 @@ class MatchManager(
             onSuccess = { prev, _ -> MatchState.P1Committed(prev.address) },
         ) { prev ->
             delay(POST_JOIN_SETTLE_MS) // join must finalize before next tx
-            requireSdk.wallet.forceResyncDust()
+            requireSdk.wallet.refresh()
 
             val nonce = ByteArray(NONCE_BYTES).also { random.nextBytes(it) }
             commitChoices(p1SecretKey, prev.address, choices, nonce)
@@ -196,7 +196,7 @@ class MatchManager(
             onSuccess = { prev, _ -> MatchState.BothCommitted(prev.address) },
         ) { prev ->
             delay(INTER_TX_SETTLE_MS)
-            requireSdk.wallet.forceResyncDust()
+            requireSdk.wallet.refresh()
 
             val nonce = ByteArray(NONCE_BYTES).also { random.nextBytes(it) }
             commitChoices(p2SecretKey, prev.address, choices, nonce)
@@ -213,7 +213,7 @@ class MatchManager(
         val choices = requireNotNull(p1Choices) { "No P1 choices captured" }
         val nonce = requireNotNull(p1Nonce) { "No P1 nonce captured" }
         delay(INTER_TX_SETTLE_MS)
-        requireSdk.wallet.forceResyncDust()
+        requireSdk.wallet.refresh()
         revealChoices(p1SecretKey, prev.address, choices, nonce)
     }
 
@@ -229,7 +229,7 @@ class MatchManager(
         val p2c = requireNotNull(p2Choices) { "No P2 choices captured" }
         val p2n = requireNotNull(p2Nonce) { "No P2 nonce captured" }
         delay(INTER_TX_SETTLE_MS)
-        requireSdk.wallet.forceResyncDust()
+        requireSdk.wallet.refresh()
         revealChoices(p2SecretKey, prev.address, p2c, p2n)
 
         MatchResult(playerChoices = p1c, aiChoices = p2c, contractAddress = prev.address).also {
@@ -508,34 +508,14 @@ class MatchManager(
     }
 
     private fun installProvingKeys() {
+        // BLS params + wallet keys (zswap/dust) → canonical dev installer on
+        // ProvingKeyManager. Same method the SDK e2e test and BBoard canary call.
+        com.midnight.kuira.core.compact.proving.ProvingKeyManager(context).installFromLocalTmp()
+
+        // Kicks-specific: contract circuit keys (commitBatch, revealBatch,
+        // joinMatch, cancelMatch, claimTimeout) ship inside the APK at
+        // assets/keys/ — copied into keysDir for the Rust prover to find.
         val keysDir = File(context.filesDir, "proving_keys")
-        keysDir.mkdirs()
-        File(keysDir, "zswap").mkdirs()
-        File(keysDir, "dust").mkdirs()
-
-        val blsDir = File("/data/local/tmp/bboard_keys")
-        listOf("bls_midnight_2p13", "bls_midnight_2p14", "bls_midnight_2p15").forEach { name ->
-            val src = File(blsDir, name)
-            val dst = File(keysDir, name)
-            if (src.exists() && !dst.exists()) {
-                src.copyTo(dst)
-                Log.d(TAG, "Installed BLS: $name")
-            }
-        }
-
-        val walletDir = File("/data/local/tmp/wallet_keys")
-        listOf("zswap/spend", "zswap/output", "zswap/sign", "dust/spend").forEach { base ->
-            listOf("prover", "verifier", "bzkir").forEach { ext ->
-                val src = File(walletDir, "$base.$ext")
-                val dst = File(keysDir, "$base.$ext")
-                if (src.exists() && !dst.exists()) {
-                    dst.parentFile?.mkdirs()
-                    src.copyTo(dst)
-                    Log.d(TAG, "Installed wallet key: $base.$ext")
-                }
-            }
-        }
-
         val assetKeys = context.assets.list("keys") ?: emptyArray()
         assetKeys.filter { it.endsWith(".prover") || it.endsWith(".bzkir") || it.endsWith(".verifier") }.forEach { name ->
             val dst = File(keysDir, name)
@@ -546,9 +526,6 @@ class MatchManager(
                 Log.d(TAG, "Installed contract key: $name")
             }
         }
-
-        val versionFile = File(keysDir, "version.txt")
-        if (!versionFile.exists()) versionFile.writeText("9")
     }
 
     companion object {
