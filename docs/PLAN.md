@@ -100,13 +100,20 @@ Separate repo: `midnight-kicks/` (app/ + unity/ + contract/). Consumes Kuira SDK
   - [x] StatePoller — watch opponent actions via indexer (2026-05-13: 3s poll on `MidnightConfig.queryState`, parses `penalty.compact` ledger via verified cell indices, exposed on `MatchManager.contractState: StateFlow`)
   - [x] PvP wait helpers — `MatchManager.waitForP2Committed()` / `waitForP2Revealed()` spin up the StatePoller only for the wait window (not continuously), then transition the state machine when chain state matches; `waitForP2Revealed` also reads `p2Choices` from the snapshot to build the final `MatchResult` (we never see the friend's choices locally in PvP). Unblocks Phase 4.
 - [ ] **Phase 4 — Full two-player game**
-  - [ ] Onboarding (passkey → biometric → play)
-  - [ ] Matchmaking (QR code + deep link)
-  - [ ] Two-emulator E2E on localnet
+  - [x] Onboarding (passkey → biometric → play) — sigil panel handles it, "create identity" cue shown in `SigilStatusPanel.NoneBody` covers first-launch. Tutorial overlay for "how to play" is a P5 polish item, not a blocker.
+  - [x] **Matchmaking — UI scaffolding** — `CreateMatchScreen` (deploy → QR + COPY), `JoinMatchScreen` (paste/prefill + JOIN), state-based nav in `KicksActivity`, `handleDeepLink` populates `JoinMatchScreen` from `midnight://kicks?match=…`.
+  - [x] **Matchmaking — chain logic** — `MatchManager.joinAsP2(address)`, `awaitOpponentJoin()`. Plumbed into both screens.
+  - [x] **Create-and-go session** — no blocking auto-await on creator's device. Session persisted via `KicksSessionStore` (SharedPrefs), `RESUME MATCH` on menu, `CHECK STATUS` on `CreateMatchScreen` runs a short non-terminal probe. Cross-process resume needs encrypted key persistence (next).
+  - [x] **PvP gameplay orchestrators** — `MatchManager.playAsP1` / `playAsP2`, P2-side `waitForP1Committed` / `waitForP1Revealed` (captures P1's choices from chain snapshot). `KicksActivity.handleChoicesLocked` dispatches by role.
+  - [ ] Two-emulator E2E on localnet — create on emulator A, deep-link from emulator B via `adb shell am start -a android.intent.action.VIEW -d "midnight://kicks?match=<addr>"`. Ready to test.
+  - [ ] **Cross-process resume** — encrypted persistence of per-match secret keys + choices/nonces so resume survives app kill. Shares the data shape with Block Store cross-device sync; doing them together makes sense. (PLAN.md SDK connector wishlist #4.)
   - [ ] Results screen + leaderboard query
 - [ ] **Phase 5 — Polish + release**
   - [ ] APK size audit (< 100MB), proof latency tuning
   - [ ] Error handling, timeout UX, disconnect recovery
+  - [ ] **Unity in a separate process** (`android:process=":unity"`) — eliminates the shared-main-thread ANR seen when Unity's onDestroy takes >10s on emulator. Requires re-plumbing `UnityBridge` across processes (AIDL/IPC) since static-field passing breaks. Current workaround: `RequestPause` kills the process to bypass Unity teardown.
+  - [ ] **Pause button polish** — replace `GUI.Button("II")` with a Canvas-based pause icon + proper styling.
+  - [ ] **QR scanner** for matchmaking — Google Code Scanner (no camera permission needed) on `JoinMatchScreen`.
   - [ ] Play Store listing, closed beta
 - [ ] **Phase 6 — Launch**
   - [ ] Open beta → announce (World Cup timing, June 11)

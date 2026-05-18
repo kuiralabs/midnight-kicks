@@ -263,28 +263,40 @@ public class GameController : MonoBehaviour
     // ── Kotlin Communication ──
 
     /// <summary>
-    /// Tell Kotlin the match is being paused, then finish this Unity activity
-    /// so KicksActivity returns to the foreground with the wallet + sigil
-    /// pills visible. Match state is not preserved — see the panel adoption
-    /// design doc (option A) for the rationale.
+    /// Pause = kill the process. Match state is not preserved — see the
+    /// panel adoption design doc (option A) for the rationale.
+    ///
+    /// We kill the whole process instead of calling currentActivity.finish()
+    /// because Unity and KicksActivity share the same OS process, and Unity's
+    /// onDestroy can take 10s+ to tear down on emulators (audio, rendering,
+    /// IL2CPP unload). During that teardown the shared main thread is
+    /// blocked, so any touch on the now-foreground KicksActivity ANRs after
+    /// 5s. Killing the process bypasses the destroy phase entirely.
+    ///
+    /// User restarts the game by tapping the Kicks icon from launcher/recents
+    /// (singleTask launch mode → fresh KicksActivity in a clean state).
+    ///
+    /// Phase 5 polish should move Unity to its own process via
+    /// android:process=":unity" so this hard-kill becomes unnecessary, but
+    /// that requires re-plumbing UnityBridge across processes (AIDL/IPC).
     /// </summary>
     private void RequestPause()
     {
-        Debug.Log("[GameController] Pause pressed — finishing Unity activity");
+        Debug.Log("[GameController] Pause pressed — killing process");
         SendToKotlin("{\"type\":\"matchPaused\"}");
 
 #if UNITY_ANDROID && !UNITY_EDITOR
         try
         {
-            using (var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
-            using (var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity"))
+            using (var processClass = new AndroidJavaClass("android.os.Process"))
             {
-                activity.Call("finish");
+                int pid = processClass.CallStatic<int>("myPid");
+                processClass.CallStatic("killProcess", pid);
             }
         }
         catch (System.Exception e)
         {
-            Debug.LogError($"[GameController] Failed to finish activity: {e.Message}");
+            Debug.LogError($"[GameController] Failed to kill process: {e.Message}");
         }
 #endif
     }
