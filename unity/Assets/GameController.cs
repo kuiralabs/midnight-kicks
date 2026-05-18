@@ -156,11 +156,13 @@ public class GameController : MonoBehaviour
             labelStyle
         );
 
-        // Per-round role banner. Shoot rounds are about offense
-        // (kick where keeper isn't); keep rounds are about defense
-        // (dive where shooter aims). The contract uses the same
-        // committed direction for both — but the player can think
-        // about each pick in the right frame.
+        // Per-round role banner. Both the shoot and keep prompts have
+        // the player picking a GOAL CORNER — shooter's-perspective
+        // L/C/R (see GAME_DESIGN.md §2 coordinate convention). The
+        // keep prompt explicitly says "predict where they'll kick"
+        // instead of "pick where to dive" because the underlying
+        // commit is still the predicted target corner — the dive
+        // animation derives from that, not the other way around.
         var roleStyle = new GUIStyle(GUI.skin.label);
         roleStyle.fontSize = 28;
         roleStyle.fontStyle = FontStyle.Bold;
@@ -169,8 +171,8 @@ public class GameController : MonoBehaviour
         bool isShoot = currentRole == "shoot";
         roleStyle.normal.textColor = isShoot ? new Color(0.55f, 1f, 0.48f) : new Color(1f, 0.7f, 0.3f);
         GUI.Label(
-            new Rect(Screen.width / 2 - 200, y - 70, 400, 50),
-            isShoot ? "YOU SHOOT — pick where to kick" : "YOU KEEP — pick where to dive",
+            new Rect(Screen.width / 2 - 220, y - 70, 440, 50),
+            isShoot ? "YOU SHOOT — pick where to kick" : "YOU KEEP — predict where they'll kick",
             roleStyle
         );
 

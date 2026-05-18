@@ -282,26 +282,32 @@ flags change → the suspending `waitFor*` helper returns and the state
 machine advances. The poller is started lazily inside the wait window
 and torn down on return — no background polling between waits.
 
-### Per-role choice UI — OPEN DESIGN
+### Per-role choice UI
 
-The coordinate convention (§2) means a keeper tapping "LEFT" commits
-`0` (shooter's left), not "the keeper's left." Today's GUI overlay
-shows a `YOU SHOOT` / `YOU KEEP` banner above L/C/R buttons but
-doesn't visualize the goal or the perspective. Three candidates,
-none picked yet:
+**Decided:** the keep prompt is reframed to match the contract's
+coordinate convention. The player picks a goal corner in both roles:
 
-1. **Reframe the keep prompt** — banner copy says "predict where they'll
-   kick (left/center/right of goal)" so the player understands they're
-   picking the *target corner*, not their dive direction. Cheap.
-2. **Visual goal diagram** — render a 2D goal image (3 zones, shooter
-   view) above the buttons. Buttons tap zones of the diagram. Same
-   for both roles. One asset + layout work.
-3. **Per-role 3D camera + interaction** — shoot rounds show goal from
-   behind the ball, keep rounds show shooter from inside the goal.
-   Player taps regions of the 3D scene. Substantial Unity work, post-launch.
+| Role | Banner copy | Meaning |
+|---|---|---|
+| Shoot | `YOU SHOOT — pick where to kick` | "I'm kicking to *that* corner" |
+| Keep | `YOU KEEP — predict where they'll kick` | "I think they'll aim *that* corner" |
 
-Locked-in by the design conversation: contract stays in shooter-coord
-space; we change presentation, not semantics.
+Same L/C/R buttons in both roles, same shooter-perspective coordinate
+space, same committed value semantics. The keeper's body lean in the
+replay is derived from this committed value, not chosen separately —
+see `Keeper.cs:Dive` for the mirror animation logic.
+
+Considered and deferred:
+- **Visual goal diagram** above the buttons — would eliminate the
+  "whose left is left" ambiguity by rendering the target zones. Polish
+  item, one PNG/SVG asset + a layout pass. Worth doing pre-launch.
+- **Per-role 3D camera + interaction** — shoot rounds show goal from
+  behind the ball, keep rounds show shooter from inside the goal,
+  player taps regions of the 3D scene. Substantial Unity work,
+  post-launch.
+
+The decision locks in: **contract stays shooter-coord, presentation
+changes only.**
 
 ---
 
