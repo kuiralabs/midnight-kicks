@@ -69,16 +69,6 @@ object UnityBridge {
         sendToUnity("OnMessage", json.toString())
     }
 
-    /** Tell Unity to play sudden death replay. */
-    fun sendSuddenDeathReplay(rounds: List<RoundResult>, winner: String) {
-        val json = JSONObject().apply {
-            put("type", "suddenDeathReplay")
-            put("rounds", roundsToJson(rounds))
-            put("winner", winner)
-        }
-        sendToUnity("OnMessage", json.toString())
-    }
-
     /** Tell Unity to show a status message (waiting, proving, etc.). */
     fun sendStatus(message: String) {
         val json = JSONObject().apply {

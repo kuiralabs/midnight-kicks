@@ -9,13 +9,12 @@ using System.Collections.Generic;
 /// Sends JSON back to Kotlin via AndroidJavaObject callback.
 ///
 /// Message types received:
-///   choicePhase — player picks 5 directions
-///   replay — play back regulation results
-///   suddenDeathReplay — play back sudden death results
+///   choicePhase — player picks directions (10 for regulation, 2 for SD)
+///   replay — play back match results (regulation + any SD pairings)
 ///   status — show a status message
 ///
 /// Message types sent:
-///   choicesLocked — player confirmed 5 choices
+///   choicesLocked — player confirmed their picks
 ///   replayComplete — replay animation finished
 /// </summary>
 public class GameController : MonoBehaviour
@@ -83,9 +82,6 @@ public class GameController : MonoBehaviour
                 break;
             case "replay":
                 StartReplay(jsonString);
-                break;
-            case "suddenDeathReplay":
-                StartSuddenDeathReplay(jsonString);
                 break;
             case "status":
                 var statusMsg = JsonUtility.FromJson<StatusMessage>(jsonString);
@@ -275,28 +271,6 @@ public class GameController : MonoBehaviour
         else
         {
             Debug.LogError("[GameController] ShotManager not found even after auto-setup — falling back to SimulateReplay");
-            StartCoroutine(SimulateReplay());
-        }
-    }
-
-    private void StartSuddenDeathReplay(string json)
-    {
-        Debug.Log($"[GameController] Starting sudden death replay");
-        var msg = JsonUtility.FromJson<ReplayMessage>(json);
-
-        inReplay = true;
-        inChoicePhase = false;
-
-        EnsureShotManager();
-
-        if (shotManager != null)
-        {
-            Debug.Log("[GameController] Dispatching to ShotManager.PlayReplay (SD)");
-            StartCoroutine(shotManager.PlayReplay(msg.rounds, OnReplayComplete));
-        }
-        else
-        {
-            Debug.LogError("[GameController] ShotManager not found even after auto-setup — falling back to SimulateReplay (SD)");
             StartCoroutine(SimulateReplay());
         }
     }
