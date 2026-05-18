@@ -23,7 +23,7 @@ Sudden death: **one pairing per batch** (your `shoot` + your `keep`). Decisive w
 
 > **Status:** V3 is the live spec across contract, Kotlin, and Unity (2026-05-18). The on-chain contract, the Android orchestrator, and the C# choice/replay flow all use the symmetric 10-round model with single-pairing sudden death. Remaining Phase 4 milestone: two-emulator E2E on localnet against the V3 build.
 
-Detailed game logic, state machine, circuit specs, UI flows, and Unity bridge spec in [`GAME_DESIGN.md`](GAME_DESIGN.md). Current Unity work and asset checklist in [`../ROADMAP.md`](../ROADMAP.md).
+Detailed game logic, state machine, circuit specs, UI flows, and Unity bridge spec in [`GAME_DESIGN.md`](GAME_DESIGN.md). Current Unity work and asset checklist in [`../ROADMAP.md`](../UI_ROADMAP.md).
 
 ## Stakes & gas
 

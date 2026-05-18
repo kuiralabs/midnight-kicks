@@ -30,7 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.midnight.example.common.wallet.QrCode
+import com.midnight.kuira.dapp.wallet.QrCode
 
 /**
  * P1's matchmaking screen. Two visual states, driven by [address]:

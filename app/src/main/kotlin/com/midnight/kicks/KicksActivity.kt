@@ -29,7 +29,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
-import com.midnight.example.common.PanelBar
+import com.midnight.kuira.dapp.PanelBar
 import com.midnight.kuira.core.network.MidnightNetwork
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
