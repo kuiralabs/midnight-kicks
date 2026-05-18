@@ -181,27 +181,35 @@ class MatchManager(
      * pattern (`"not found"` substring match): the create-side's deploy
      * has to land + be ingested before this call succeeds.
      *
-     * **Idempotent** — if the contract has already advanced past the
-     * WAITING phase (e.g. this device joined earlier, the user backed
-     * out before committing choices, and is now resuming), the
-     * `joinMatch` circuit asserts and we treat the failure as
-     * "already joined, just continue." The state machine still
-     * advances to [Joined] so the user can pick up at the commit
-     * step. This relies on string-matching the contract's
-     * `"Match not in WAITING phase"` assertion message — the proper
-     * fix is a chain-state probe before issuing the tx, but the
-     * probe requires plumbing an address-aware `awaitContractState`
-     * which is a bigger change.
+     * **Idempotent only when [isResume] is true.** If the contract has
+     * already advanced past the WAITING phase (e.g. this device joined
+     * earlier, the user backed out before committing choices, and is
+     * now resuming), the `joinMatch` circuit asserts and the caller
+     * gets a [MatchAlreadyJoinedException]. Pass `isResume = true` to
+     * treat that as a no-op and advance the state machine to [Joined]
+     * anyway — but only the legitimate rejoiner should set this flag,
+     * and the caller (KicksActivity) gates it on `KicksSessionStore`
+     * having a P2 session for the same address.
      *
-     * **Caveat — cross-device collision:** if a *different* device
-     * already joined this match and this device tries to join, the
-     * contract would also fail with the same assertion. We can't
-     * distinguish "I'm rejoining my own match" from "I'm trying to
-     * join someone else's filled match" without comparing the
-     * on-chain P2 pubkey to ours — a follow-up. For now the wrong
-     * actor case fails later at commit/reveal time.
+     * **Why the gating matters — wrong-actor protection:** an
+     * unintended person with the deep link who taps JOIN MATCH on a
+     * fresh device would also hit the same "not in WAITING phase"
+     * assert. Without the gate, idempotent handling would route them
+     * through to MatchReady → choice phase, where their commit tx
+     * would fail at chain time because their p2SecretKey doesn't
+     * match the on-chain P2 pubkey. The contract enforces the
+     * security, but the UX feels like "I'm playing" until it isn't.
+     * Refusing the resume up front (when no session matches) keeps
+     * the wrong actor on JoinMatchScreen with a clear error.
+     *
+     * Proper cryptographic check (compare on-chain P2 pubkey to ours)
+     * is a follow-up; the session-based heuristic catches the common
+     * case of fresh-device-with-the-link.
      */
-    suspend fun joinAsP2(address: String) = transitionFrom<MatchState.SdkReady, Unit>(
+    suspend fun joinAsP2(
+        address: String,
+        isResume: Boolean = false,
+    ) = transitionFrom<MatchState.SdkReady, Unit>(
         inProgress = { MatchState.JoiningAsP2(address) },
         onSuccess = { _, _ -> MatchState.Joined(address) },
     ) {
@@ -214,11 +222,15 @@ class MatchManager(
             }
         } catch (e: Exception) {
             if (e.message?.contains("not in WAITING phase") == true) {
-                Log.i(
-                    TAG,
-                    "joinAsP2: contract already past WAITING — treating as resume, " +
-                        "advancing to Joined without re-submitting joinMatch",
-                )
+                if (isResume) {
+                    Log.i(
+                        TAG,
+                        "joinAsP2: contract already past WAITING and caller marked " +
+                            "this as a resume — advancing to Joined without resubmitting",
+                    )
+                } else {
+                    throw MatchAlreadyJoinedException(address)
+                }
             } else {
                 throw e
             }
@@ -751,3 +763,20 @@ data class MatchResult(
         return p1Goals to p2Goals
     }
 }
+
+/**
+ * Thrown by [MatchManager.joinAsP2] when the contract rejects the
+ * `joinMatch` call with "not in WAITING phase" and the caller didn't
+ * opt into resume behaviour. Indicates the contract address already
+ * has a P2 — either this same device joined earlier (legitimate
+ * rejoin; caller should re-call with `isResume = true`) or another
+ * actor with the deep link tried to join (wrong-actor case; caller
+ * should refuse).
+ *
+ * The distinction is made at the call site (KicksActivity) via the
+ * local [KicksSessionStore]: if a P2 session exists for [address],
+ * treat as resume; otherwise refuse and tell the user the match is
+ * taken.
+ */
+class MatchAlreadyJoinedException(val address: String) :
+    Exception("Match $address is already past the WAITING phase — a P2 has already joined.")

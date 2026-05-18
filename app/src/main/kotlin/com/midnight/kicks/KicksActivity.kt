@@ -254,14 +254,23 @@ class KicksActivity : FragmentActivity() {
      * UI shows the "Joining…" in-flight state during the chain round-trip
      * via [KicksScreen.Joining.inFlight].
      */
+    /**
+     * P2 entry point. Treats the call as a resume if `KicksSessionStore`
+     * already has a P2 row for this exact address — that's how we
+     * distinguish a legitimate rejoin (same device, after backing out)
+     * from a stranger who got the deep link. See `MatchManager.joinAsP2`
+     * KDoc for the security rationale.
+     */
     private fun startJoinMatch(address: String) {
-        Log.i(TAG, "Join requested for address: $address")
+        val saved = sessionStore.load()
+        val isResume = saved?.address == address && saved.role == Player.P2
+        Log.i(TAG, "Join requested for address: $address  isResume=$isResume")
         screen.value = KicksScreen.Joining(prefilledAddress = address, inFlight = true)
         ensureSdkReady {
             lifecycleScope.launch {
                 try {
                     val manager = matchManager ?: return@launch
-                    manager.joinAsP2(address)
+                    manager.joinAsP2(address, isResume = isResume)
                     Log.i(TAG, "Joined as P2: $address")
                     // Persist as P2 so the user can back out and resume.
                     // Deadline is informational only on the join side —
@@ -273,6 +282,19 @@ class KicksActivity : FragmentActivity() {
                     )
                     hasActiveSession.value = true
                     screen.value = KicksScreen.MatchReady(address, Player.P2)
+                } catch (e: MatchAlreadyJoinedException) {
+                    // Wrong actor — contract is past WAITING and we
+                    // have no local session for this match. Don't fake
+                    // success; the user's commit would fail at chain
+                    // time anyway because their p2SecretKey doesn't
+                    // match the on-chain P2 pubkey.
+                    Log.w(TAG, "joinAsP2 refused: another player already joined this match")
+                    statusMessage.value =
+                        "This match is already in progress with another player."
+                    screen.value = KicksScreen.Joining(
+                        prefilledAddress = address,
+                        inFlight = false,
+                    )
                 } catch (e: Exception) {
                     Log.e(TAG, "joinAsP2 failed", e)
                     statusMessage.value = "Join failed: ${e.message}"
