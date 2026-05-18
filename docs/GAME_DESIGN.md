@@ -3,6 +3,16 @@
 **Source of truth for game logic, state machine, UI flows, and integration specs.**
 Contract implementation: [`../contract/src/penalty.compact`](../contract/src/penalty.compact)
 
+> **Contract version: V3 spec (target) / V2 deployed (current).**
+> The contract on chain today implements **V2** — each player commits 5
+> dual-purpose directions; P1 gets 3 shots vs P2's 2 in a 5-round batch
+> (see §2 "V2 reference"). This document specifies **V3**, the target
+> redesign aligned with real penalty-shootout rules: each player commits
+> **5 shots + 5 keeps (10 directions)**, both play shooter and keeper an
+> equal number of times. V3 requires a fresh contract deploy; matches
+> created on V2 cannot upgrade mid-flight. See §2 "V3 model" for the
+> data shape and scoring.
+
 ---
 
 ## 1. Match state machine
@@ -104,78 +114,159 @@ commit phase, the underlying value committed is `0` (shooter's left),
 not "the keeper's left." Without explicit framing, this is confusing —
 see §4 *Per-role choice UI* for the open design question and ticket.
 
-### Shoot-vs-keep role per round
+### V3 model — shoots[5] + keeps[5] per player
 
-The contract alternates shooter/keeper roles by index: `i % 2 == 0` → P1
-shoots, otherwise P2 shoots. In a 5-round batch P1 shoots 3 times
-(rounds 1, 3, 5), P2 shoots 2 times (rounds 2, 4). Sudden death uses
-the same alternation per batch.
-
-**Each player commits ONE direction per round** — the same committed
-value is interpreted as the shoot direction or the dive direction
-depending on whose turn it is to shoot. Players don't commit separate
-"offense" and "defense" arrays.
-
-### Commitment
+**Each player commits two independent arrays of 5 directions:**
 
 ```
-commitment = persistentCommit(BatchPreimage { c0, c1, c2, c3, c4 }, nonce)
+shoots: [Uint<8>; 5]   // where I aim when it's my turn to kick
+keeps:  [Uint<8>; 5]   // where I dive when the opponent is shooting at me
 ```
 
-- `BatchPreimage`: struct of 5 `Uint<8>` direction choices
-- `nonce`: 32-byte random (prevents rainbow table attacks on 3^5 = 243 possibilities)
-- `persistentCommit`: Midnight's native Pedersen commitment (binding + hiding)
+10 directions per player → matches real penalty rules: 5 kicks taken,
+5 kicks faced.
 
-### Reveal
+**Regulation: 10 rounds, alternating shooter.**
 
-Player reveals all 5 choices + nonce. Circuit recomputes commitment and verifies it matches the stored hash. If mismatch → transaction fails (cheating detected).
+| Round (0-indexed) | Shooter | Compares… |
+|---|---|---|
+| 0 | P1 | `P1.shoots[0]` vs `P2.keeps[0]` |
+| 1 | P2 | `P2.shoots[0]` vs `P1.keeps[0]` |
+| 2 | P1 | `P1.shoots[1]` vs `P2.keeps[1]` |
+| 3 | P2 | `P2.shoots[1]` vs `P1.keeps[1]` |
+| 4 | P1 | `P1.shoots[2]` vs `P2.keeps[2]` |
+| 5 | P2 | `P2.shoots[2]` vs `P1.keeps[2]` |
+| 6 | P1 | `P1.shoots[3]` vs `P2.keeps[3]` |
+| 7 | P2 | `P2.shoots[3]` vs `P1.keeps[3]` |
+| 8 | P1 | `P1.shoots[4]` vs `P2.keeps[4]` |
+| 9 | P2 | `P2.shoots[4]` vs `P1.keeps[4]` |
 
-### Scoring (regulation)
+Goal if `shoot != keep`, save otherwise. Scorer earns +1.
 
-Each round: if shooter direction ≠ keeper direction → GOAL, else → SAVE.
-Roles alternate: odd rounds P1 shoots, even rounds P2 shoots.
+Round-to-array mapping: `kick_index = round / 2`. Round parity selects
+shooter (`round % 2 == 0` → P1 shoots).
+
+**Players can strategize offense and defense independently.** A player
+might pick `shoots = [L, L, R, C, R]` and `keeps = [R, R, L, L, C]` —
+the contract reads each from its own array; one doesn't constrain the
+other.
+
+### V2 reference (current contract)
+
+The on-chain contract is still V2:
+
+```compact
+struct BatchPreimage { c0, c1, c2, c3, c4 : Uint<8> }
+```
+
+5 dual-purpose directions per player. `c[i]` plays as shoot when that
+player is the shooter for round `i`, and as keep when they're the
+keeper. P1 shoots rounds 0, 2, 4 (3 shots); P2 shoots rounds 1, 3
+(2 shots). Asymmetric and conflates offense/defense — the reason for
+the V3 migration.
+
+### Commitment (V3)
+
+Two preimage structs, one per phase:
+
+```compact
+struct RegulationBatch {
+  shoots: Vector<5, Uint<8>>;
+  keeps:  Vector<5, Uint<8>>;
+}
+
+struct SuddenDeathBatch {
+  shoot: Uint<8>;   // my single kick direction for this SD pairing
+  keep:  Uint<8>;   // my single dive direction for this SD pairing
+}
+```
+
+Commitment per phase:
 
 ```
-Round 1: P1 shoots, P2 keeps → compare p1c0 vs p2c0
-Round 2: P2 shoots, P1 keeps → compare p2c1 vs p1c1
-Round 3: P1 shoots, P2 keeps → compare p1c2 vs p2c2
-Round 4: P2 shoots, P1 keeps → compare p2c3 vs p1c3
-Round 5: P1 shoots, P2 keeps → compare p1c4 vs p2c4
+regulation_commitment = persistentCommit<RegulationBatch>(preimage, nonce)
+sd_commitment         = persistentCommit<SuddenDeathBatch>(preimage, nonce)
 ```
 
-If `shooter_dir != keeper_dir` → scorer gets +1.
+- `nonce`: 32-byte random. Regulation preimage space is `3^10 = 59049`
+  possibilities; SD is `3^2 = 9`. Nonce still required to prevent
+  rainbow-table attacks; far more important for SD where the space is
+  tiny.
+- `persistentCommit`: Midnight's native Pedersen commitment (binding +
+  hiding).
 
-### Scoring (sudden death)
+### Reveal (V3)
 
-Same batch format, same commit-reveal. But resolution stops at the first decisive round:
+Player reveals all directions + nonce for the current phase's preimage.
+Circuit recomputes commitment and verifies it matches the stored hash.
+Mismatch → tx fails (cheating detected). 10 reveal values for
+regulation, 2 for sudden death.
+
+### Scoring (regulation, V3)
+
+10 rounds, sequential. Round `r` (0-indexed):
 
 ```
-for each round i (0..4):
-  P1 shoots: p1_scores = (p1c[i] != p2c[i])
-  P2 shoots: p2_scores = (p2c[i] != p1c[i])
-  if only one scored → that player wins (decisive)
-  if both scored or both missed → continue
+let kick_index = r / 2
+if r is even:                                  // P1 shoots
+  if P1.shoots[kick_index] != P2.keeps[kick_index]:
+    p1Score += 1
+else:                                          // P2 shoots
+  if P2.shoots[kick_index] != P1.keeps[kick_index]:
+    p2Score += 1
 ```
 
-**ZK property:** rounds after the decisive one are never disclosed. The circuit only reveals results up to and including the decisive round.
+End state:
+- `p1Score > p2Score` → P1 wins, phase → COMPLETE
+- `p2Score > p1Score` → P2 wins, phase → COMPLETE
+- `p1Score == p2Score` → tied, phase → SD_COMMITTING
 
-If all 5 SD rounds are non-decisive → back to `SD_COMMITTING` for another batch.
+### Scoring (sudden death, V3)
+
+Each SD batch = **one pairing**: P1 shoots → P2 keeps, then P2 shoots
+→ P1 keeps. Resolution after both reveal:
+
+```
+p1_scored = (P1.shoot != P2.keep)
+p2_scored = (P2.shoot != P1.keep)
+
+if p1_scored && !p2_scored:    P1 wins, phase → COMPLETE
+elif p2_scored && !p1_scored:  P2 wins, phase → COMPLETE
+else (both scored or both missed):
+    phase → SD_COMMITTING       // another pairing
+```
+
+**ZK property:** SD pairings are scored individually; pairings after a
+decisive one are never played. The committed direction values for a
+pairing are revealed (necessary for verification), but no information
+leaks about subsequent unplayed pairings.
+
+In practice 3^2 = 9 SD outcomes per pairing; expected pairings to a
+decisive result is ~2. The protocol supports arbitrary SD batches.
 
 ---
 
-## 3. Contract circuits
+## 3. Contract circuits (V3)
 
 | Circuit | When | Inputs (public) | Witnesses (private) | Effects |
-|---------|------|-----------------|--------------------|---------| 
-| `constructor` | Deploy | — | — | Set phase=WAITING, P1=caller, deadline=now+1hr |
-| `joinMatch` | P2 joins | — | secretKey | Set P2, escrow stake, phase→COMMITTING, deadline=now+5min |
-| `commitBatch` | Each player | — | 5 choices + nonce | Store commitment hash, set committed flag |
-| `revealBatch` | Each player | — | 5 choices + nonce | Verify vs commitment, store revealed choices |
-| `resolveRegulation` | After both reveal | — | — | Score 5 rounds, set winner or phase→SD_COMMITTING |
-| `sdCommitBatch` | SD commit | — | 5 choices + nonce | Same as commitBatch for SD |
-| `sdRevealAndResolve` | SD reveal | — | 5 choices + nonce | Verify, score round-by-round, stop at decisive |
-| `claimTimeout` | Deadline passed | — | — | Forfeit opponent, payout to caller |
-| `claimPayout` | COMPLETE phase | — | secretKey | Transfer stake to winner |
+|---------|------|-----------------|--------------------|---------|
+| `constructor` | Deploy | — | — | `phase=WAITING`, P1=caller, deadline=now+1hr |
+| `joinMatch` | P2 joins | — | secretKey | Set P2, escrow stake, `phase→COMMITTING`, deadline=now+5min |
+| `commitBatch` | Each player, regulation | — | `shoots[5]` + `keeps[5]` + nonce | Store commitment hash of `RegulationBatch`, set committed flag. Auto-advances `phase→REVEALING` when both committed. |
+| `revealBatch` | Each player, regulation | — | `shoots[5]` + `keeps[5]` + nonce | Verify vs commitment, store revealed `shoots` & `keeps`. Last reveal auto-scores 10 rounds, sets winner or `phase→SD_COMMITTING`. |
+| `sdCommitBatch` | Each player, SD pairing | — | `shoot` + `keep` + nonce | Store SD-pairing commitment hash. Auto-advances `phase→SD_REVEALING` when both committed. |
+| `sdRevealAndResolve` | Each player, SD pairing | — | `shoot` + `keep` + nonce | Verify, last reveal scores the pairing. Decisive → `phase→COMPLETE`; tied → `phase→SD_COMMITTING` (next pairing). |
+| `claimTimeout` | Deadline passed (any non-WAITING, non-COMPLETE phase) | — | secretKey | Forfeit opponent, payout to caller |
+| `claimPayout` | COMPLETE phase | — | secretKey | Transfer stake to winner; draw → refund both |
+
+### Witness shape change from V2
+
+V2 circuits expect 5 scalar witnesses (`localChoice0..localChoice4`).
+V3 needs **two arrays per regulation commit/reveal** and **two scalars
+per SD commit/reveal**. The witness wiring on the Kotlin side
+(`MatchManager.createContractHandle`) needs to expose `localShoots`
+and `localKeeps` as `Vector<5, Uint<8>>` witnesses for regulation,
+and `localShoot` / `localKeep` as `Uint<8>` for SD.
 
 ---
 
@@ -318,15 +409,23 @@ UaaL renders Unity full-screen as an Android Activity. Communication via `UnityS
 ### Kotlin → Unity messages
 
 ```json
-// Start choice phase
-// `roles` is the per-round role from THIS device's perspective. Five
-// entries, each "shoot" or "keep". P1 = [shoot, keep, shoot, keep, shoot];
-// P2 = [keep, shoot, keep, shoot, keep]; PvAI = P1 pattern (human is
-// always P1 in PvAI). Unity uses roles[i] to label each pick.
+// Start choice phase (V3: 10 picks regulation, 2 picks SD)
+// `roles` is the per-pick role from THIS device's perspective.
+//
+// Regulation (10 entries):
+//   P1: ["shoot","keep","shoot","keep","shoot","keep","shoot","keep","shoot","keep"]
+//   P2: ["keep","shoot","keep","shoot","keep","shoot","keep","shoot","keep","shoot"]
+//
+// Sudden death (2 entries, same for both players):
+//   ["shoot","keep"]
+//
+// Unity uses roles[i] to label each pick "YOU SHOOT — pick where to kick"
+// or "YOU KEEP — predict where they'll kick". Player picks a goal corner
+// (shooter-perspective L/C/R) in both roles — see §2 coordinate convention.
 {
   "type": "choicePhase",
   "round": "regulation",
-  "roles": ["shoot", "keep", "shoot", "keep", "shoot"]
+  "roles": ["shoot", "keep", "shoot", "keep", "shoot", "keep", "shoot", "keep", "shoot", "keep"]
 }
 
 // Start replay with results
@@ -343,26 +442,54 @@ UaaL renders Unity full-screen as an Android Activity. Communication via `UnityS
   "winner": "P1"
 }
 
-// Sudden death replay (only decisive rounds shown)
+// V3 regulation replay — 10 rounds. P1 shoots rounds 1,3,5,7,9; P2
+// shoots rounds 2,4,6,8,10. Each round entry carries the shoot/keep
+// pair revealed from chain.
+{
+  "type": "replay",
+  "rounds": [
+    { "round": 1,  "shooter": "P1", "shootDir": 0, "keepDir": 2, "result": "goal" },
+    { "round": 2,  "shooter": "P2", "shootDir": 1, "keepDir": 1, "result": "save" },
+    { "round": 3,  "shooter": "P1", "shootDir": 2, "keepDir": 0, "result": "goal" },
+    { "round": 4,  "shooter": "P2", "shootDir": 0, "keepDir": 2, "result": "goal" },
+    { "round": 5,  "shooter": "P1", "shootDir": 1, "keepDir": 0, "result": "goal" },
+    { "round": 6,  "shooter": "P2", "shootDir": 2, "keepDir": 1, "result": "goal" },
+    { "round": 7,  "shooter": "P1", "shootDir": 0, "keepDir": 0, "result": "save" },
+    { "round": 8,  "shooter": "P2", "shootDir": 1, "keepDir": 2, "result": "goal" },
+    { "round": 9,  "shooter": "P1", "shootDir": 2, "keepDir": 1, "result": "goal" },
+    { "round": 10, "shooter": "P2", "shootDir": 0, "keepDir": 0, "result": "save" }
+  ],
+  "finalScore": { "p1": 4, "p2": 3 },
+  "winner": "P1"
+}
+
+// V3 sudden death replay — one pairing = two kicks (P1 then P2).
+// Each entry represents one of the two kicks in the pairing.
 {
   "type": "suddenDeathReplay",
   "rounds": [
     { "round": 1, "shooter": "P1", "shootDir": 2, "keepDir": 2, "result": "save" },
-    { "round": 1, "shooter": "P2", "shootDir": 0, "keepDir": 0, "result": "save" },
-    { "round": 2, "shooter": "P1", "shootDir": 1, "keepDir": 0, "result": "goal" },
-    { "round": 2, "shooter": "P2", "shootDir": 2, "keepDir": 2, "result": "save" }
+    { "round": 1, "shooter": "P2", "shootDir": 0, "keepDir": 1, "result": "goal" }
   ],
-  "winner": "P1"
+  "winner": "P2"
 }
 ```
 
 ### Unity → Kotlin messages
 
 ```json
-// Player made choices
+// Player made choices (V3)
+//   regulation: 10 entries, indexed by role[i]
+//   sudden death: 2 entries
+//
+// Kotlin splits the array into `shoots` / `keeps` using the same
+// `roles` it sent in choicePhase, then builds the contract witnesses:
+//   for i in 0..choices.size:
+//     if roles[i] == "shoot": shoots.add(choices[i])
+//     else:                   keeps.add(choices[i])
 {
   "type": "choicesLocked",
-  "choices": [0, 1, 2, 0, 1]
+  "choices": [0, 1, 2, 0, 1, 2, 0, 1, 2, 0]
 }
 
 // Replay finished
@@ -378,16 +505,62 @@ UaaL renders Unity full-screen as an Android Activity. Communication via `UnityS
 
 ---
 
-## 6. Edge cases
+## 6. Edge cases (V3)
 
 | Scenario | Handling |
 |----------|----------|
-| Both players pick identical directions all 5 rounds | Score 0-0 → sudden death |
-| Both miss all 5 in sudden death | Non-decisive → another SD batch |
+| Both players pick identical `keeps` matching the other's `shoots` exactly | Score 0-0 → sudden death |
+| Both score or both miss in an SD pairing | Non-decisive → next SD pairing |
 | Player commits then closes app | Timeout → opponent claims forfeit |
 | Both players timeout (neither commits) | Both can reclaim their stake |
 | Player tries to reveal wrong preimage | Circuit rejects (commitment mismatch) |
 | Player submits invalid direction (>2) | `validDirection()` check fails in circuit |
 | Network disconnect during replay | On-chain result unchanged, replay is cosmetic |
 | Player opens app after match resolved | Sees result screen, can claim payout |
-| 10+ sudden death batches (extreme tie) | Protocol supports infinite batches. Practically impossible (3^5 = 243 combinations). |
+| Many sudden death pairings (deep tie) | Protocol supports unbounded batches. Each pairing has 3² = 9 possible outcomes and ~33% decisive odds, so deep ties are exceedingly rare. |
+
+---
+
+## 7. V2 → V3 migration
+
+V3 is a contract revision. Implementation order:
+
+1. **Contract (`penalty.compact`)**
+   - Replace `BatchPreimage { c0..c4 }` with `RegulationBatch { shoots[5], keeps[5] }`.
+   - Add `SuddenDeathBatch { shoot, keep }` struct.
+   - Rewrite `commitBatch` / `revealBatch` for the new preimage shape.
+   - Replace the regulation scoring block (lines ~232-237 of V2) with the
+     10-round loop from §2.
+   - Replace the SD scoring block with the single-pairing model.
+   - Bump deployment + tests; the test suite needs full new fixtures.
+   - Generate a new contract address; V2 matches are stranded (no on-chain
+     upgrade path).
+
+2. **MatchManager (Kotlin)**
+   - Replace `localChoice0..localChoice4` witnesses with `localShoots` +
+     `localKeeps` (regulation) and `localShoot` / `localKeep` (SD).
+   - `submitP1Choices(shoots, keeps)` and `submitP2Choices(shoots, keeps)`
+     take both arrays.
+   - `playAsP1` / `playAsP2` accept `(shoots, keeps)` not `IntArray`.
+   - `toRoundResults` rewrites to walk 10 rounds, alternating shooter,
+     reading from the appropriate `shoots`/`keeps` array.
+   - `MatchResult.aiChoices` field becomes `opponentShoots` + `opponentKeeps`
+     (or split fields). The historical `aiChoices` name is finally retired.
+
+3. **Bridge (Kotlin + Unity)**
+   - `UnityBridge.sendChoicePhase` accepts 10-entry `roles` for regulation
+     and 2-entry for SD.
+   - `KicksActivity.handleChoicesLocked` splits the flat `choices` array
+     by `roles` into `shoots` + `keeps` before calling MatchManager.
+
+4. **Unity HUD**
+   - `GameController.OnGUI` iterates over up to 10 rounds, indexed
+     against `roundRoles[currentChoice]`. Most of the existing per-pick
+     banner machinery already extends naturally.
+
+5. **PLAN.md**
+   - Add V3 contract redeploy + migration as a Phase 4 follow-up (after
+     the current two-emulator E2E lands on V2).
+
+The V3 work can be done in isolation on a branch — V2 stays the canonical
+shipping target until V3's contract is tested end-to-end.

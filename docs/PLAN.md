@@ -107,6 +107,7 @@ Separate repo: `midnight-kicks/` (app/ + unity/ + contract/). Consumes Kuira SDK
   - [x] **PvP gameplay orchestrators** — `MatchManager.playAsP1` / `playAsP2`, P2-side `waitForP1Committed` / `waitForP1Revealed` (captures P1's choices from chain snapshot). `KicksActivity.handleChoicesLocked` dispatches by role.
   - [ ] Two-emulator E2E on localnet — create on emulator A, deep-link from emulator B via `adb shell am start -a android.intent.action.VIEW -d "midnight://kicks?match=<addr>"`. Ready to test.
   - [ ] **Cross-process resume** — encrypted persistence of per-match secret keys + choices/nonces so resume survives app kill. Shares the data shape with Block Store cross-device sync; doing them together makes sense. (PLAN.md SDK connector wishlist #4.)
+  - [ ] **Contract V3** — real penalty rules: each player commits `shoots[5]` + `keeps[5]` (10 directions total, 5 kicks per player, 5 saves each). 10-round regulation, single-pairing SD. Asymmetric V2 model (P1 gets 3 shots vs P2 gets 2) gets dropped. See `docs/GAME_DESIGN.md` §2 V3 model + §7 migration. Contract redeploy required.
   - [ ] Results screen + leaderboard query
 - [ ] **Phase 5 — Polish + release**
   - [ ] APK size audit (< 100MB), proof latency tuning
