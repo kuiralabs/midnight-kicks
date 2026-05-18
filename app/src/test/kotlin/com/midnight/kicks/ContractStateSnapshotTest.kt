@@ -11,7 +11,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Unit tests for [ContractStateSnapshot] parsing.
+ * Unit tests for [ContractStateSnapshot] parsing (V3 layout).
+ *
+ * V3 stores its ledger in two groups (8 cells + 15 cells = 23 cells flat).
+ * Each `Vector<5, Uint<8>>` occupies one cell whose hex is the 5
+ * concatenated element bytes (10 hex chars).
  *
  * These tests guard the cell-index map against drift from
  * `penalty-contract.js`. If the .compact field order changes, exactly
@@ -32,70 +36,47 @@ class ContractStateSnapshotTest {
     }
 
     @Test
-    fun `parse unwraps nested state (cells inside outer container)`() {
-        // The penalty contract's queryState returns the 25 ledger cells
-        // nested at state[0] (idx path [0, N] in the compiled JS), not at
-        // the top level. The parser must unwrap automatically.
-        val nested = JSONArray().apply { put(defaultStateArray()) }
-        val snap = ContractStateSnapshot.parse(nested)
-        requireNotNull(snap)
-        assertEquals(0, snap.phase)
-        assertFalse(snap.p1Committed)
-    }
-
-    @Test
-    fun `parse unwraps nested state with two outer elements`() {
-        // Real on-chain payload had 2 top-level elements (e.g. ledger
-        // record + metadata cell). The unwrap should still pick up the
-        // inner ledger from state[0].
-        val nested = JSONArray()
-            .put(defaultStateArray())
-            .put(numberCell(0))
-        val snap = ContractStateSnapshot.parse(nested)
-        requireNotNull(snap)
-        assertEquals(0, snap.phase)
-    }
-
-    @Test
     fun `parse returns null when neither flat nor nested layout matches`() {
-        // 2 number-cells at the top, no nested array — the diagnostic
-        // path that originally fired in the live app with "got 2 cells".
         val malformed = JSONArray()
             .put(numberCell(0))
             .put(numberCell(1))
         assertNull(ContractStateSnapshot.parse(malformed))
     }
 
-    // ── Real on-chain shape: split storage with hex-encoded cells ───────
+    // ── Split-storage on-chain shape: 8 cells in group 0 + 15 in group 1 ─
 
     @Test
-    fun `parse handles real split-storage layout (10 plus 15 cells, all hex)`() {
-        // What MidnightConfig.queryState actually returns for the penalty
-        // contract right after deploy: two sub-arrays of 10 and 15 hex
-        // cells. Every field defaults to empty hex.
-        val first = JSONArray().apply { repeat(10) { put(hexCell("")) } }
-        val second = JSONArray().apply { repeat(15) { put(hexCell("")) } }
-        val state = JSONArray().put(first).put(second)
-
+    fun `parse handles real split-storage layout`() {
+        val state = defaultStateArray()
         val snap = ContractStateSnapshot.parse(state)
         requireNotNull(snap)
         assertEquals(0, snap.phase)
         assertFalse(snap.p1Committed)
         assertFalse(snap.p2Committed)
         assertEquals(0, snap.p1Score)
+        assertEquals(0, snap.p2Score)
+        assertEquals(0, snap.sdRound)
     }
 
     @Test
-    fun `parse reads player1 from real on-chain shape (only field set after deploy)`() {
-        val player1Hex = "e8fde5e25c2d4c589f181c10042304f1e9badca11baabafeac4d53812a7b7c07"
-        val first = JSONArray().apply {
-            put(hexCell(""))        // phase
-            put(hexCell(player1Hex)) // player1 ← the deploying P1
-            repeat(8) { put(hexCell("")) }
-        }
-        val second = JSONArray().apply { repeat(15) { put(hexCell("")) } }
-        val state = JSONArray().put(first).put(second)
+    fun `parse fills empty vectors with zeros (fresh post-deploy state)`() {
+        val snap = ContractStateSnapshot.parse(defaultStateArray())
+        requireNotNull(snap)
+        assertEquals(5, snap.p1Shoots.size)
+        assertEquals(5, snap.p1Keeps.size)
+        assertEquals(5, snap.p2Shoots.size)
+        assertEquals(5, snap.p2Keeps.size)
+        assertArrayEquals(IntArray(5), snap.p1Shoots)
+        assertArrayEquals(IntArray(5), snap.p2Keeps)
+    }
 
+    @Test
+    fun `parse reads player1 from group 0 cell 1`() {
+        val player1Hex = "e8fde5e25c2d4c589f181c10042304f1e9badca11baabafeac4d53812a7b7c07"
+        val state = defaultStateArray().apply {
+            // group 0 is state[0]; player1 is at group 0 index 1
+            (get(0) as JSONArray).put(1, hexCell(player1Hex))
+        }
         val snap = ContractStateSnapshot.parse(state)
         requireNotNull(snap)
         assertEquals(player1Hex.length / 2, snap.player1.size)
@@ -103,151 +84,100 @@ class ContractStateSnapshotTest {
     }
 
     @Test
-    fun `cellBoolean reads hex 01 as true`() {
-        // After P1 commits, p1Committed (cell 5) flips to "01".
-        val first = JSONArray().apply {
-            repeat(5) { put(hexCell("")) }
-            put(hexCell("01")) // p1Committed = true
-            repeat(4) { put(hexCell("")) }
+    fun `parse decodes p1Committed when hex is 01`() {
+        val state = defaultStateArray().apply {
+            // p1Committed is at group 0 index 5
+            (get(0) as JSONArray).put(5, hexCell("01"))
         }
-        val second = JSONArray().apply { repeat(15) { put(hexCell("")) } }
-        val snap = ContractStateSnapshot.parse(JSONArray().put(first).put(second))
+        val snap = ContractStateSnapshot.parse(state)
         requireNotNull(snap)
         assertTrue(snap.p1Committed)
         assertFalse(snap.p2Committed)
     }
 
     @Test
-    fun `cellNumber decodes little-endian hex`() {
-        // p1Score is at flat index 19 = second[9]. Encode 3 as little-
-        // endian hex "03".
-        val first = JSONArray().apply { repeat(10) { put(hexCell("")) } }
-        val second = JSONArray().apply {
-            repeat(9) { put(hexCell("")) }
-            put(hexCell("03"))           // p1Score = 3
-            put(hexCell("02"))           // p2Score = 2
-            repeat(5) { put(hexCell("")) }
+    fun `parse decodes p2Revealed from group 1 cell 8`() {
+        val state = defaultStateArray().apply {
+            (get(1) as JSONArray).put(8, hexCell("01"))
         }
-        val snap = ContractStateSnapshot.parse(JSONArray().put(first).put(second))
+        val snap = ContractStateSnapshot.parse(state)
+        requireNotNull(snap)
+        assertTrue(snap.p2Revealed)
+        assertFalse(snap.p1Revealed)
+    }
+
+    // ── Vector<5, Uint<8>> decoding — the V3 headline change ────────────
+
+    @Test
+    fun `parse decodes p1Shoots from a single 5-byte hex cell`() {
+        // Vector<5, Uint<8>> serializes as 5 concatenated bytes; the
+        // ledger holds them in one cell at group 0 index 7.
+        val shoots = intArrayOf(0, 1, 2, 1, 0)
+        val state = defaultStateArray().apply {
+            (get(0) as JSONArray).put(7, hexCell("0001020100"))
+        }
+        val snap = ContractStateSnapshot.parse(state)
+        requireNotNull(snap)
+        assertArrayEquals(shoots, snap.p1Shoots)
+        // Other vectors should still be zeroed.
+        assertArrayEquals(IntArray(5), snap.p1Keeps)
+        assertArrayEquals(IntArray(5), snap.p2Shoots)
+        assertArrayEquals(IntArray(5), snap.p2Keeps)
+    }
+
+    @Test
+    fun `parse decodes p1Keeps p2Shoots p2Keeps from group 1 cells 0-2`() {
+        val keeps   = intArrayOf(2, 2, 0, 1, 2)
+        val p2Sh    = intArrayOf(0, 2, 0, 2, 0)
+        val p2K     = intArrayOf(1, 1, 1, 1, 1)
+        val state = defaultStateArray().apply {
+            (get(1) as JSONArray).put(0, hexCell("0202000102"))
+            (get(1) as JSONArray).put(1, hexCell("0002000200"))
+            (get(1) as JSONArray).put(2, hexCell("0101010101"))
+        }
+        val snap = ContractStateSnapshot.parse(state)
+        requireNotNull(snap)
+        assertArrayEquals(keeps,  snap.p1Keeps)
+        assertArrayEquals(p2Sh,   snap.p2Shoots)
+        assertArrayEquals(p2K,    snap.p2Keeps)
+        assertArrayEquals(IntArray(5), snap.p1Shoots)
+    }
+
+    // ── SD pick scalars (group 1 cells 3-6) ─────────────────────────────
+
+    @Test
+    fun `parse decodes SD shoot and keep scalars`() {
+        val state = defaultStateArray().apply {
+            (get(1) as JSONArray).put(3, hexCell("01")) // p1SdShoot = 1
+            (get(1) as JSONArray).put(4, hexCell("02")) // p1SdKeep  = 2
+            (get(1) as JSONArray).put(5, hexCell("00")) // p2SdShoot = 0
+            (get(1) as JSONArray).put(6, hexCell("01")) // p2SdKeep  = 1
+        }
+        val snap = ContractStateSnapshot.parse(state)
+        requireNotNull(snap)
+        assertEquals(1, snap.p1SdShoot)
+        assertEquals(2, snap.p1SdKeep)
+        assertEquals(0, snap.p2SdShoot)
+        assertEquals(1, snap.p2SdKeep)
+    }
+
+    @Test
+    fun `parse decodes scores from group 1 cells 9-10`() {
+        val state = defaultStateArray().apply {
+            (get(1) as JSONArray).put(9,  hexCell("03"))   // p1Score = 3
+            (get(1) as JSONArray).put(10, hexCell("02"))   // p2Score = 2
+        }
+        val snap = ContractStateSnapshot.parse(state)
         requireNotNull(snap)
         assertEquals(3, snap.p1Score)
         assertEquals(2, snap.p2Score)
     }
 
     @Test
-    fun `cellNumber handles multi-byte little-endian (deadline as Uint64)`() {
-        // deadline = 0x12345678 = 305419896, little-endian "78563412".
-        val first = JSONArray().apply { repeat(10) { put(hexCell("")) } }
-        val second = JSONArray().apply {
-            repeat(13) { put(hexCell("")) }
-            put(hexCell("78563412"))  // deadline at flat index 23 = second[13]
-            put(hexCell(""))
-        }
-        val snap = ContractStateSnapshot.parse(JSONArray().put(first).put(second))
-        requireNotNull(snap)
-        assertEquals(0x12345678L, snap.deadline)
-    }
-
-    private fun hexCellWithoutHexField(): JSONObject =
-        JSONObject().put("type", "cell") // no hex, no number — pure default
-
-    @Test
-    fun `cellBoolean returns false for empty hex`() {
-        val flat = JSONArray().apply { repeat(25) { put(hexCell("")) } }
-        val snap = ContractStateSnapshot.parse(flat)
-        requireNotNull(snap)
-        assertFalse(snap.p1Committed)
-        assertFalse(snap.isDraw)
-    }
-
-    @Test
-    fun `parse decodes a fresh post-deploy state (all defaults)`() {
-        val snap = ContractStateSnapshot.parse(defaultStateArray())
-        requireNotNull(snap)
-
-        assertEquals(0, snap.phase)
-        assertFalse(snap.p1Committed)
-        assertFalse(snap.p2Committed)
-        assertFalse(snap.p1Revealed)
-        assertFalse(snap.p2Revealed)
-        assertFalse(snap.isDraw)
-        assertEquals(0, snap.p1Score)
-        assertEquals(0, snap.p2Score)
-        assertEquals(0L, snap.deadline)
-        assertEquals(0, snap.sdRound)
-        assertEquals(5, snap.p1Choices.size)
-        assertEquals(5, snap.p2Choices.size)
-        assertArrayEquals(IntArray(5), snap.p1Choices)
-        assertArrayEquals(IntArray(5), snap.p2Choices)
-        assertEquals(32, snap.player1.size)
-        assertEquals(32, snap.player2.size)
-    }
-
-    @Test
-    fun `parse reads p1Committed flag from cell 5`() {
-        val state = defaultStateArray().apply {
-            put(CELL_P1_COMMITTED, numberCell(1))
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertTrue(snap.p1Committed)
-        assertFalse(snap.p2Committed) // verify we read the right cell
-    }
-
-    @Test
-    fun `parse reads p2Committed flag from cell 6`() {
-        val state = defaultStateArray().apply {
-            put(CELL_P2_COMMITTED, numberCell(1))
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertTrue(snap.p2Committed)
-        assertFalse(snap.p1Committed)
-    }
-
-    @Test
-    fun `parse reads p1Revealed and p2Revealed from cells 17-18`() {
-        val state = defaultStateArray().apply {
-            put(CELL_P1_REVEALED, numberCell(1))
-            put(CELL_P2_REVEALED, numberCell(1))
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertTrue(snap.p1Revealed)
-        assertTrue(snap.p2Revealed)
-        assertTrue(snap.bothRevealed)
-    }
-
-    @Test
-    fun `parse reads p1c0-p1c4 from cells 7 through 11`() {
-        val choices = intArrayOf(0, 1, 2, 1, 0)
-        val state = defaultStateArray().apply {
-            choices.forEachIndexed { i, v -> put(7 + i, numberCell(v)) }
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertArrayEquals(choices, snap.p1Choices)
-        // p2 should still be zeroed — verify our index math doesn't bleed.
-        assertArrayEquals(IntArray(5), snap.p2Choices)
-    }
-
-    @Test
-    fun `parse reads p2c0-p2c4 from cells 12 through 16`() {
-        val choices = intArrayOf(2, 2, 0, 1, 2)
-        val state = defaultStateArray().apply {
-            choices.forEachIndexed { i, v -> put(12 + i, numberCell(v)) }
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertArrayEquals(choices, snap.p2Choices)
-        assertArrayEquals(IntArray(5), snap.p1Choices)
-    }
-
-    @Test
-    fun `parse decodes winner bytes from cell 21`() {
+    fun `parse decodes winner bytes from group 1 cell 11`() {
         val winnerHex = "ab".repeat(32)
         val state = defaultStateArray().apply {
-            put(21, hexCell(winnerHex))
+            (get(1) as JSONArray).put(11, hexCell(winnerHex))
         }
         val snap = ContractStateSnapshot.parse(state)
         requireNotNull(snap)
@@ -257,54 +187,51 @@ class ContractStateSnapshotTest {
     }
 
     @Test
-    fun `parse reads scores from cells 19-20`() {
+    fun `parse decodes deadline as little-endian Uint64`() {
         val state = defaultStateArray().apply {
-            put(19, numberCell(3))
-            put(20, numberCell(2))
+            // deadline at group 1 index 13; 0x12345678 = 305_419_896 LE
+            (get(1) as JSONArray).put(13, hexCell("78563412"))
         }
         val snap = ContractStateSnapshot.parse(state)
         requireNotNull(snap)
-        assertEquals(3, snap.p1Score)
-        assertEquals(2, snap.p2Score)
+        assertEquals(0x12345678L, snap.deadline)
     }
 
     @Test
-    fun `parse reads deadline from cell 23 as Long`() {
+    fun `parse decodes sdRound from group 1 cell 14`() {
         val state = defaultStateArray().apply {
-            put(23, numberCell(1_780_000_000L))
+            (get(1) as JSONArray).put(14, hexCell("02")) // sdRound = 2
         }
         val snap = ContractStateSnapshot.parse(state)
         requireNotNull(snap)
-        assertEquals(1_780_000_000L, snap.deadline)
+        assertEquals(2, snap.sdRound)
     }
+
+    // ── Derived helpers ─────────────────────────────────────────────────
 
     @Test
     fun `bothCommitted is true only when both flags are set`() {
-        val onlyP1 = ContractStateSnapshot.parse(defaultStateArray().apply {
-            put(CELL_P1_COMMITTED, numberCell(1))
-        })!!
-        assertFalse(onlyP1.bothCommitted)
+        val state = defaultStateArray().apply {
+            (get(0) as JSONArray).put(5, hexCell("01")) // p1Committed
+            (get(0) as JSONArray).put(6, hexCell("01")) // p2Committed
+        }
+        val snap = ContractStateSnapshot.parse(state)!!
+        assertTrue(snap.bothCommitted)
+    }
 
-        val both = ContractStateSnapshot.parse(defaultStateArray().apply {
-            put(CELL_P1_COMMITTED, numberCell(1))
-            put(CELL_P2_COMMITTED, numberCell(1))
-        })!!
-        assertTrue(both.bothCommitted)
+    @Test
+    fun `matchJoined is true when player2 has any non-zero byte`() {
+        val state = defaultStateArray().apply {
+            (get(0) as JSONArray).put(2, hexCell("01" + "00".repeat(31)))
+        }
+        val snap = ContractStateSnapshot.parse(state)!!
+        assertTrue(snap.matchJoined)
     }
 
     @Test
     fun `matchJoined is false when player2 is all zeros`() {
         val snap = ContractStateSnapshot.parse(defaultStateArray())!!
         assertFalse(snap.matchJoined)
-    }
-
-    @Test
-    fun `matchJoined is true when player2 has any non-zero byte`() {
-        val state = defaultStateArray().apply {
-            put(2, hexCell("01" + "00".repeat(31))) // first byte set
-        }
-        val snap = ContractStateSnapshot.parse(state)!!
-        assertTrue(snap.matchJoined)
     }
 
     @Test
@@ -319,27 +246,28 @@ class ContractStateSnapshotTest {
     fun `equals returns false when one boolean flag differs`() {
         val a = ContractStateSnapshot.parse(defaultStateArray())!!
         val b = ContractStateSnapshot.parse(defaultStateArray().apply {
-            put(CELL_P1_COMMITTED, numberCell(1))
+            (get(0) as JSONArray).put(5, hexCell("01"))
         })!!
         assertNotEquals(a, b)
     }
 
     @Test
-    fun `equals returns false when winner bytes differ`() {
+    fun `equals returns false when a Vector differs`() {
         val a = ContractStateSnapshot.parse(defaultStateArray())!!
         val b = ContractStateSnapshot.parse(defaultStateArray().apply {
-            put(21, hexCell("ff" + "00".repeat(31)))
+            (get(0) as JSONArray).put(7, hexCell("0102000201"))
         })!!
         assertNotEquals(a, b)
     }
 
     @Test
     fun `summary string mentions all critical flags`() {
-        val snap = ContractStateSnapshot.parse(defaultStateArray().apply {
-            put(CELL_P1_COMMITTED, numberCell(1))
-            put(19, numberCell(2))
-            put(20, numberCell(1))
-        })!!
+        val state = defaultStateArray().apply {
+            (get(0) as JSONArray).put(5, hexCell("01"))  // p1Committed
+            (get(1) as JSONArray).put(9, hexCell("02"))  // p1Score
+            (get(1) as JSONArray).put(10, hexCell("01")) // p2Score
+        }
+        val snap = ContractStateSnapshot.parse(state)!!
         val s = snap.summary()
         assertTrue(s, s.contains("p1Committed=true"))
         assertTrue(s, s.contains("score=2-1"))
@@ -349,23 +277,14 @@ class ContractStateSnapshotTest {
     // ── Test helpers ────────────────────────────────────────────────────
 
     /**
-     * Returns a 25-cell JSONArray representing a freshly-deployed contract
-     * with every field at its zero value. Tests override specific cells.
+     * Build a fresh post-deploy state array — 2 groups, all cells default
+     * to empty hex (the shape MidnightConfig.queryState actually returns
+     * before any tx lands). Tests override specific group/index cells.
      */
     private fun defaultStateArray(): JSONArray {
-        val arr = JSONArray()
-        for (i in 0 until EXPECTED_CELLS) {
-            arr.put(numberCell(0))
-        }
-        // Hex cells (Bytes<32>) overwrite the zero number cells where
-        // applicable. We always overwrite all of them so the shape is
-        // realistic.
-        arr.put(1, hexCell("00".repeat(32)))     // player1
-        arr.put(2, hexCell("00".repeat(32)))     // player2
-        arr.put(3, hexCell("00".repeat(32)))     // p1Commitment
-        arr.put(4, hexCell("00".repeat(32)))     // p2Commitment
-        arr.put(21, hexCell("00".repeat(32)))    // winner
-        return arr
+        val group0 = JSONArray().apply { repeat(GROUP0_CELLS) { put(hexCell("")) } }
+        val group1 = JSONArray().apply { repeat(GROUP1_CELLS) { put(hexCell("")) } }
+        return JSONArray().put(group0).put(group1)
     }
 
     private fun numberCell(value: Number): JSONObject =
@@ -375,12 +294,7 @@ class ContractStateSnapshotTest {
         JSONObject().put("type", "cell").put("hex", hex)
 
     companion object {
-        // Mirrors private constants in ContractStateSnapshot; duplicated
-        // intentionally so tests catch drift in the index map.
-        private const val EXPECTED_CELLS = 25
-        private const val CELL_P1_COMMITTED = 5
-        private const val CELL_P2_COMMITTED = 6
-        private const val CELL_P1_REVEALED = 17
-        private const val CELL_P2_REVEALED = 18
+        private const val GROUP0_CELLS = 8
+        private const val GROUP1_CELLS = 15
     }
 }

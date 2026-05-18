@@ -38,10 +38,27 @@ sealed class MatchState {
     data class P2Committing(override val address: String) : MatchState()
     data class BothCommitted(override val address: String) : MatchState()
 
-    // ── Reveal (P2 reveal auto-resolves on-chain) ──────────────────────
+    // ── Reveal (regulation) ────────────────────────────────────────────
     data class P1Revealing(override val address: String) : MatchState()
     data class P1Revealed(override val address: String) : MatchState()
     data class P2Revealing(override val address: String) : MatchState()
+
+    // ── Sudden death — one round at a time, parameterised by `round`. ──
+    //   After regulation drew, P2's reveal transitions to SdRoundOpen(1).
+    //   Each round walks the same Committing → Committed → Revealing →
+    //   Revealed sequence as regulation but for {shoot, keep} pairs.
+    //   After P2SdRevealed, the contract is either COMPLETE (transition
+    //   to Resolved) or back in SD_COMMITTING (transition to
+    //   SdRoundOpen(round + 1)).
+    data class SdRoundOpen(override val address: String, val round: Int) : MatchState()
+    data class P1SdCommitting(override val address: String, val round: Int) : MatchState()
+    data class P1SdCommitted(override val address: String, val round: Int) : MatchState()
+    data class P2SdCommitting(override val address: String, val round: Int) : MatchState()
+    data class BothSdCommitted(override val address: String, val round: Int) : MatchState()
+    data class P1SdRevealing(override val address: String, val round: Int) : MatchState()
+    data class P1SdRevealed(override val address: String, val round: Int) : MatchState()
+    data class P2SdRevealing(override val address: String, val round: Int) : MatchState()
+
     data class Resolved(val result: MatchResult) : MatchState() {
         override val address: String get() = result.contractAddress
     }
@@ -60,13 +77,21 @@ sealed class MatchState {
         is Deployed           -> "Match deployed"
         is JoiningAsP2        -> "Opponent joining…"
         is Joined             -> "Both players in"
-        is P1Committing       -> "Committing your choices…"
-        is P1Committed        -> "Your choices committed"
+        is P1Committing       -> "Committing your picks…"
+        is P1Committed        -> "Your picks committed"
         is P2Committing       -> "Opponent committing…"
         is BothCommitted      -> "Both players committed"
-        is P1Revealing        -> "Revealing your choices…"
-        is P1Revealed         -> "Your choices revealed"
+        is P1Revealing        -> "Revealing your picks…"
+        is P1Revealed         -> "Your picks revealed"
         is P2Revealing        -> "Opponent revealing…"
+        is SdRoundOpen        -> "Sudden death round $round"
+        is P1SdCommitting     -> "Committing SD round $round…"
+        is P1SdCommitted      -> "Your SD pick committed (round $round)"
+        is P2SdCommitting     -> "Opponent committing SD round $round…"
+        is BothSdCommitted    -> "Both committed (SD round $round)"
+        is P1SdRevealing      -> "Revealing SD round $round…"
+        is P1SdRevealed       -> "Your SD pick revealed (round $round)"
+        is P2SdRevealing      -> "Opponent revealing SD round $round…"
         is Resolved           -> "Match complete!"
         is Failed             -> "Failed: ${error.message ?: error.javaClass.simpleName}"
     }

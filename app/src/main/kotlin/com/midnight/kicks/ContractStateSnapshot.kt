@@ -5,17 +5,25 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * A typed view of the penalty contract's on-chain ledger.
+ * A typed view of the penalty contract V3's on-chain ledger.
  *
  * `MidnightConfig.queryState(address)` returns a positional `JSONArray` of
  * SCALE-decoded cells. Each cell is a JSONObject like
  * `{"type":"cell", "number": 1}` for Booleans/Uints/Counters, or
- * `{"type":"cell", "hex": "abc…"}` for Bytes<N>. This class translates that
- * raw shape into named fields matching `penalty.compact`.
+ * `{"type":"cell", "hex": "abc…"}` for Bytes<N> and `Vector<N, Uint<8>>`
+ * (concatenated element bytes). This class translates that raw shape into
+ * named fields matching `penalty.compact`.
  *
- * Cell indices verified against the compiled contract at
- * `assets/runtime/penalty-contract.js:3603+` — every `ledger()` getter
- * encodes its `idx` path explicitly, so the mapping below is not a guess.
+ * V3 splits storage across two top-level groups (verified against
+ * `assets/runtime/penalty-contract.js:4024+`):
+ *   - Group 0 (8 cells): phase, player1, player2, p1Commitment,
+ *     p2Commitment, p1Committed, p2Committed, p1Shoots
+ *   - Group 1 (15 cells): p1Keeps, p2Shoots, p2Keeps, p1SdShoot,
+ *     p1SdKeep, p2SdShoot, p2SdKeep, p1Revealed, p2Revealed, p1Score,
+ *     p2Score, winner, isDraw, deadline, sdRound
+ *
+ * Each `Vector<5, Uint<8>>` ledger field serializes to ONE cell holding
+ * 5 concatenated bytes (10 hex chars).
  *
  * The SDK does not yet expose a typed ledger wrapper for arbitrary
  * contracts; this parsing pattern is what every Kuira dApp ends up writing.
@@ -30,8 +38,14 @@ data class ContractStateSnapshot(
     val p2Commitment: ByteArray,
     val p1Committed: Boolean,
     val p2Committed: Boolean,
-    val p1Choices: IntArray,  // 5 elements, all 0 before reveal
-    val p2Choices: IntArray,  // 5 elements, all 0 before reveal
+    val p1Shoots: IntArray,   // 5 entries, all 0 before P1 reveals
+    val p1Keeps:  IntArray,
+    val p2Shoots: IntArray,
+    val p2Keeps:  IntArray,
+    val p1SdShoot: Int,       // 0 outside SD or before SD reveal
+    val p1SdKeep:  Int,
+    val p2SdShoot: Int,
+    val p2SdKeep:  Int,
     val p1Revealed: Boolean,
     val p2Revealed: Boolean,
     val p1Score: Int,
@@ -56,7 +70,7 @@ data class ContractStateSnapshot(
         "p1Revealed=$p1Revealed  p2Revealed=$p2Revealed  " +
         "score=$p1Score-$p2Score  isDraw=$isDraw  sdRound=$sdRound"
 
-    // Data class equality with arrays needs explicit overrides — IntelliJ-style.
+    // Data class equality with arrays needs explicit overrides.
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
@@ -68,8 +82,14 @@ data class ContractStateSnapshot(
         if (!p2Commitment.contentEquals(other.p2Commitment)) return false
         if (p1Committed != other.p1Committed) return false
         if (p2Committed != other.p2Committed) return false
-        if (!p1Choices.contentEquals(other.p1Choices)) return false
-        if (!p2Choices.contentEquals(other.p2Choices)) return false
+        if (!p1Shoots.contentEquals(other.p1Shoots)) return false
+        if (!p1Keeps.contentEquals(other.p1Keeps)) return false
+        if (!p2Shoots.contentEquals(other.p2Shoots)) return false
+        if (!p2Keeps.contentEquals(other.p2Keeps)) return false
+        if (p1SdShoot != other.p1SdShoot) return false
+        if (p1SdKeep != other.p1SdKeep) return false
+        if (p2SdShoot != other.p2SdShoot) return false
+        if (p2SdKeep != other.p2SdKeep) return false
         if (p1Revealed != other.p1Revealed) return false
         if (p2Revealed != other.p2Revealed) return false
         if (p1Score != other.p1Score) return false
@@ -89,8 +109,14 @@ data class ContractStateSnapshot(
         r = 31 * r + p2Commitment.contentHashCode()
         r = 31 * r + p1Committed.hashCode()
         r = 31 * r + p2Committed.hashCode()
-        r = 31 * r + p1Choices.contentHashCode()
-        r = 31 * r + p2Choices.contentHashCode()
+        r = 31 * r + p1Shoots.contentHashCode()
+        r = 31 * r + p1Keeps.contentHashCode()
+        r = 31 * r + p2Shoots.contentHashCode()
+        r = 31 * r + p2Keeps.contentHashCode()
+        r = 31 * r + p1SdShoot
+        r = 31 * r + p1SdKeep
+        r = 31 * r + p2SdShoot
+        r = 31 * r + p2SdKeep
         r = 31 * r + p1Revealed.hashCode()
         r = 31 * r + p2Revealed.hashCode()
         r = 31 * r + p1Score
@@ -103,30 +129,39 @@ data class ContractStateSnapshot(
     }
 
     companion object {
-        // ── Cell indices from penalty-contract.js ledger() getters ──
-        // Verified against the idx paths in the compiled contract; do NOT
-        // reorder unless the .compact field declarations change.
-        private const val CELL_PHASE = 0
-        private const val CELL_PLAYER1 = 1
-        private const val CELL_PLAYER2 = 2
+        // ── Flat-cell indices, V3 layout ────────────────────────────
+        // Verified against the `idx` paths in
+        // assets/runtime/penalty-contract.js (the JS contract emitted
+        // by `compactc 0.30.0`). Do NOT reorder unless the .compact
+        // field declarations change — every Vector<5, Uint<8>> field
+        // occupies exactly one cell, not five.
+        private const val CELL_PHASE         = 0
+        private const val CELL_PLAYER1       = 1
+        private const val CELL_PLAYER2       = 2
         private const val CELL_P1_COMMITMENT = 3
         private const val CELL_P2_COMMITMENT = 4
-        private const val CELL_P1_COMMITTED = 5
-        private const val CELL_P2_COMMITTED = 6
-        private const val CELL_P1C_FIRST = 7  // 7..11 inclusive
-        private const val CELL_P2C_FIRST = 12 // 12..16 inclusive
-        private const val CELL_P1_REVEALED = 17
-        private const val CELL_P2_REVEALED = 18
-        private const val CELL_P1_SCORE = 19
-        private const val CELL_P2_SCORE = 20
-        private const val CELL_WINNER = 21
-        private const val CELL_IS_DRAW = 22
-        private const val CELL_DEADLINE = 23
-        private const val CELL_SD_ROUND = 24
+        private const val CELL_P1_COMMITTED  = 5
+        private const val CELL_P2_COMMITTED  = 6
+        private const val CELL_P1_SHOOTS     = 7
+        private const val CELL_P1_KEEPS      = 8
+        private const val CELL_P2_SHOOTS     = 9
+        private const val CELL_P2_KEEPS      = 10
+        private const val CELL_P1_SD_SHOOT   = 11
+        private const val CELL_P1_SD_KEEP    = 12
+        private const val CELL_P2_SD_SHOOT   = 13
+        private const val CELL_P2_SD_KEEP    = 14
+        private const val CELL_P1_REVEALED   = 15
+        private const val CELL_P2_REVEALED   = 16
+        private const val CELL_P1_SCORE      = 17
+        private const val CELL_P2_SCORE      = 18
+        private const val CELL_WINNER        = 19
+        private const val CELL_IS_DRAW       = 20
+        private const val CELL_DEADLINE      = 21
+        private const val CELL_SD_ROUND      = 22
 
-        private const val EXPECTED_CELLS = 25
+        private const val EXPECTED_CELLS = 23
         private const val BYTES32_LEN = 32
-        private const val CHOICES_PER_BATCH = 5
+        private const val PICKS_PER_ARRAY = 5
         private const val TAG = "ContractStateSnapshot"
 
         /**
@@ -135,13 +170,9 @@ data class ContractStateSnapshot(
          * expect (the contract hasn't deployed yet, or the .compact schema
          * has drifted and our cell-index map is stale).
          *
-         * The SDK's state layout depends on the contract. Observed shapes:
-         *  - BBoard: flat positional cells at the top, `{"number": N}`.
-         *  - Penalty: split storage `[[10 cells], [15 cells]]`, each cell
-         *    `{"hex": "…"}` SCALE-encoded.
-         *
-         * We treat both uniformly: recursively flatten any nested JSONArrays
-         * into a single linear cell list, then index by field number.
+         * The penalty contract stores its ledger in two top-level groups
+         * (`[[8 cells], [15 cells]]`). `flattenCells` walks the nested
+         * tree depth-first, producing a single 23-cell positional list.
          */
         fun parse(state: JSONArray): ContractStateSnapshot? {
             val cells = flattenCells(state)
@@ -158,8 +189,14 @@ data class ContractStateSnapshot(
                     p2Commitment = cellHex(cells, CELL_P2_COMMITMENT, BYTES32_LEN),
                     p1Committed  = cellBoolean(cells, CELL_P1_COMMITTED),
                     p2Committed  = cellBoolean(cells, CELL_P2_COMMITTED),
-                    p1Choices    = IntArray(CHOICES_PER_BATCH) { cellNumber(cells, CELL_P1C_FIRST + it).toInt() },
-                    p2Choices    = IntArray(CHOICES_PER_BATCH) { cellNumber(cells, CELL_P2C_FIRST + it).toInt() },
+                    p1Shoots     = cellVectorUint8(cells, CELL_P1_SHOOTS, PICKS_PER_ARRAY),
+                    p1Keeps      = cellVectorUint8(cells, CELL_P1_KEEPS,  PICKS_PER_ARRAY),
+                    p2Shoots     = cellVectorUint8(cells, CELL_P2_SHOOTS, PICKS_PER_ARRAY),
+                    p2Keeps      = cellVectorUint8(cells, CELL_P2_KEEPS,  PICKS_PER_ARRAY),
+                    p1SdShoot    = cellNumber(cells, CELL_P1_SD_SHOOT).toInt(),
+                    p1SdKeep     = cellNumber(cells, CELL_P1_SD_KEEP).toInt(),
+                    p2SdShoot    = cellNumber(cells, CELL_P2_SD_SHOOT).toInt(),
+                    p2SdKeep     = cellNumber(cells, CELL_P2_SD_KEEP).toInt(),
                     p1Revealed   = cellBoolean(cells, CELL_P1_REVEALED),
                     p2Revealed   = cellBoolean(cells, CELL_P2_REVEALED),
                     p1Score      = cellNumber(cells, CELL_P1_SCORE).toInt(),
@@ -178,7 +215,7 @@ data class ContractStateSnapshot(
         /**
          * Walk an arbitrarily-nested tree of JSONArrays containing JSONObject
          * cells and return a flat positional list. Handles BBoard's flat
-         * layout, penalty's split `[[10], [15]]`, and any other nesting the
+         * layout, penalty's split `[[8], [15]]`, and any other nesting the
          * SDK may surface in the future.
          */
         internal fun flattenCells(state: JSONArray): List<JSONObject> {
@@ -226,11 +263,26 @@ data class ContractStateSnapshot(
             }
         }
 
+        /**
+         * `Vector<N, Uint<8>>` encodes as ONE cell whose hex is the
+         * concatenated element bytes (`{"hex": "0102000201"}` for the
+         * vector [1,2,0,2,1]). Returns zeros if missing or wrong length.
+         */
+        private fun cellVectorUint8(
+            cells: List<JSONObject>,
+            index: Int,
+            length: Int,
+        ): IntArray {
+            val hex = cells.getOrNull(index)?.optString("hex", "") ?: ""
+            if (hex.length != length * 2) return IntArray(length)
+            return IntArray(length) { i ->
+                hex.substring(i * 2, i * 2 + 2).toInt(16)
+            }
+        }
+
         /** Parse a little-endian hex string into a Long (SCALE codec convention). */
         private fun parseHexLittleEndian(hex: String): Long {
             if (hex.isEmpty()) return 0L
-            // Up to 8 bytes for a Long; any more we just truncate (the
-            // affected fields — Counter / Uint<64> — fit a Long).
             val byteCount = (hex.length / 2).coerceAtMost(8)
             var result = 0L
             for (i in 0 until byteCount) {

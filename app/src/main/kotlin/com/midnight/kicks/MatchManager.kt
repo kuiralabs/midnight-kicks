@@ -100,11 +100,28 @@ class MatchManager(
     // on the other phone (their key, not stored here at all).
     private val p2SecretKey = ByteArray(SECRET_KEY_BYTES).also { random.nextBytes(it) }
 
-    // Choices + nonces are captured at commit time and reused at reveal.
-    private var p1Choices: IntArray? = null
-    private var p1Nonce: ByteArray? = null
-    private var p2Choices: IntArray? = null
-    private var p2Nonce: ByteArray? = null
+    // V3 regulation picks + nonces — captured at commit, reused at reveal.
+    // Each player commits shoots[5] + keeps[5] together; one nonce binds
+    // the whole regulation batch.
+    private var p1Shoots: IntArray? = null
+    private var p1Keeps:  IntArray? = null
+    private var p2Shoots: IntArray? = null
+    private var p2Keeps:  IntArray? = null
+    private var p1RegulationNonce: ByteArray? = null
+    private var p2RegulationNonce: ByteArray? = null
+
+    // V3 sudden death picks + nonces. A fresh pair commits per SD round
+    // (re-using a nonce across rounds would leak the previous round's
+    // picks the moment the next round's commit lands).
+    private var p1SdShoot: Int = 0
+    private var p1SdKeep:  Int = 0
+    private var p2SdShoot: Int = 0
+    private var p2SdKeep:  Int = 0
+    private var p1SdNonce: ByteArray? = null
+    private var p2SdNonce: ByteArray? = null
+
+    // Optional SD pairings captured during the match, for the replay UI.
+    private val sdRoundsForReplay = mutableListOf<SdRoundData>()
 
     /** Last completed match's data, used by [KicksActivity] for the replay payload. */
     var lastResult: MatchResult? = null
@@ -263,9 +280,10 @@ class MatchManager(
         setState(MatchState.Joined(current.address))
     }
 
-    /** P1 commits their five choices. Transitions [Joined] → [P1Committed]. */
-    suspend fun submitP1Choices(choices: IntArray) {
-        require(choices.size == ROUNDS_PER_BATCH) { "Need $ROUNDS_PER_BATCH choices" }
+    /** P1 commits their regulation picks. Transitions [Joined] → [P1Committed]. */
+    suspend fun submitP1Picks(shoots: IntArray, keeps: IntArray) {
+        require(shoots.size == PICKS_PER_ARRAY) { "Need $PICKS_PER_ARRAY shoots" }
+        require(keeps.size == PICKS_PER_ARRAY)  { "Need $PICKS_PER_ARRAY keeps" }
         transitionFrom<MatchState.Joined, Unit>(
             inProgress = { MatchState.P1Committing(it.address) },
             onSuccess = { prev, _ -> MatchState.P1Committed(prev.address) },
@@ -274,15 +292,17 @@ class MatchManager(
             requireSdk.wallet.refresh()
 
             val nonce = ByteArray(NONCE_BYTES).also { random.nextBytes(it) }
-            commitChoices(p1SecretKey, prev.address, choices, nonce)
-            p1Choices = choices.copyOf()
-            p1Nonce = nonce
+            commitRegulation(p1SecretKey, prev.address, shoots, keeps, nonce)
+            p1Shoots = shoots.copyOf()
+            p1Keeps  = keeps.copyOf()
+            p1RegulationNonce = nonce
         }
     }
 
-    /** P2 commits their five choices. Transitions [P1Committed] → [BothCommitted]. */
-    suspend fun submitP2Choices(choices: IntArray) {
-        require(choices.size == ROUNDS_PER_BATCH) { "Need $ROUNDS_PER_BATCH choices" }
+    /** P2 commits their regulation picks. Transitions [P1Committed] → [BothCommitted]. */
+    suspend fun submitP2Picks(shoots: IntArray, keeps: IntArray) {
+        require(shoots.size == PICKS_PER_ARRAY) { "Need $PICKS_PER_ARRAY shoots" }
+        require(keeps.size == PICKS_PER_ARRAY)  { "Need $PICKS_PER_ARRAY keeps" }
         transitionFrom<MatchState.P1Committed, Unit>(
             inProgress = { MatchState.P2Committing(it.address) },
             onSuccess = { prev, _ -> MatchState.BothCommitted(prev.address) },
@@ -291,43 +311,144 @@ class MatchManager(
             requireSdk.wallet.refresh()
 
             val nonce = ByteArray(NONCE_BYTES).also { random.nextBytes(it) }
-            commitChoices(p2SecretKey, prev.address, choices, nonce)
-            p2Choices = choices.copyOf()
-            p2Nonce = nonce
+            commitRegulation(p2SecretKey, prev.address, shoots, keeps, nonce)
+            p2Shoots = shoots.copyOf()
+            p2Keeps  = keeps.copyOf()
+            p2RegulationNonce = nonce
         }
     }
 
-    /** P1 reveals their choices. Transitions [BothCommitted] → [P1Revealed]. */
+    /** P1 reveals their regulation picks. Transitions [BothCommitted] → [P1Revealed]. */
     suspend fun revealP1() = transitionFrom<MatchState.BothCommitted, Unit>(
         inProgress = { MatchState.P1Revealing(it.address) },
         onSuccess = { prev, _ -> MatchState.P1Revealed(prev.address) },
     ) { prev ->
-        val choices = requireNotNull(p1Choices) { "No P1 choices captured" }
-        val nonce = requireNotNull(p1Nonce) { "No P1 nonce captured" }
+        val shoots = requireNotNull(p1Shoots) { "No P1 shoots captured" }
+        val keeps  = requireNotNull(p1Keeps)  { "No P1 keeps captured" }
+        val nonce  = requireNotNull(p1RegulationNonce) { "No P1 nonce captured" }
         delay(INTER_TX_SETTLE_MS)
         requireSdk.wallet.refresh()
-        revealChoices(p1SecretKey, prev.address, choices, nonce)
+        revealRegulation(p1SecretKey, prev.address, shoots, keeps, nonce)
     }
 
     /**
-     * P2 reveals. The contract auto-resolves when the second reveal lands.
-     * Transitions [P1Revealed] → [Resolved].
+     * P2 reveals. On the second reveal the contract either finalises
+     * ([MatchState.Resolved]) or enters sudden death — callers should
+     * read the contract state after this transitions and dispatch into
+     * the SD round loop if needed.
+     *
+     * Transitions [P1Revealed] → [Resolved] (regulation decisive) **or**
+     * [P1Revealed] → [SdRoundOpen] (regulation drew).
      */
-    suspend fun revealP2(): MatchResult = transitionFrom<MatchState.P1Revealed, MatchResult>(
+    suspend fun revealP2(): MatchResult? = transitionFrom<MatchState.P1Revealed, MatchResult?>(
         inProgress = { MatchState.P2Revealing(it.address) },
-        onSuccess = { _, result -> MatchState.Resolved(result) },
+        onSuccess = { prev, result ->
+            if (result != null) MatchState.Resolved(result)
+            else MatchState.SdRoundOpen(prev.address, round = 1)
+        },
     ) { prev ->
-        val p1c = requireNotNull(p1Choices) { "No P1 choices captured" }
-        val p2c = requireNotNull(p2Choices) { "No P2 choices captured" }
-        val p2n = requireNotNull(p2Nonce) { "No P2 nonce captured" }
+        val p2s = requireNotNull(p2Shoots) { "No P2 shoots captured" }
+        val p2k = requireNotNull(p2Keeps)  { "No P2 keeps captured" }
+        val p2n = requireNotNull(p2RegulationNonce) { "No P2 nonce captured" }
         delay(INTER_TX_SETTLE_MS)
         requireSdk.wallet.refresh()
-        revealChoices(p2SecretKey, prev.address, p2c, p2n)
+        revealRegulation(p2SecretKey, prev.address, p2s, p2k, p2n)
 
-        MatchResult(playerChoices = p1c, aiChoices = p2c, contractAddress = prev.address).also {
-            lastResult = it
+        // Did regulation decide it, or did we draw into SD?
+        val snap = StatePoller(requireSdk.config, prev.address).readOnce()
+        val phase = snap?.phase ?: -1
+        if (phase == PHASE_COMPLETE) {
+            buildMatchResult(prev.address).also { lastResult = it }
+        } else {
+            null   // SD round 1 is now open; orchestrator drives the SD loop
         }
     }
+
+    // ── Sudden death — single-pairing rounds until decisive ─────────────
+    //
+    // Each round both players commit a {shoot, keep} pair; second reveal
+    // either resolves the match (one player scored, the other missed) or
+    // advances to round+1. Local picks are captured at commit; the contract
+    // captures the pair for replay once both reveals land. Nonces are fresh
+    // per player per round — reusing across rounds leaks past picks once
+    // the next round's commitment hash hits chain.
+
+    /** P1 commits this SD round's {shoot, keep}. SdRoundOpen → P1SdCommitted. */
+    suspend fun submitP1SdPick(shoot: Int, keep: Int) =
+        transitionFrom<MatchState.SdRoundOpen, Unit>(
+            inProgress = { MatchState.P1SdCommitting(it.address, it.round) },
+            onSuccess  = { prev, _ -> MatchState.P1SdCommitted(prev.address, prev.round) },
+        ) { prev ->
+            delay(INTER_TX_SETTLE_MS)
+            requireSdk.wallet.refresh()
+            val nonce = ByteArray(NONCE_BYTES).also { random.nextBytes(it) }
+            commitSuddenDeath(p1SecretKey, prev.address, shoot, keep, nonce)
+            p1SdShoot = shoot
+            p1SdKeep  = keep
+            p1SdNonce = nonce
+        }
+
+    /** P2 commits this SD round's {shoot, keep}. P1SdCommitted → BothSdCommitted. */
+    suspend fun submitP2SdPick(shoot: Int, keep: Int) =
+        transitionFrom<MatchState.P1SdCommitted, Unit>(
+            inProgress = { MatchState.P2SdCommitting(it.address, it.round) },
+            onSuccess  = { prev, _ -> MatchState.BothSdCommitted(prev.address, prev.round) },
+        ) { prev ->
+            delay(INTER_TX_SETTLE_MS)
+            requireSdk.wallet.refresh()
+            val nonce = ByteArray(NONCE_BYTES).also { random.nextBytes(it) }
+            commitSuddenDeath(p2SecretKey, prev.address, shoot, keep, nonce)
+            p2SdShoot = shoot
+            p2SdKeep  = keep
+            p2SdNonce = nonce
+        }
+
+    /** P1 reveals SD pick. BothSdCommitted → P1SdRevealed. */
+    suspend fun revealP1Sd() = transitionFrom<MatchState.BothSdCommitted, Unit>(
+        inProgress = { MatchState.P1SdRevealing(it.address, it.round) },
+        onSuccess  = { prev, _ -> MatchState.P1SdRevealed(prev.address, prev.round) },
+    ) { prev ->
+        val nonce = requireNotNull(p1SdNonce) { "No P1 SD nonce captured" }
+        delay(INTER_TX_SETTLE_MS)
+        requireSdk.wallet.refresh()
+        revealSuddenDeath(p1SecretKey, prev.address, p1SdShoot, p1SdKeep, nonce)
+    }
+
+    /**
+     * P2 reveals SD pick. The contract scores this pairing and either
+     * finalises (transition to [MatchState.Resolved]) or opens another
+     * SD round (transition to [MatchState.SdRoundOpen]).
+     *
+     * Returns the final [MatchResult] when the match resolves; null when
+     * SD continues so the caller can loop.
+     */
+    suspend fun revealP2Sd(): MatchResult? =
+        transitionFrom<MatchState.P1SdRevealed, MatchResult?>(
+            inProgress = { MatchState.P2SdRevealing(it.address, it.round) },
+            onSuccess  = { prev, result ->
+                if (result != null) MatchState.Resolved(result)
+                else MatchState.SdRoundOpen(prev.address, prev.round + 1)
+            },
+        ) { prev ->
+            val nonce = requireNotNull(p2SdNonce) { "No P2 SD nonce captured" }
+            delay(INTER_TX_SETTLE_MS)
+            requireSdk.wallet.refresh()
+            revealSuddenDeath(p2SecretKey, prev.address, p2SdShoot, p2SdKeep, nonce)
+
+            // Record this pairing for the replay UI.
+            sdRoundsForReplay += SdRoundData(
+                round = prev.round,
+                p1Shoot = p1SdShoot, p1Keep = p1SdKeep,
+                p2Shoot = p2SdShoot, p2Keep = p2SdKeep,
+            )
+
+            val snap = StatePoller(requireSdk.config, prev.address).readOnce()
+            if (snap?.phase == PHASE_COMPLETE) {
+                buildMatchResult(prev.address).also { lastResult = it }
+            } else {
+                null
+            }
+        }
 
     // ── PvP wait helpers (observe opponent via chain) ───────────────────
     //
@@ -402,9 +523,9 @@ class MatchManager(
      * P2-side mirror of [waitForP2Revealed]: this device is P2 and is
      * waiting for P1's reveal transaction. Transitions [BothCommitted] →
      * [P1Revealed] when the chain reports `p1Revealed`, and **captures
-     * `p1Choices` from the chain snapshot** so the subsequent [revealP2]
-     * can build a full [MatchResult] without local P1 data (we don't
-     * have it on P2's device).
+     * `p1Shoots`/`p1Keeps` from the chain snapshot** so the subsequent
+     * [revealP2] can build a full [MatchResult] without local P1 data
+     * (we don't have it on P2's device).
      */
     suspend fun waitForP1Revealed(
         timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
@@ -414,9 +535,10 @@ class MatchManager(
             "waitForP1Revealed: expected BothCommitted, got ${current::class.simpleName}"
         }
         val snap = awaitContractState(timeoutMs) { it.p1Revealed }
-        // Capture into the field revealP2 already reads — keeps the
-        // PvAI path's packaging logic intact.
-        p1Choices = snap.p1Choices.copyOf()
+        // Capture P1's revealed regulation picks from chain — P2 doesn't
+        // have them locally and needs them for the replay payload.
+        p1Shoots = snap.p1Shoots.copyOf()
+        p1Keeps  = snap.p1Keeps.copyOf()
         setState(MatchState.P1Revealed(current.address))
     }
 
@@ -428,19 +550,96 @@ class MatchManager(
      *
      * Transitions [P1Revealed] → [Resolved].
      */
+    // ── SD wait helpers — same shape as regulation, parameterised on round ─
+
+    /** P2-side: wait for P1's SD commit to land. SdRoundOpen → P1SdCommitted. */
+    suspend fun waitForP1SdCommitted(timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS) {
+        val current = state.value
+        require(current is MatchState.SdRoundOpen) {
+            "waitForP1SdCommitted: expected SdRoundOpen, got ${current::class.simpleName}"
+        }
+        awaitContractState(timeoutMs) { it.p1Committed && it.sdRound == current.round }
+        setState(MatchState.P1SdCommitted(current.address, current.round))
+    }
+
+    /** P1-side: wait for P2's SD commit to land. P1SdCommitted → BothSdCommitted. */
+    suspend fun waitForP2SdCommitted(timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS) =
+        transitionFrom<MatchState.P1SdCommitted, Unit>(
+            inProgress = { it },
+            onSuccess  = { prev, _ -> MatchState.BothSdCommitted(prev.address, prev.round) },
+        ) { prev ->
+            awaitContractState(timeoutMs) { it.p2Committed && it.sdRound == prev.round }
+            Unit
+        }
+
+    /**
+     * P2-side: wait for P1's SD reveal. Captures P1's shoot+keep from
+     * the chain snapshot so this device can build the replay.
+     * BothSdCommitted → P1SdRevealed.
+     */
+    suspend fun waitForP1SdRevealed(timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS) {
+        val current = state.value
+        require(current is MatchState.BothSdCommitted) {
+            "waitForP1SdRevealed: expected BothSdCommitted, got ${current::class.simpleName}"
+        }
+        val snap = awaitContractState(timeoutMs) {
+            it.p1Revealed && it.sdRound == current.round
+        }
+        p1SdShoot = snap.p1SdShoot
+        p1SdKeep  = snap.p1SdKeep
+        setState(MatchState.P1SdRevealed(current.address, current.round))
+    }
+
+    /**
+     * P1-side: wait for P2's SD reveal. Contract auto-resolves or opens
+     * the next SD round. P1SdRevealed → (Resolved | SdRoundOpen(r+1)).
+     */
+    suspend fun waitForP2SdRevealed(
+        timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
+    ): MatchResult? = transitionFrom<MatchState.P1SdRevealed, MatchResult?>(
+        inProgress = { it },
+        onSuccess = { prev, result ->
+            if (result != null) MatchState.Resolved(result)
+            else MatchState.SdRoundOpen(prev.address, prev.round + 1)
+        },
+    ) { prev ->
+        val snap = awaitContractState(timeoutMs) {
+            it.p2Revealed && it.sdRound == prev.round
+        }
+        // Capture P2's SD pair for the replay payload.
+        p2SdShoot = snap.p2SdShoot
+        p2SdKeep  = snap.p2SdKeep
+        sdRoundsForReplay += SdRoundData(
+            round = prev.round,
+            p1Shoot = p1SdShoot, p1Keep = p1SdKeep,
+            p2Shoot = p2SdShoot, p2Keep = p2SdKeep,
+        )
+
+        if (snap.phase == PHASE_COMPLETE) {
+            buildMatchResult(prev.address).also { lastResult = it }
+        } else {
+            null
+        }
+    }
+
     suspend fun waitForP2Revealed(
         timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
-    ): MatchResult = transitionFrom<MatchState.P1Revealed, MatchResult>(
+    ): MatchResult? = transitionFrom<MatchState.P1Revealed, MatchResult?>(
         inProgress = { it },
-        onSuccess = { _, result -> MatchState.Resolved(result) },
+        onSuccess = { prev, result ->
+            if (result != null) MatchState.Resolved(result)
+            else MatchState.SdRoundOpen(prev.address, round = 1)
+        },
     ) { prev ->
         val snap = awaitContractState(timeoutMs) { it.p2Revealed }
-        val p1c = requireNotNull(p1Choices) { "No P1 choices captured" }
-        MatchResult(
-            playerChoices = p1c,
-            aiChoices = snap.p2Choices,  // historical field name; in PvP it's the friend's
-            contractAddress = prev.address,
-        ).also { lastResult = it }
+        // Capture P2's regulation picks for the replay payload.
+        p2Shoots = snap.p2Shoots.copyOf()
+        p2Keeps  = snap.p2Keeps.copyOf()
+        if (snap.phase == PHASE_COMPLETE) {
+            buildMatchResult(prev.address).also { lastResult = it }
+        } else {
+            null  // SD round 1 open
+        }
     }
 
     // ── Orchestrators ───────────────────────────────────────────────────
@@ -455,17 +654,37 @@ class MatchManager(
      * flow is the only progress surface. This is the canonical pattern
      * for a Kuira dApp.
      */
-    suspend fun playAgainstAi(playerChoices: IntArray): MatchResult {
-        val aiChoices = generateAiChoices()
-        Log.i(TAG, "AI choices: ${aiChoices.map(::dirLabel)}")
+    suspend fun playAgainstAi(playerShoots: IntArray, playerKeeps: IntArray): MatchResult {
+        val aiShoots = generateAiPicks()
+        val aiKeeps  = generateAiPicks()
+        Log.i(TAG, "AI shoots: ${aiShoots.map(::dirLabel)}")
+        Log.i(TAG, "AI keeps:  ${aiKeeps.map(::dirLabel)}")
 
         if (state.value is MatchState.Idle) initSdk()
         deployMatch()
         aiJoin()
-        submitP1Choices(playerChoices)
-        submitP2Choices(aiChoices)
+        submitP1Picks(playerShoots, playerKeeps)
+        submitP2Picks(aiShoots, aiKeeps)
         revealP1()
-        return revealP2()
+        var result: MatchResult? = revealP2()
+        // Sudden-death loop — repeats until decisive. The AI picks fresh
+        // L/C/R values each round (uniform random); a real player chooses
+        // via the Unity choice UI between rounds.
+        while (result == null) {
+            val aiShoot = random.nextInt(DIRECTION_COUNT)
+            val aiKeep  = random.nextInt(DIRECTION_COUNT)
+            val pShoot  = random.nextInt(DIRECTION_COUNT) // placeholder — see PvAI SD note below
+            val pKeep   = random.nextInt(DIRECTION_COUNT)
+            // TODO Phase C — UI hand-off for SD picks. For PvAI today the
+            // human's SD pair is auto-generated to keep the loop moving;
+            // KicksActivity will surface a "pick your SD shot/save" panel
+            // when the Unity bridge gains it.
+            submitP1SdPick(pShoot, pKeep)
+            submitP2SdPick(aiShoot, aiKeep)
+            revealP1Sd()
+            result = revealP2Sd()
+        }
+        return result
     }
 
     /**
@@ -481,11 +700,24 @@ class MatchManager(
      * step so the user can resume cleanly (Phase 4 follow-up: encrypted
      * key persistence so resume works across process death too).
      */
-    suspend fun playAsP1(choices: IntArray): MatchResult {
-        submitP1Choices(choices)
+    suspend fun playAsP1(shoots: IntArray, keeps: IntArray): MatchResult {
+        submitP1Picks(shoots, keeps)
         waitForP2Committed()
         revealP1()
-        return waitForP2Revealed()
+        var result: MatchResult? = waitForP2Revealed()
+        // SD loop — caller of playAsP1 is not yet wired to gather per-round
+        // SD picks from the UI (Phase C). For now we use random picks so
+        // the loop completes; KicksActivity will replace this with a UI
+        // hand-off once the choice bridge gains an SD message.
+        while (result == null) {
+            val pShoot = random.nextInt(DIRECTION_COUNT)
+            val pKeep  = random.nextInt(DIRECTION_COUNT)
+            submitP1SdPick(pShoot, pKeep)
+            waitForP2SdCommitted()
+            revealP1Sd()
+            result = waitForP2SdRevealed()
+        }
+        return result
     }
 
     /**
@@ -495,12 +727,36 @@ class MatchManager(
      * reveals our own. The contract auto-resolves on the second reveal
      * and [revealP2] returns the [MatchResult].
      */
-    suspend fun playAsP2(choices: IntArray): MatchResult {
+    suspend fun playAsP2(shoots: IntArray, keeps: IntArray): MatchResult {
         waitForP1Committed()
-        submitP2Choices(choices)
+        submitP2Picks(shoots, keeps)
         waitForP1Revealed()
-        return revealP2()
+        var result: MatchResult? = revealP2()
+        // SD loop — random picks until UI hand-off lands (Phase C).
+        while (result == null) {
+            waitForP1SdCommitted()
+            val pShoot = random.nextInt(DIRECTION_COUNT)
+            val pKeep  = random.nextInt(DIRECTION_COUNT)
+            submitP2SdPick(pShoot, pKeep)
+            waitForP1SdRevealed()
+            result = revealP2Sd()
+        }
+        return result
     }
+
+    /**
+     * Assemble a [MatchResult] from the captured per-player picks and any
+     * SD pairings collected during the match. Callable as soon as the
+     * contract reports [PHASE_COMPLETE].
+     */
+    private fun buildMatchResult(address: String): MatchResult = MatchResult(
+        p1Shoots = requireNotNull(p1Shoots) { "p1Shoots not captured" }.copyOf(),
+        p1Keeps  = requireNotNull(p1Keeps)  { "p1Keeps not captured" }.copyOf(),
+        p2Shoots = requireNotNull(p2Shoots) { "p2Shoots not captured" }.copyOf(),
+        p2Keeps  = requireNotNull(p2Keeps)  { "p2Keeps not captured" }.copyOf(),
+        sdRounds = sdRoundsForReplay.toList(),
+        contractAddress = address,
+    )
 
     fun close() {
         managerScope.cancel()  // stops StatePoller and any in-flight observers
@@ -509,17 +765,19 @@ class MatchManager(
         sdk = null
         p1SecretKey.fill(0)
         p2SecretKey.fill(0)
-        p1Nonce?.fill(0)
-        p2Nonce?.fill(0)
+        p1RegulationNonce?.fill(0)
+        p2RegulationNonce?.fill(0)
+        p1SdNonce?.fill(0)
+        p2SdNonce?.fill(0)
         seed?.fill(0)
         seed = null
     }
 
     // ── Internal helpers ────────────────────────────────────────────────
 
-    /** Generate AI choices locally. Each round is independent [0..2]. */
-    private fun generateAiChoices(): IntArray =
-        IntArray(ROUNDS_PER_BATCH) { random.nextInt(DIRECTION_COUNT) }
+    /** Generate one AI picks array (shoots or keeps) for regulation. */
+    private fun generateAiPicks(): IntArray =
+        IntArray(PICKS_PER_ARRAY) { random.nextInt(DIRECTION_COUNT) }
 
     private fun dirLabel(d: Int): String = when (d) { 0 -> "L"; 1 -> "C"; 2 -> "R"; else -> "?" }
 
@@ -610,51 +868,105 @@ class MatchManager(
         contract.call(circuitName, *args) { stage -> Log.d(TAG, "$circuitName: ${stage.javaClass.simpleName}") }
     }
 
-    private suspend fun commitChoices(
+    private suspend fun commitRegulation(
         secretKey: ByteArray,
         address: String,
-        choices: IntArray,
+        shoots: IntArray,
+        keeps: IntArray,
         nonce: ByteArray,
     ) {
-        val contract = createContractHandle(secretKey, address, choices, nonce)
-        contract.call("commitBatch") { stage -> Log.d(TAG, "commit: ${stage.javaClass.simpleName}") }
+        val contract = createContractHandle(
+            secretKey, address, shoots = shoots, keeps = keeps, nonce = nonce,
+        )
+        contract.call("commitRegulation") { stage -> Log.d(TAG, "commitRegulation: ${stage.javaClass.simpleName}") }
     }
 
-    private suspend fun revealChoices(
+    private suspend fun revealRegulation(
         secretKey: ByteArray,
         address: String,
-        choices: IntArray,
+        shoots: IntArray,
+        keeps: IntArray,
         nonce: ByteArray,
     ) {
-        val contract = createContractHandle(secretKey, address, choices, nonce)
-        contract.call("revealBatch") { stage -> Log.d(TAG, "reveal: ${stage.javaClass.simpleName}") }
+        val contract = createContractHandle(
+            secretKey, address, shoots = shoots, keeps = keeps, nonce = nonce,
+        )
+        contract.call("revealRegulation") { stage -> Log.d(TAG, "revealRegulation: ${stage.javaClass.simpleName}") }
     }
 
+    private suspend fun commitSuddenDeath(
+        secretKey: ByteArray,
+        address: String,
+        sdShoot: Int,
+        sdKeep: Int,
+        nonce: ByteArray,
+    ) {
+        val contract = createContractHandle(
+            secretKey, address, sdShoot = sdShoot, sdKeep = sdKeep, nonce = nonce,
+        )
+        contract.call("commitSuddenDeath") { stage -> Log.d(TAG, "commitSD: ${stage.javaClass.simpleName}") }
+    }
+
+    private suspend fun revealSuddenDeath(
+        secretKey: ByteArray,
+        address: String,
+        sdShoot: Int,
+        sdKeep: Int,
+        nonce: ByteArray,
+    ) {
+        val contract = createContractHandle(
+            secretKey, address, sdShoot = sdShoot, sdKeep = sdKeep, nonce = nonce,
+        )
+        contract.call("revealSuddenDeath") { stage -> Log.d(TAG, "revealSD: ${stage.javaClass.simpleName}") }
+    }
+
+    /**
+     * Single contract-handle factory. Always registers every witness — the
+     * Compact runtime expects all witness names referenced by the JS to be
+     * declared, even if only a subset is exercised by the circuit being
+     * called. Unused witnesses receive zero-filled bytes (their value is
+     * never consumed; the proof's private-input section will only contain
+     * the witnesses the active circuit actually evaluates).
+     *
+     * V3 witnesses:
+     *   - localSecretKey:  Bytes<32>
+     *   - localNonce:      Bytes<32>
+     *   - localShoots:     Vector<5, Uint<8>>  → 5 concatenated bytes
+     *   - localKeeps:      Vector<5, Uint<8>>  → 5 concatenated bytes
+     *   - localSdShoot:    Uint<8>             → 1 byte
+     *   - localSdKeep:     Uint<8>             → 1 byte
+     */
     private fun createContractHandle(
         secretKey: ByteArray,
         address: String?,
-        choices: IntArray? = null,
+        shoots: IntArray? = null,
+        keeps:  IntArray? = null,
+        sdShoot: Int? = null,
+        sdKeep:  Int? = null,
         nonce: ByteArray? = null,
         verifierKeys: Map<String, ByteArray>? = null,
     ): MidnightContract {
         val midnightSdk = requireSdk
         val dummyNonce = ByteArray(NONCE_BYTES)
 
+        // Pack a [PICKS_PER_ARRAY]-element IntArray into a ByteArray of the
+        // same length — the wire form of Vector<5, Uint<8>>. The SDK's
+        // witness machinery zeroizes the returned bytes after consumption,
+        // so we always copy/build fresh per witness invocation.
+        fun packPicks(arr: IntArray?): ByteArray =
+            ByteArray(PICKS_PER_ARRAY) { (arr?.getOrElse(it) { 0 } ?: 0).toByte() }
+
         return MidnightContract.create(midnightSdk.config) {
             name = "penalty"
             contractJs = context.assets.open("runtime/penalty-contract.js")
             if (address != null) this.address = address
 
-            // Each witness returns a fresh ByteArray. The SDK zeroizes the
-            // returned bytes after consumption (CircuitExecutor#registerWitnesses),
-            // so callers' original arrays must not be exposed by reference.
             witness("localSecretKey") { WitnessResult(null, secretKey.copyOf()) }
-            repeat(ROUNDS_PER_BATCH) { i ->
-                witness("localChoice$i") {
-                    WitnessResult(null, byteArrayOf((choices?.getOrElse(i) { 0 } ?: 0).toByte()))
-                }
-            }
-            witness("localNonce") { WitnessResult(null, (nonce ?: dummyNonce).copyOf()) }
+            witness("localNonce")     { WitnessResult(null, (nonce ?: dummyNonce).copyOf()) }
+            witness("localShoots")    { WitnessResult(null, packPicks(shoots)) }
+            witness("localKeeps")     { WitnessResult(null, packPicks(keeps)) }
+            witness("localSdShoot")   { WitnessResult(null, byteArrayOf((sdShoot ?: 0).toByte())) }
+            witness("localSdKeep")    { WitnessResult(null, byteArrayOf((sdKeep  ?: 0).toByte())) }
 
             initialPrivateState = mapOf("secretKey" to secretKey.copyOf())
             coinPublicKey = midnightSdk.coinPublicKey
@@ -665,7 +977,14 @@ class MatchManager(
     // ── Bootstrap (keys, verifier files) ────────────────────────────────
 
     private fun loadVerifierKeys(): Map<String, ByteArray> {
-        val circuits = listOf("commitBatch", "revealBatch", "joinMatch", "cancelMatch", "claimTimeout")
+        // V3 has 7 user circuits. Names match the .compact `export circuit`
+        // declarations and the asset file basenames.
+        val circuits = listOf(
+            "joinMatch",
+            "commitRegulation", "revealRegulation",
+            "commitSuddenDeath", "revealSuddenDeath",
+            "claimTimeout", "cancelMatch",
+        )
         return circuits.associateWith { name ->
             context.assets.open("keys/$name.verifier").use { it.readBytes() }
         }
@@ -676,9 +995,11 @@ class MatchManager(
         // ProvingKeyManager. Same method the SDK e2e test and BBoard canary call.
         com.midnight.kuira.core.compact.proving.ProvingKeyManager(context).installFromLocalTmp()
 
-        // Kicks-specific: contract circuit keys (commitBatch, revealBatch,
-        // joinMatch, cancelMatch, claimTimeout) ship inside the APK at
-        // assets/keys/ — copied into keysDir for the Rust prover to find.
+        // Kicks-specific: V3 contract circuit keys (joinMatch,
+        // commitRegulation, revealRegulation, commitSuddenDeath,
+        // revealSuddenDeath, claimTimeout, cancelMatch) ship inside
+        // the APK at assets/keys/ — copied into keysDir for the Rust
+        // prover to find.
         val keysDir = File(context.filesDir, "proving_keys")
         val assetKeys = context.assets.list("keys") ?: emptyArray()
         assetKeys.filter { it.endsWith(".prover") || it.endsWith(".bzkir") || it.endsWith(".verifier") }.forEach { name ->
@@ -696,10 +1017,17 @@ class MatchManager(
         private const val TAG = "MatchManager"
 
         // Game rules
-        /** Choices per commit-reveal batch. The compact contract has this baked in. */
-        const val ROUNDS_PER_BATCH = 5
+        /** Picks per array (5 shoots OR 5 keeps) per player. */
+        const val PICKS_PER_ARRAY = 5
+        /** Total regulation rounds (5 P1-shooting + 5 P2-shooting). */
+        const val REGULATION_ROUNDS = 10
         /** L=0, C=1, R=2 — the three penalty directions. */
         const val DIRECTION_COUNT = 3
+
+        // Phase enum values mirroring penalty.compact's `enum Phase`.
+        // Mapping: 0 WAITING, 1 COMMITTING, 2 REVEALING, 3 SD_COMMITTING,
+        // 4 SD_REVEALING, 5 COMPLETE.
+        private const val PHASE_COMPLETE = 5
 
         private const val COMMIT_DEADLINE_DURATION_SECS = 300L
         private const val SECRET_KEY_BYTES = 32
@@ -728,32 +1056,81 @@ class MatchManager(
 }
 
 /**
+ * One sudden-death pairing captured during the match for the replay UI.
+ * Each SD round produces one entry. The pair is decisive when exactly
+ * one of `p1Goal` / `p2Goal` is true.
+ */
+data class SdRoundData(
+    val round: Int,
+    val p1Shoot: Int,
+    val p1Keep:  Int,
+    val p2Shoot: Int,
+    val p2Keep:  Int,
+) {
+    val p1Goal: Boolean get() = p1Shoot != p2Keep
+    val p2Goal: Boolean get() = p2Shoot != p1Keep
+}
+
+/**
  * Result of a completed match — used to build the replay data for Unity.
  *
- * Field name `aiChoices` is historical (AI was the only P2 implementation
- * when this was written). For PvP it holds the friend's choices.
+ * V3 shape: each player has shoots[5] + keeps[5] for regulation, plus an
+ * optional list of sudden-death pairings. The 10 regulation rounds
+ * alternate shooter:
+ *   - rounds 0,2,4,6,8: P1 shoots, P2 keeps (kick index = round/2)
+ *   - rounds 1,3,5,7,9: P2 shoots, P1 keeps
+ *
+ * Field semantics — `p1*` are always P1's choices regardless of who this
+ * device is. The renderer maps "this device" → P1 or P2 via the role
+ * the orchestrator was launched with.
  */
 data class MatchResult(
-    val playerChoices: IntArray,
-    val aiChoices: IntArray,
+    val p1Shoots: IntArray,
+    val p1Keeps:  IntArray,
+    val p2Shoots: IntArray,
+    val p2Keeps:  IntArray,
+    val sdRounds: List<SdRoundData> = emptyList(),
     val contractAddress: String,
 ) {
     /** Build round results for Unity replay. */
     fun toRoundResults(): List<RoundResult> {
-        return (0 until MatchManager.ROUNDS_PER_BATCH).map { i ->
-            val isPlayerShooting = i % 2 == 0
-            val shootDir = if (isPlayerShooting) playerChoices[i] else aiChoices[i]
-            val keepDir = if (isPlayerShooting) aiChoices[i] else playerChoices[i]
+        val regulation = (0 until MatchManager.REGULATION_ROUNDS).map { i ->
+            val kickIdx = i / 2
+            val p1Shoots = i % 2 == 0
+            val shootDir = if (p1Shoots) this.p1Shoots[kickIdx] else this.p2Shoots[kickIdx]
+            val keepDir  = if (p1Shoots) this.p2Keeps[kickIdx]  else this.p1Keeps[kickIdx]
             val isGoal = shootDir != keepDir
-
             RoundResult(
                 round = i + 1,
-                shooter = if (isPlayerShooting) "P1" else "P2",
+                shooter = if (p1Shoots) "P1" else "P2",
                 shootDir = shootDir,
                 keepDir = keepDir,
                 result = if (isGoal) "goal" else "save",
             )
         }
+        // SD pairings: each round contributes two replay entries — P1's
+        // kick then P2's kick — so the cinematic shows both attempts in
+        // sequence.
+        val sd = sdRounds.flatMap { sd ->
+            val baseRound = MatchManager.REGULATION_ROUNDS + (sd.round - 1) * 2
+            listOf(
+                RoundResult(
+                    round = baseRound + 1,
+                    shooter = "P1",
+                    shootDir = sd.p1Shoot,
+                    keepDir  = sd.p2Keep,
+                    result = if (sd.p1Goal) "goal" else "save",
+                ),
+                RoundResult(
+                    round = baseRound + 2,
+                    shooter = "P2",
+                    shootDir = sd.p2Shoot,
+                    keepDir  = sd.p1Keep,
+                    result = if (sd.p2Goal) "goal" else "save",
+                ),
+            )
+        }
+        return regulation + sd
     }
 
     fun scores(): Pair<Int, Int> {

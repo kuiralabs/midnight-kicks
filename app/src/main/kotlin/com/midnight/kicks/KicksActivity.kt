@@ -452,11 +452,19 @@ class KicksActivity : FragmentActivity() {
                 // Unity from MatchReady; null means we're in the PRACTICE
                 // VS AI legacy path which keeps the single-device PvAI
                 // orchestrator (deploy + AI commit/reveal all here).
-                val choicesArr = choiceList.toIntArray()
+                //
+                // TODO Phase C — V3 needs shoots[5] + keeps[5] from the UI
+                // (10 picks via role-alternating banner). For now we send
+                // the 5 picks Unity returns as BOTH shoots and keeps so
+                // the contract integration end-to-ends. Replace with a
+                // proper 10-pick collection once the Unity choice phase
+                // is updated.
+                val shoots = choiceList.toIntArray()
+                val keeps  = choiceList.toIntArray()
                 val result = when (currentRole) {
-                    null -> manager.playAgainstAi(choicesArr)
-                    Player.P1 -> manager.playAsP1(choicesArr)
-                    Player.P2 -> manager.playAsP2(choicesArr)
+                    null -> manager.playAgainstAi(shoots, keeps)
+                    Player.P1 -> manager.playAsP1(shoots, keeps)
+                    Player.P2 -> manager.playAsP2(shoots, keeps)
                 }
 
                 val (p1Score, p2Score) = result.scores()
@@ -473,10 +481,16 @@ class KicksActivity : FragmentActivity() {
                     Player.P2 -> "Opponent $p1Score - $p2Score You"
                 }
 
-                // result.aiChoices is the field's historical name; in PvP
-                // it carries the opponent's revealed choices read from
-                // the chain snapshot, not an AI-generated set.
-                val opponentLabels = result.aiChoices.map(::directionLabel)
+                // Opponent's regulation shoots — whichever side this
+                // device is, the *other* player's picks form the line we
+                // show. In Phase C we'll show shoots + keeps; for now
+                // the shoots-only summary mirrors the legacy display.
+                val opponentShoots = if (currentRole == Player.P2) {
+                    result.p1Shoots
+                } else {
+                    result.p2Shoots
+                }
+                val opponentLabels = opponentShoots.map(::directionLabel)
                 val youLabel = if (currentRole == Player.P2) "P2 (you)" else "You"
                 val themLabel = if (currentRole == null) "AI" else "Opponent"
                 lastChoices.value =
