@@ -13,13 +13,15 @@ PvP penalty shootout on Android. Two players, five rounds, real stakes (PREPROD 
 
 ## Game flow
 
-1. **CHOICE** — both players pick 5 directions simultaneously, submit ONE transaction each (batch commit)
-2. **PROVE** — one ZK circuit compares all 5 rounds at once, single proof
-3. **REPLAY** — Unity plays the full match cinematically (stadium intro masks proof latency)
+1. **CHOICE** — each player picks **10 directions** (5 shoots + 5 keeps), submits ONE transaction with both arrays committed (`RegulationBatch`).
+2. **PROVE** — one ZK circuit scores all 10 rounds — alternating P1 shoots / P2 shoots — comparing shooter's `shoots[i]` against keeper's `keeps[i]` per kick.
+3. **REPLAY** — Unity plays the 10 rounds cinematically (stadium intro masks proof latency).
 
-Sudden death: batches of 5, circuit stops at decisive round. Unrevealed rounds stay private (ZK property).
+Sudden death: **one pairing per batch** (your `shoot` + your `keep`). Decisive when exactly one player scored the pairing; otherwise another pairing. Unrevealed pairings stay private (ZK property).
 
-**Anti-cheat:** commit-reveal. Hash of 5 choices + nonces stored as private state. ZK circuit proves revealed choices match commitments. Cannot change choices after commit.
+**Anti-cheat:** commit-reveal. Pedersen commitment of `(shoots[5], keeps[5])` + 32-byte nonce stored as private state. ZK circuit proves revealed values match commitments. Cannot change choices after commit.
+
+> **Status note:** the on-chain contract is currently **V2** (5 dual-purpose directions per player, asymmetric P1=3 shots / P2=2 shots). The above is the **V3 target** spec — see `docs/GAME_DESIGN.md` §2 & §7 migration. V3 contract redeploy is queued as a Phase 4 item.
 
 Detailed game logic, state machine, circuit specs, UI flows, and Unity bridge spec in [`GAME_DESIGN.md`](GAME_DESIGN.md). Current Unity work and asset checklist in [`../ROADMAP.md`](../ROADMAP.md).
 
@@ -49,7 +51,7 @@ On-chain, indexer-queryable. Wins/losses/draws/streaks per player address. Verif
 - **Unity (UaaL)** — 3D stadium, ball physics, choice UI, cinematic replay. JSON bridge to Kotlin. Knows nothing about blockchain.
 - **Kotlin (native)** — SDK for contract interaction, pairing (QR + deep links), UaaL bridge, state polling for opponent commits.
 - **Compact contract** — match lifecycle, commit-reveal, scoring, stake escrow, payouts. Each match = new contract instance.
-  - Private state: 5 choices + nonces per player
+  - Private state (V3): `shoots[5]` + `keeps[5]` + nonce per player for regulation; one `(shoot, keep, nonce)` triple per SD pairing
   - Public ledger: participants, scores, results, winner, stakes, phase
   - Circuits: create, join, commit batch, resolve regulation, resolve sudden death, claim payout
 
@@ -167,7 +169,8 @@ Promote items to the friction log once they hit a real user-visible bug.
 
 | Decision | Choice | Why |
 |----------|--------|-----|
-| Batch vs per-round | Batch (5 choices, 1 tx) | 2 txs per match vs 20. Cinematic replay. |
+| Batch vs per-round | Batch commit, 1 tx per phase | V2: 5 dual-purpose choices. V3 target: `shoots[5]` + `keeps[5]` in one commit. Either way 2 txs per regulation (commit + reveal) vs 20+ for per-round. Cinematic replay. |
+| Symmetric vs asymmetric roles | V3 = symmetric (each player shoots 5 + keeps 5) | V2 was asymmetric (P1: 3 shots, P2: 2 shots) — doesn't match real penalty rules. V3 redesign aligns with real-life shootouts and lets players strategize offense and defense independently. |
 | Sudden death | Batches of 5, stop at decisive | Unrevealed rounds private. No infinite loops. |
 | Unity vs Compose | Unity (UaaL) | 3D stadium, ball physics, cameras. |
 | Standalone repo | Separate from Kuira | Tests SDK boundaries. Separate release. |

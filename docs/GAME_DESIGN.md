@@ -26,11 +26,11 @@ Contract implementation: [`../contract/src/penalty.compact`](../contract/src/pen
                                │               │
                           P2 joins         timeout
                                │               │
-                    ┌──────────▼──────┐   ┌────▼─────┐
-                    │   COMMITTING    │   │ COMPLETE  │
-                    │  Both pick 5    │   │ P1 refund │
-                    │  directions     │   └──────────┘
-                    └──────┬─────┬────┘
+                    ┌──────────▼──────────┐   ┌─▼─────────┐
+                    │     COMMITTING       │   │ COMPLETE   │
+                    │  Both commit         │   │ P1 refund  │
+                    │  shoots[5]+keeps[5]  │   └────────────┘
+                    └──────┬─────┬────────┘
                            │     │
                      both commit  timeout (one committed)
                            │     │
@@ -44,40 +44,40 @@ Contract implementation: [`../contract/src/penalty.compact`](../contract/src/pen
                          │
                     ┌────▼─────────────────────┐
                     │  Resolve regulation       │
-                    │  Compare 5 rounds         │
-                    │  Score: e.g. 3-2          │
+                    │  Score 10 rounds          │
+                    │  (5 kicks each)           │
                     └─────┬──────────────┬──────┘
                           │              │
                      clear winner     tied
                           │              │
-                   ┌──────▼──────┐  ┌───▼──────────┐
-                   │  COMPLETE   │  │SD_COMMITTING  │
-                   │  Payout to  │  │Both pick 5    │
-                   │  winner     │  │new directions │
-                   └─────────────┘  └───┬──────────┘
+                   ┌──────▼──────┐  ┌───▼──────────────┐
+                   │  COMPLETE   │  │SD_COMMITTING      │
+                   │  Payout to  │  │Both commit one    │
+                   │  winner     │  │pairing: shoot+keep│
+                   └─────────────┘  └───┬──────────────┘
                                         │
-                                   (same commit → reveal
-                                    → resolve loop)
+                                   both reveal,
+                                   score pairing
                                         │
-                                   stop at first
-                                   decisive round
-                                        │
-                                   ┌────▼────────┐
-                                   │  COMPLETE    │
-                                   │  SD winner   │
-                                   │  or repeat   │
-                                   └──────────────┘
+                                  ┌─────┴─────┐
+                              decisive       both score
+                                  │           or both miss
+                                  ▼              │
+                          ┌────────────┐         ▼
+                          │  COMPLETE   │  back to SD_COMMITTING
+                          │  SD winner  │  for next pairing
+                          └────────────┘
 ```
 
-### Phases (from contract)
+### Phases (V3)
 
 | Phase | Description | Transitions to |
 |-------|-------------|----------------|
 | `WAITING` | P1 created match + escrowed stake. Waiting for P2. | → `COMMITTING` (P2 joins) or `COMPLETE` (timeout) |
-| `COMMITTING` | Both players submit batch commitments (hash of 5 choices + nonce). | → `REVEALING` (both committed) or `COMPLETE` (timeout forfeit) |
-| `REVEALING` | Both players reveal preimages. Circuit verifies against commitments. | → `COMPLETE` (clear winner) or `SD_COMMITTING` (tied) |
-| `SD_COMMITTING` | Sudden death: both commit a new batch of 5. | → `SD_REVEALING` (both committed) or `COMPLETE` (timeout forfeit) |
-| `SD_REVEALING` | Both reveal SD choices. Circuit resolves round-by-round, stops at decisive. | → `COMPLETE` (winner found) or `SD_COMMITTING` (still tied) |
+| `COMMITTING` | Both players submit `RegulationBatch` commitments (hash of `shoots[5]` + `keeps[5]` + nonce). | → `REVEALING` (both committed) or `COMPLETE` (timeout forfeit) |
+| `REVEALING` | Both reveal `RegulationBatch` preimages. Circuit verifies and scores 10 rounds. | → `COMPLETE` (clear winner) or `SD_COMMITTING` (tied) |
+| `SD_COMMITTING` | Sudden death: both commit one `SuddenDeathBatch` (a single `shoot` + `keep` for this pairing). | → `SD_REVEALING` (both committed) or `COMPLETE` (timeout forfeit) |
+| `SD_REVEALING` | Both reveal SD preimages. Circuit scores the pairing: decisive → `COMPLETE`; tied (both scored or both missed) → another `SD_COMMITTING`. | → `COMPLETE` (winner found) or `SD_COMMITTING` (still tied) |
 | `COMPLETE` | Match over. Winner claims payout, or draw refund. | Terminal |
 
 ### Timeout rules
@@ -111,8 +111,9 @@ opposite-handed body lean.
 
 This matters for the choice UI: when a keeper taps LEFT during the
 commit phase, the underlying value committed is `0` (shooter's left),
-not "the keeper's left." Without explicit framing, this is confusing —
-see §4 *Per-role choice UI* for the open design question and ticket.
+not "the keeper's left." The keep prompt copy is reframed accordingly
+("predict where they'll kick") — see §4 *Per-role choice UI* for the
+locked-in framing.
 
 ### V3 model — shoots[5] + keeps[5] per player
 
@@ -325,10 +326,18 @@ Composable.
   • BACK → [Menu]
 
 [Unity Choice Phase] (UnityPlayerGameActivity, separate Activity)
-  • Per-round role banner: "YOU SHOOT" or "YOU KEEP" (see §2 coordinate
-    convention — both pick L/C/R in shooter-perspective space)
-  • L/C/R buttons commit a direction per round
-  • 5 picks → choicesLocked back to Kotlin
+  • Per-pick role banner: "YOU SHOOT — pick where to kick" or
+    "YOU KEEP — predict where they'll kick" (see §2 coordinate
+    convention + §4 Per-role choice UI for the framing rationale)
+  • L/C/R buttons commit a direction per pick
+  • Pick count is round-aligned and role-alternating:
+      regulation : 10 picks  (5 shoots + 5 keeps for each player,
+                              interleaved by round; P1 sees
+                              shoot/keep/shoot/keep/…, P2 sees the
+                              flipped pattern)
+      SD         :  2 picks  (your shoot + your keep for the pairing)
+  • choicesLocked back to Kotlin with the raw flat array; Kotlin
+    splits it into shoots[] + keeps[] using the same `roles` it sent
 
 KicksActivity.handleChoicesLocked dispatches by currentRole:
   null     → MatchManager.playAgainstAi(choices)  ── PvAI single-device
@@ -426,20 +435,6 @@ UaaL renders Unity full-screen as an Android Activity. Communication via `UnityS
   "type": "choicePhase",
   "round": "regulation",
   "roles": ["shoot", "keep", "shoot", "keep", "shoot", "keep", "shoot", "keep", "shoot", "keep"]
-}
-
-// Start replay with results
-{
-  "type": "replay",
-  "rounds": [
-    { "round": 1, "shooter": "P1", "shootDir": 0, "keepDir": 2, "result": "goal" },
-    { "round": 2, "shooter": "P2", "shootDir": 1, "keepDir": 1, "result": "save" },
-    { "round": 3, "shooter": "P1", "shootDir": 2, "keepDir": 0, "result": "goal" },
-    { "round": 4, "shooter": "P2", "shootDir": 0, "keepDir": 2, "result": "goal" },
-    { "round": 5, "shooter": "P1", "shootDir": 1, "keepDir": 0, "result": "goal" }
-  ],
-  "finalScore": { "p1": 3, "p2": 2 },
-  "winner": "P1"
 }
 
 // V3 regulation replay — 10 rounds. P1 shoots rounds 1,3,5,7,9; P2
@@ -554,9 +549,18 @@ V3 is a contract revision. Implementation order:
      by `roles` into `shoots` + `keeps` before calling MatchManager.
 
 4. **Unity HUD**
-   - `GameController.OnGUI` iterates over up to 10 rounds, indexed
-     against `roundRoles[currentChoice]`. Most of the existing per-pick
-     banner machinery already extends naturally.
+   - `GameController.OnGUI` already drives picks off `roundRoles[]`, so
+     extending from 5 to 10 picks is mostly bumping array sizes. Specific
+     fixes:
+     - The `$"Round {currentChoice + 1} / 5"` label is hardcoded — change
+       to `$"Round {currentChoice + 1} / {roundRoles.Length}"`.
+     - The choice array `private int[] choices = new int[5];` in
+       `StartChoicePhase` must size to `msg.roles.Length` instead of
+       a fixed 5.
+   - The replay path (`ShotManager.PlayReplay`) iterates over a
+     `List<RoundData>` of arbitrary length — already handles 10 rounds
+     (and 2-kick SD pairings) without code change. Pacing may need a
+     pass; 10 cinematic rounds at ~4s each is ~40s.
 
 5. **PLAN.md**
    - Add V3 contract redeploy + migration as a Phase 4 follow-up (after
