@@ -180,6 +180,26 @@ class MatchManager(
      * [deployMatch] call. The retry loop is the same indexer-readiness
      * pattern (`"not found"` substring match): the create-side's deploy
      * has to land + be ingested before this call succeeds.
+     *
+     * **Idempotent** — if the contract has already advanced past the
+     * WAITING phase (e.g. this device joined earlier, the user backed
+     * out before committing choices, and is now resuming), the
+     * `joinMatch` circuit asserts and we treat the failure as
+     * "already joined, just continue." The state machine still
+     * advances to [Joined] so the user can pick up at the commit
+     * step. This relies on string-matching the contract's
+     * `"Match not in WAITING phase"` assertion message — the proper
+     * fix is a chain-state probe before issuing the tx, but the
+     * probe requires plumbing an address-aware `awaitContractState`
+     * which is a bigger change.
+     *
+     * **Caveat — cross-device collision:** if a *different* device
+     * already joined this match and this device tries to join, the
+     * contract would also fail with the same assertion. We can't
+     * distinguish "I'm rejoining my own match" from "I'm trying to
+     * join someone else's filled match" without comparing the
+     * on-chain P2 pubkey to ours — a follow-up. For now the wrong
+     * actor case fails later at commit/reveal time.
      */
     suspend fun joinAsP2(address: String) = transitionFrom<MatchState.SdkReady, Unit>(
         inProgress = { MatchState.JoiningAsP2(address) },
@@ -188,8 +208,20 @@ class MatchManager(
         val deadline = BigInteger.valueOf(
             System.currentTimeMillis() / 1000 + COMMIT_DEADLINE_DURATION_SECS
         )
-        retryUntilIndexerReady(JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS) {
-            callCircuit(p2SecretKey, address, "joinMatch", arrayOf(deadline))
+        try {
+            retryUntilIndexerReady(JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS) {
+                callCircuit(p2SecretKey, address, "joinMatch", arrayOf(deadline))
+            }
+        } catch (e: Exception) {
+            if (e.message?.contains("not in WAITING phase") == true) {
+                Log.i(
+                    TAG,
+                    "joinAsP2: contract already past WAITING — treating as resume, " +
+                        "advancing to Joined without re-submitting joinMatch",
+                )
+            } else {
+                throw e
+            }
         }
     }
 
