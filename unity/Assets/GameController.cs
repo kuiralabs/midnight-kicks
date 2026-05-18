@@ -40,16 +40,22 @@ public class GameController : MonoBehaviour
         }
     }
 
-    // Player's 5 choices for the current round
-    private int[] choices = new int[5];
+    // Player's picks for the current choice phase. Size set per
+    // choicePhase message: 10 for V3 regulation (5 shoots + 5 keeps
+    // interleaved), 2 for sudden death (1 shoot + 1 keep). Default 10
+    // covers the regulation case until the first message arrives.
+    private int[] choices = new int[10];
     private int currentChoice = 0;
     private bool inChoicePhase = false;
     private bool waitingForMessage = true;
     private string currentRound = "regulation";
     // Per-round role from this device's perspective. Indexed by
-    // currentChoice (0..4). Defaults to all "shoot" until the first
-    // choicePhase message arrives.
-    private string[] roundRoles = new string[] { "shoot", "shoot", "shoot", "shoot", "shoot" };
+    // currentChoice. Defaults to all "shoot" of length 10 until the
+    // first choicePhase message arrives.
+    private string[] roundRoles = new string[] {
+        "shoot", "shoot", "shoot", "shoot", "shoot",
+        "shoot", "shoot", "shoot", "shoot", "shoot",
+    };
 
     // Replay state
     private bool inReplay = false;
@@ -97,22 +103,28 @@ public class GameController : MonoBehaviour
     {
         var msg = JsonUtility.FromJson<ChoicePhaseMessage>(json);
         currentRound = msg.round;
-        if (msg.roles != null && msg.roles.Length == 5)
+        // V3: regulation sends 10 roles (5 shoots + 5 keeps interleaved
+        // by per-round shooter), sudden death sends 2 (1 shoot + 1 keep).
+        // We accept any non-empty length so the bridge owns the count.
+        if (msg.roles != null && msg.roles.Length > 0)
         {
             roundRoles = msg.roles;
         }
         else
         {
-            Debug.LogWarning($"[GameController] choicePhase missing/invalid roles array — defaulting to all-shoot");
-            roundRoles = new string[] { "shoot", "shoot", "shoot", "shoot", "shoot" };
+            Debug.LogWarning($"[GameController] choicePhase missing/invalid roles array — defaulting to 10×shoot");
+            roundRoles = new string[] {
+                "shoot","shoot","shoot","shoot","shoot",
+                "shoot","shoot","shoot","shoot","shoot",
+            };
         }
         currentChoice = 0;
-        choices = new int[5];
+        choices = new int[roundRoles.Length];
         inChoicePhase = true;
         waitingForMessage = false;
         inReplay = false;
 
-        Debug.Log($"[GameController] Choice phase: round={currentRound}, roles=[{string.Join(",", roundRoles)}]");
+        Debug.Log($"[GameController] Choice phase: round={currentRound}, picks={roundRoles.Length}, roles=[{string.Join(",", roundRoles)}]");
     }
 
     void OnGUI()
@@ -152,7 +164,7 @@ public class GameController : MonoBehaviour
         labelStyle.normal.textColor = Color.white;
         GUI.Label(
             new Rect(Screen.width / 2 - 150, y - 110, 300, 30),
-            $"Round {currentChoice + 1} / 5",
+            $"Round {currentChoice + 1} / {choices.Length}",
             labelStyle
         );
 
@@ -203,7 +215,7 @@ public class GameController : MonoBehaviour
 
         Debug.Log($"[GameController] Choice {currentChoice}: {direction}");
 
-        if (currentChoice >= 5)
+        if (currentChoice >= choices.Length)
         {
             inChoicePhase = false;
             SendChoicesToKotlin();
@@ -212,7 +224,18 @@ public class GameController : MonoBehaviour
 
     private void SendChoicesToKotlin()
     {
-        string json = $"{{\"type\":\"choicesLocked\",\"choices\":[{choices[0]},{choices[1]},{choices[2]},{choices[3]},{choices[4]}]}}";
+        // Build the picks array dynamically — choices.Length is 10 for
+        // regulation, 2 for SD, both must round-trip cleanly through
+        // KicksActivity.handleChoicesLocked.
+        var sb = new System.Text.StringBuilder();
+        sb.Append("{\"type\":\"choicesLocked\",\"choices\":[");
+        for (int i = 0; i < choices.Length; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append(choices[i]);
+        }
+        sb.Append("]}");
+        string json = sb.ToString();
         Debug.Log($"[GameController] Sending choices: {json}");
         SendToKotlin(json);
     }

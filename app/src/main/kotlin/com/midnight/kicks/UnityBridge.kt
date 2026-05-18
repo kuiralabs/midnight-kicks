@@ -23,20 +23,30 @@ object UnityBridge {
     // ── Kotlin → Unity ──
 
     /**
-     * Tell Unity to start the choice phase (player picks 5 directions).
+     * Tell Unity to start the choice phase.
      *
-     * @param round "regulation" or "suddenDeath"
-     * @param roles per-round role from THIS device's perspective. 5 entries,
-     *   each "shoot" or "keep". For PvP-as-P1 this is
-     *   `["shoot","keep","shoot","keep","shoot"]`; for PvP-as-P2 it's
-     *   `["keep","shoot","keep","shoot","keep"]` (alternation flips because
-     *   P1 shoots the odd rounds and P2 shoots the even ones). PvAI uses
-     *   the P1 pattern since the human is always P1 there. Unity labels
-     *   each pick with `YOU SHOOT` / `YOU KEEP` from this array so the
-     *   player can strategize per role.
+     * @param round "regulation" (10 picks: 5 shoots + 5 keeps interleaved)
+     *   or "suddenDeath" (2 picks: 1 shoot + 1 keep).
+     * @param roles per-round role from THIS device's perspective. Each entry
+     *   is "shoot" or "keep". The length defines how many picks Unity will
+     *   ask for, so Kotlin and Unity agree on the count.
+     *
+     *   For V3 regulation:
+     *     - P1 / PvAI: `[shoot,keep,shoot,keep,shoot,keep,shoot,keep,shoot,keep]`
+     *       (P1 shoots the odd rounds 1,3,5,7,9)
+     *     - P2:        `[keep,shoot,keep,shoot,keep,shoot,keep,shoot,keep,shoot]`
+     *       (P2 shoots the even rounds 2,4,6,8,10)
+     *
+     *   For SD (single-pairing per round, same shape both sides):
+     *     - Both:      `[shoot, keep]`
+     *
+     *   Unity labels each pick with `YOU SHOOT` / `YOU KEEP` off this array,
+     *   so the player strategises per role. Kotlin uses the same array to
+     *   bucket returned picks into shoots[5] + keeps[5] (regulation) or a
+     *   single `{shoot, keep}` pair (SD).
      */
     fun sendChoicePhase(round: String, roles: List<String>) {
-        require(roles.size == 5) { "roles must have 5 entries, got ${roles.size}" }
+        require(roles.isNotEmpty()) { "roles must not be empty" }
         val json = JSONObject().apply {
             put("type", "choicePhase")
             put("round", round)

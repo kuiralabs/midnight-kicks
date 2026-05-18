@@ -72,6 +72,14 @@ class KicksActivity : FragmentActivity() {
      */
     private var currentRole: Player? = null
 
+    /**
+     * Role array last sent to Unity via [UnityBridge.sendChoicePhase].
+     * Cached here so [handleChoicesLocked] can bucket the returned picks
+     * back into shoots vs keeps using the same per-index role labels Unity
+     * displayed. Cleared after each match.
+     */
+    private var currentChoiceRoles: List<String> = emptyList()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -375,31 +383,36 @@ class KicksActivity : FragmentActivity() {
                 // always P1 in that flow. Unity uses this to label each
                 // pick "YOU SHOOT" / "YOU KEEP".
                 val roles = rolesForCurrentDevice()
+                currentChoiceRoles = roles
                 UnityBridge.sendChoicePhase(round = "regulation", roles = roles)
             }
         }
     }
 
     /**
-     * Per-round role array from this device's perspective. Aligns with
-     * `MatchManager.toRoundResults`'s `i % 2 == 0 → P1 shoots` rule.
+     * Per-round role array for this device, V3 regulation (10 rounds).
+     * Aligns with `MatchManager.toRoundResults`'s `i % 2 == 0 → P1 shoots`
+     * rule and the contract's pairing model (5 P1-kicks + 5 P2-kicks).
      *
      *  - PvAI (currentRole=null): human is always P1
-     *    → [shoot, keep, shoot, keep, shoot]
-     *  - PvP as P1: same as PvAI
-     *    → [shoot, keep, shoot, keep, shoot]  (P1 shoots rounds 1,3,5)
-     *  - PvP as P2: flipped
-     *    → [keep, shoot, keep, shoot, keep]   (P2 shoots rounds 2,4)
+     *    → [S,K,S,K,S,K,S,K,S,K]
+     *  - PvP as P1: same as PvAI (P1 shoots rounds 1,3,5,7,9)
+     *  - PvP as P2: flipped (P2 shoots rounds 2,4,6,8,10)
+     *    → [K,S,K,S,K,S,K,S,K,S]
      *
-     * Centralised here so it stays in lockstep with the contract's role
-     * pattern — change one place, both Kotlin and Unity update.
+     * Centralised so the pattern stays in lockstep with the contract; the
+     * matching bucketing logic in [handleChoicesLocked] uses the same array
+     * to split returned picks into shoots[5] + keeps[5].
      */
     private fun rolesForCurrentDevice(): List<String> {
-        val p1Pattern = listOf("shoot", "keep", "shoot", "keep", "shoot")
-        val p2Pattern = listOf("keep", "shoot", "keep", "shoot", "keep")
-        return when (currentRole) {
-            null, Player.P1 -> p1Pattern
-            Player.P2 -> p2Pattern
+        // 10 entries, alternating starting with role-of-round-1 for this device.
+        val rounds = MatchManager.REGULATION_ROUNDS
+        val p1StartsShoot = currentRole != Player.P2
+        return List(rounds) { i ->
+            // round (i+1) parity: odd → P1 shoots, even → P2 shoots.
+            val p1ShootsThisRound = i % 2 == 0
+            val thisDeviceShoots = if (p1StartsShoot) p1ShootsThisRound else !p1ShootsThisRound
+            if (thisDeviceShoots) "shoot" else "keep"
         }
     }
 
@@ -448,19 +461,36 @@ class KicksActivity : FragmentActivity() {
             }
 
             try {
-                // Dispatch by role. currentRole was set when launching
-                // Unity from MatchReady; null means we're in the PRACTICE
-                // VS AI legacy path which keeps the single-device PvAI
-                // orchestrator (deploy + AI commit/reveal all here).
+                // Bucket Unity's 10 picks into shoots[5] + keeps[5] using
+                // the per-index role array we sent on the way out. Walk
+                // both in lockstep: role[i] == "shoot" means picks[i] is
+                // the next shoots[] entry; "keep" → keeps[].
                 //
-                // TODO Phase C — V3 needs shoots[5] + keeps[5] from the UI
-                // (10 picks via role-alternating banner). For now we send
-                // the 5 picks Unity returns as BOTH shoots and keeps so
-                // the contract integration end-to-ends. Replace with a
-                // proper 10-pick collection once the Unity choice phase
-                // is updated.
-                val shoots = choiceList.toIntArray()
-                val keeps  = choiceList.toIntArray()
+                // Legacy fallback: if Unity returns only 5 picks, this
+                // device is running a pre-V3 export of the Unity APK that
+                // hardcoded 5-pick gathering. Re-use the 5 picks as both
+                // shoots and keeps (degenerate but lets PvAI still run
+                // end-to-end) and log the mismatch so we know to re-export.
+                val picks  = choiceList.toIntArray()
+                val roles  = currentChoiceRoles
+                val (shoots, keeps) = if (picks.size == roles.size && picks.size == 10) {
+                    val s = mutableListOf<Int>()
+                    val k = mutableListOf<Int>()
+                    roles.forEachIndexed { i, role ->
+                        if (role == "shoot") s += picks[i] else k += picks[i]
+                    }
+                    s.toIntArray() to k.toIntArray()
+                } else {
+                    Log.w(
+                        TAG,
+                        "choicesLocked returned ${picks.size} picks (expected 10). " +
+                            "Unity APK is pre-V3 — re-export needed for proper 10-pick flow. " +
+                            "Falling back to shoots == keeps.",
+                    )
+                    val legacy = picks.copyOf(5)
+                    legacy to legacy.copyOf()
+                }
+
                 val result = when (currentRole) {
                     null -> manager.playAgainstAi(shoots, keeps)
                     Player.P1 -> manager.playAsP1(shoots, keeps)
