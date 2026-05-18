@@ -654,7 +654,11 @@ class MatchManager(
      * flow is the only progress surface. This is the canonical pattern
      * for a Kuira dApp.
      */
-    suspend fun playAgainstAi(playerShoots: IntArray, playerKeeps: IntArray): MatchResult {
+    suspend fun playAgainstAi(
+        playerShoots: IntArray,
+        playerKeeps: IntArray,
+        getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
+    ): MatchResult {
         val aiShoots = generateAiPicks()
         val aiKeeps  = generateAiPicks()
         Log.i(TAG, "AI shoots: ${aiShoots.map(::dirLabel)}")
@@ -667,18 +671,16 @@ class MatchManager(
         submitP2Picks(aiShoots, aiKeeps)
         revealP1()
         var result: MatchResult? = revealP2()
-        // Sudden-death loop — repeats until decisive. The AI picks fresh
-        // L/C/R values each round (uniform random); a real player chooses
-        // via the Unity choice UI between rounds.
+        // Sudden-death loop — repeats until decisive. The AI uses fresh
+        // random L/C/R picks each round; the human's picks come from
+        // [getSdPicks], which the caller wires to its choice UI
+        // (KicksActivity sends a Unity SD `choicePhase` and suspends on
+        // the returned `choicesLocked`).
         while (result == null) {
+            val round = currentSdRoundOrError()
+            val (pShoot, pKeep) = getSdPicks(round)
             val aiShoot = random.nextInt(DIRECTION_COUNT)
             val aiKeep  = random.nextInt(DIRECTION_COUNT)
-            val pShoot  = random.nextInt(DIRECTION_COUNT) // placeholder — see PvAI SD note below
-            val pKeep   = random.nextInt(DIRECTION_COUNT)
-            // TODO Phase C — UI hand-off for SD picks. For PvAI today the
-            // human's SD pair is auto-generated to keep the loop moving;
-            // KicksActivity will surface a "pick your SD shot/save" panel
-            // when the Unity bridge gains it.
             submitP1SdPick(pShoot, pKeep)
             submitP2SdPick(aiShoot, aiKeep)
             revealP1Sd()
@@ -700,18 +702,20 @@ class MatchManager(
      * step so the user can resume cleanly (Phase 4 follow-up: encrypted
      * key persistence so resume works across process death too).
      */
-    suspend fun playAsP1(shoots: IntArray, keeps: IntArray): MatchResult {
+    suspend fun playAsP1(
+        shoots: IntArray,
+        keeps: IntArray,
+        getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
+    ): MatchResult {
         submitP1Picks(shoots, keeps)
         waitForP2Committed()
         revealP1()
         var result: MatchResult? = waitForP2Revealed()
-        // SD loop — caller of playAsP1 is not yet wired to gather per-round
-        // SD picks from the UI (Phase C). For now we use random picks so
-        // the loop completes; KicksActivity will replace this with a UI
-        // hand-off once the choice bridge gains an SD message.
+        // SD loop — picks come from [getSdPicks] (UI for real players,
+        // random by default for tests / smoke runs).
         while (result == null) {
-            val pShoot = random.nextInt(DIRECTION_COUNT)
-            val pKeep  = random.nextInt(DIRECTION_COUNT)
+            val round = currentSdRoundOrError()
+            val (pShoot, pKeep) = getSdPicks(round)
             submitP1SdPick(pShoot, pKeep)
             waitForP2SdCommitted()
             revealP1Sd()
@@ -727,16 +731,24 @@ class MatchManager(
      * reveals our own. The contract auto-resolves on the second reveal
      * and [revealP2] returns the [MatchResult].
      */
-    suspend fun playAsP2(shoots: IntArray, keeps: IntArray): MatchResult {
+    suspend fun playAsP2(
+        shoots: IntArray,
+        keeps: IntArray,
+        getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
+    ): MatchResult {
         waitForP1Committed()
         submitP2Picks(shoots, keeps)
         waitForP1Revealed()
         var result: MatchResult? = revealP2()
-        // SD loop — random picks until UI hand-off lands (Phase C).
+        // SD loop — gather P2's picks via [getSdPicks] (UI on real
+        // devices, random by default). We can pre-gather the picks at
+        // the top of each round while P1 commits; the contract doesn't
+        // care about commit order, only that both pairs land before
+        // either reveals.
         while (result == null) {
+            val round = currentSdRoundOrError()
+            val (pShoot, pKeep) = getSdPicks(round)
             waitForP1SdCommitted()
-            val pShoot = random.nextInt(DIRECTION_COUNT)
-            val pKeep  = random.nextInt(DIRECTION_COUNT)
             submitP2SdPick(pShoot, pKeep)
             waitForP1SdRevealed()
             result = revealP2Sd()
@@ -778,6 +790,26 @@ class MatchManager(
     /** Generate one AI picks array (shoots or keeps) for regulation. */
     private fun generateAiPicks(): IntArray =
         IntArray(PICKS_PER_ARRAY) { random.nextInt(DIRECTION_COUNT) }
+
+    /** Default getSdPicks impl — uniform random {shoot, keep} pair. */
+    private fun randomSdPair(round: Int): Pair<Int, Int> {
+        val s = random.nextInt(DIRECTION_COUNT)
+        val k = random.nextInt(DIRECTION_COUNT)
+        Log.d(TAG, "randomSdPair(round=$round) → shoot=$s keep=$k")
+        return s to k
+    }
+
+    /**
+     * Read the round number from the current [MatchState.SdRoundOpen].
+     * Called at the top of every SD loop iteration; the orchestrator's
+     * state machine has just transitioned into SdRoundOpen so this is
+     * always the live round number to surface to the UI.
+     */
+    private fun currentSdRoundOrError(): Int {
+        val s = state.value
+        return (s as? MatchState.SdRoundOpen)?.round
+            ?: error("currentSdRoundOrError: state is ${s::class.simpleName}, expected SdRoundOpen")
+    }
 
     private fun dirLabel(d: Int): String = when (d) { 0 -> "L"; 1 -> "C"; 2 -> "R"; else -> "?" }
 

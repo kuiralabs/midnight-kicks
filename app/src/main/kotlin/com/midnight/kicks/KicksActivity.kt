@@ -80,6 +80,14 @@ class KicksActivity : FragmentActivity() {
      */
     private var currentChoiceRoles: List<String> = emptyList()
 
+    /**
+     * When non-null, [handleChoicesLocked] routes the returned picks to
+     * this deferred instead of starting a new match — the orchestrator's
+     * SD loop is suspended on it via [gatherSdPicksFromUi]. Set inside
+     * the SD callback; cleared as soon as the deferred completes.
+     */
+    private var pendingSdPicks: kotlinx.coroutines.CompletableDeferred<Pair<Int, Int>>? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -416,6 +424,66 @@ class KicksActivity : FragmentActivity() {
         }
     }
 
+    /**
+     * Bucket Unity's 2 SD picks into (shoot, keep) using the role array
+     * we sent, and resume the orchestrator via [pendingSdPicks].
+     * Tolerates a pre-V3 Unity APK by treating a 1-pick reply as shoot
+     * and falling back to 0 for the missing keep.
+     */
+    private fun handleSdChoicesLocked(
+        deferred: kotlinx.coroutines.CompletableDeferred<Pair<Int, Int>>,
+        picks: IntArray,
+    ) {
+        val roles = currentChoiceRoles
+        var shoot = 0
+        var keep  = 0
+        if (picks.size == 2 && roles.size == 2) {
+            roles.forEachIndexed { i, role ->
+                if (role == "shoot") shoot = picks[i] else keep = picks[i]
+            }
+        } else {
+            Log.w(
+                TAG,
+                "SD choicesLocked returned ${picks.size} picks (expected 2). " +
+                    "Re-export Unity for V3 SD UI. Falling back to first/second pick.",
+            )
+            shoot = picks.getOrElse(0) { 0 }
+            keep  = picks.getOrElse(1) { 0 }
+        }
+        Log.i(TAG, "SD pick → shoot=$shoot keep=$keep")
+        deferred.complete(shoot to keep)
+    }
+
+    /**
+     * Orchestrator callback for SD picks. Sends a 2-pick choicePhase to
+     * Unity (`roles = ["shoot","keep"]`) and suspends until Unity returns
+     * `choicesLocked`. The 2 picks are bucketed back into (shoot, keep)
+     * by role index. Round number is surfaced via [statusMessage] so the
+     * player sees "Sudden death — round N" while Unity boots the panel.
+     *
+     * Cancellation safety: if the coroutine is cancelled while we're
+     * waiting, the deferred is cancelled in the `finally` and the next
+     * orchestrator call starts clean.
+     */
+    private suspend fun gatherSdPicksFromUi(round: Int): Pair<Int, Int> {
+        val roles = listOf("shoot", "keep")
+        val deferred = kotlinx.coroutines.CompletableDeferred<Pair<Int, Int>>()
+        pendingSdPicks = deferred
+        currentChoiceRoles = roles
+        runOnUiThread {
+            statusMessage.value = "Sudden death — round $round"
+            UnityBridge.sendChoicePhase(round = "suddenDeath", roles = roles)
+        }
+        return try {
+            deferred.await()
+        } finally {
+            // Clear regardless of outcome (complete / cancel / exception)
+            // so a stale deferred doesn't intercept the next regulation
+            // choicesLocked.
+            if (pendingSdPicks === deferred) pendingSdPicks = null
+        }
+    }
+
     private fun handleUnityMessage(jsonString: String) {
         Log.i(TAG, "From Unity: $jsonString")
 
@@ -448,6 +516,17 @@ class KicksActivity : FragmentActivity() {
 
         Log.i(TAG, "Player choices: $labels")
         lastChoices.value = "You picked: ${labels.joinToString(" ")}"
+
+        // SD branch — if the orchestrator is suspended waiting on SD
+        // picks (via [gatherSdPicksFromUi]'s deferred), bucket the 2
+        // returned picks into (shoot, keep) using the role array we
+        // sent on the way out, then resume the orchestrator. Don't run
+        // the regulation start-a-match flow below.
+        val sdDeferred = pendingSdPicks
+        if (sdDeferred != null) {
+            handleSdChoicesLocked(sdDeferred, choiceList.toIntArray())
+            return
+        }
 
         // No progress callback needed — `manager.state` is already bound
         // to statusMessage via the state collector in ensureSdkReady().
@@ -492,9 +571,9 @@ class KicksActivity : FragmentActivity() {
                 }
 
                 val result = when (currentRole) {
-                    null -> manager.playAgainstAi(shoots, keeps)
-                    Player.P1 -> manager.playAsP1(shoots, keeps)
-                    Player.P2 -> manager.playAsP2(shoots, keeps)
+                    null -> manager.playAgainstAi(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
+                    Player.P1 -> manager.playAsP1(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
+                    Player.P2 -> manager.playAsP2(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
                 }
 
                 val (p1Score, p2Score) = result.scores()
