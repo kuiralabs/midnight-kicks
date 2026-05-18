@@ -1,10 +1,12 @@
-// Midnight Kicks — Penalty Shootout Contract V2
+// Midnight Kicks — Penalty Shootout Contract V3
 // SPDX-License-Identifier: Apache-2.0
 //
-// Two-player penalty shootout with commit-reveal, batch submission,
-// sudden death, and timeout protection.
+// Symmetric penalty shootout: each player commits 5 shoots + 5 keeps
+// for regulation, then a single {shoot, keep} pair per sudden-death
+// round. Commit-reveal, timeouts, single-pairing SD.
 //
-// Reference implementation for the Midnight Android SDK.
+// See docs/GAME_DESIGN.md §2 for the V3 model and §7 for the V2→V3
+// migration notes.
 
 pragma language_version >= 0.20;
 
@@ -23,12 +25,16 @@ export enum Phase {
   COMPLETE         // match resolved, winner determined or draw refund
 }
 
-struct BatchPreimage {
-  c0: Uint<8>;
-  c1: Uint<8>;
-  c2: Uint<8>;
-  c3: Uint<8>;
-  c4: Uint<8>;
+// Regulation: 5 shots + 5 saves per player.
+struct RegulationBatch {
+  shoots: Vector<5, Uint<8>>;
+  keeps:  Vector<5, Uint<8>>;
+}
+
+// Sudden death: one shot + one save per player per round.
+struct SuddenDeathBatch {
+  shoot: Uint<8>;
+  keep:  Uint<8>;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -41,29 +47,28 @@ export ledger phase: Phase;
 export ledger player1: Bytes<32>;
 export ledger player2: Bytes<32>;
 
-// Commitments
+// Commitments — reused across regulation and each SD round
 export ledger p1Commitment: Bytes<32>;
 export ledger p2Commitment: Bytes<32>;
 export ledger p1Committed: Boolean;
 export ledger p2Committed: Boolean;
 
-// Revealed choices
-export ledger p1c0: Uint<8>;
-export ledger p1c1: Uint<8>;
-export ledger p1c2: Uint<8>;
-export ledger p1c3: Uint<8>;
-export ledger p1c4: Uint<8>;
+// Regulation revealed choices
+export ledger p1Shoots: Vector<5, Uint<8>>;
+export ledger p1Keeps:  Vector<5, Uint<8>>;
+export ledger p2Shoots: Vector<5, Uint<8>>;
+export ledger p2Keeps:  Vector<5, Uint<8>>;
 
-export ledger p2c0: Uint<8>;
-export ledger p2c1: Uint<8>;
-export ledger p2c2: Uint<8>;
-export ledger p2c3: Uint<8>;
-export ledger p2c4: Uint<8>;
+// Sudden-death revealed choices (current round only)
+export ledger p1SdShoot: Uint<8>;
+export ledger p1SdKeep:  Uint<8>;
+export ledger p2SdShoot: Uint<8>;
+export ledger p2SdKeep:  Uint<8>;
 
 export ledger p1Revealed: Boolean;
 export ledger p2Revealed: Boolean;
 
-// Scores — accumulate across regulation + sudden death
+// Scores — total goals across regulation + sudden death
 export ledger p1Score: Counter;
 export ledger p2Score: Counter;
 
@@ -71,10 +76,14 @@ export ledger p2Score: Counter;
 export ledger winner: Bytes<32>;
 export ledger isDraw: Boolean;
 
-// Timeout — deadline in unix seconds for the current phase
+// Deadline in unix seconds. Set once by joinMatch and applies to
+// every remaining phase (commit, reveal, every SD round). The caller
+// should pass a generous value (e.g., +24h) — claimTimeout can only
+// fire after blockTimeGte(deadline), so a too-tight deadline strands
+// the SD path.
 export ledger deadline: Uint<64>;
 
-// Sudden death round counter
+// Sudden death round counter (0 during regulation, 1+ during SD)
 export ledger sdRound: Counter;
 
 // ═══════════════════════════════════════════════════════════════════
@@ -82,12 +91,15 @@ export ledger sdRound: Counter;
 // ═══════════════════════════════════════════════════════════════════
 
 witness localSecretKey(): Bytes<32>;
-witness localChoice0(): Uint<8>;
-witness localChoice1(): Uint<8>;
-witness localChoice2(): Uint<8>;
-witness localChoice3(): Uint<8>;
-witness localChoice4(): Uint<8>;
-witness localNonce(): Bytes<32>;
+witness localNonce():     Bytes<32>;
+
+// Regulation
+witness localShoots(): Vector<5, Uint<8>>;
+witness localKeeps():  Vector<5, Uint<8>>;
+
+// Sudden death
+witness localSdShoot(): Uint<8>;
+witness localSdKeep():  Uint<8>;
 
 // ═══════════════════════════════════════════════════════════════════
 // Helper circuits
@@ -97,21 +109,34 @@ circuit publicKey(sk: Bytes<32>): Bytes<32> {
   return persistentHash<Vector<2, Bytes<32>>>([pad(32, "kicks:pk:"), sk]);
 }
 
-circuit computeCommitment(
-  c0: Uint<8>, c1: Uint<8>, c2: Uint<8>,
-  c3: Uint<8>, c4: Uint<8>, nonce: Bytes<32>
+circuit computeRegulationCommitment(
+  shoots: Vector<5, Uint<8>>,
+  keeps:  Vector<5, Uint<8>>,
+  nonce:  Bytes<32>,
 ): Bytes<32> {
-  const preimage = BatchPreimage {
-    c0: c0, c1: c1, c2: c2, c3: c3, c4: c4
-  };
-  return persistentCommit<BatchPreimage>(preimage, nonce);
+  const preimage = RegulationBatch { shoots: shoots, keeps: keeps };
+  return persistentCommit<RegulationBatch>(preimage, nonce);
+}
+
+circuit computeSuddenDeathCommitment(
+  shoot: Uint<8>,
+  keep:  Uint<8>,
+  nonce: Bytes<32>,
+): Bytes<32> {
+  const preimage = SuddenDeathBatch { shoot: shoot, keep: keep };
+  return persistentCommit<SuddenDeathBatch>(preimage, nonce);
 }
 
 circuit validDirection(d: Uint<8>): Boolean {
   return d == 0 || d == 1 || d == 2;
 }
 
-// Reset commit/reveal flags for a new round (regulation or SD)
+circuit validDirections5(v: Vector<5, Uint<8>>): Boolean {
+  return validDirection(v[0]) && validDirection(v[1]) && validDirection(v[2])
+      && validDirection(v[3]) && validDirection(v[4]);
+}
+
+// Reset commit/reveal flags for a new round (regulation or SD pairing)
 circuit resetRoundState(): [] {
   p1Commitment = pad(32, "");
   p2Commitment = pad(32, "");
@@ -125,8 +150,8 @@ circuit resetRoundState(): [] {
 // Constructor
 // ═══════════════════════════════════════════════════════════════════
 
-// No constructor args — mn contract deploy doesn't support them.
-// Join deadline set to 1 hour from block time.
+// No constructor args — `mn contract deploy` doesn't support them.
+// The first commit deadline is set by joinMatch.
 constructor() {
   player1 = disclose(publicKey(localSecretKey()));
   phase = Phase.WAITING;
@@ -149,22 +174,18 @@ export circuit joinMatch(commitDeadlineSecs: Uint<64>): [] {
 
   player2 = pk;
   phase = Phase.COMMITTING;
-  // Set commit deadline from join time
   deadline = disclose(commitDeadlineSecs);
 }
 
-export circuit commitBatch(): [] {
-  assert(
-    phase == Phase.COMMITTING || phase == Phase.SD_COMMITTING,
-    "Match not in a commit phase"
-  );
+// Regulation commit: hash {shoots[5], keeps[5]} with nonce.
+export circuit commitRegulation(): [] {
+  assert(phase == Phase.COMMITTING, "Match not in regulation commit phase");
   assert(blockTimeLt(deadline), "Commit deadline passed");
 
   const pk = publicKey(localSecretKey());
 
-  const commitment = disclose(computeCommitment(
-    localChoice0(), localChoice1(), localChoice2(),
-    localChoice3(), localChoice4(), localNonce()
+  const commitment = disclose(computeRegulationCommitment(
+    localShoots(), localKeeps(), localNonce()
   ));
 
   if (disclose(pk == player1)) {
@@ -179,120 +200,156 @@ export circuit commitBatch(): [] {
   }
 
   if (p1Committed && p2Committed) {
-    if (phase == Phase.COMMITTING) {
-      phase = Phase.REVEALING;
-    } else {
-      phase = Phase.SD_REVEALING;
-    }
-    // Reveal deadline: same duration as commit deadline
-    deadline = disclose(deadline);
+    phase = Phase.REVEALING;
   }
 }
 
-export circuit revealBatch(): [] {
-  assert(
-    phase == Phase.REVEALING || phase == Phase.SD_REVEALING,
-    "Match not in a reveal phase"
-  );
+// Sudden-death commit: hash {shoot, keep} with nonce. One pairing per
+// SD round; sdRound advances each time SD doesn't resolve.
+export circuit commitSuddenDeath(): [] {
+  assert(phase == Phase.SD_COMMITTING, "Match not in SD commit phase");
+  assert(blockTimeLt(deadline), "Commit deadline passed");
+
+  const pk = publicKey(localSecretKey());
+
+  const commitment = disclose(computeSuddenDeathCommitment(
+    localSdShoot(), localSdKeep(), localNonce()
+  ));
+
+  if (disclose(pk == player1)) {
+    assert(!p1Committed, "Player 1 already committed");
+    p1Commitment = commitment;
+    p1Committed = true;
+  } else {
+    assert(disclose(pk == player2), "Not a player in this match");
+    assert(!p2Committed, "Player 2 already committed");
+    p2Commitment = commitment;
+    p2Committed = true;
+  }
+
+  if (p1Committed && p2Committed) {
+    phase = Phase.SD_REVEALING;
+  }
+}
+
+// Regulation reveal: open both arrays, score all 10 pairings, decide
+// winner or transition to sudden death.
+export circuit revealRegulation(): [] {
+  assert(phase == Phase.REVEALING, "Match not in regulation reveal phase");
   assert(blockTimeLt(deadline), "Reveal deadline passed");
 
   const pk = publicKey(localSecretKey());
 
-  const c0 = disclose(localChoice0());
-  const c1 = disclose(localChoice1());
-  const c2 = disclose(localChoice2());
-  const c3 = disclose(localChoice3());
-  const c4 = disclose(localChoice4());
-  const nonce = disclose(localNonce());
+  const shoots = disclose(localShoots());
+  const keeps  = disclose(localKeeps());
+  const nonce  = disclose(localNonce());
 
-  assert(disclose(validDirection(c0)), "Choice 0 must be 0, 1, or 2");
-  assert(disclose(validDirection(c1)), "Choice 1 must be 0, 1, or 2");
-  assert(disclose(validDirection(c2)), "Choice 2 must be 0, 1, or 2");
-  assert(disclose(validDirection(c3)), "Choice 3 must be 0, 1, or 2");
-  assert(disclose(validDirection(c4)), "Choice 4 must be 0, 1, or 2");
+  assert(disclose(validDirections5(shoots)), "Shoots must be 0, 1, or 2");
+  assert(disclose(validDirections5(keeps)),  "Keeps must be 0, 1, or 2");
 
-  const recomputed = computeCommitment(c0, c1, c2, c3, c4, nonce);
+  const recomputed = computeRegulationCommitment(shoots, keeps, nonce);
 
   if (disclose(pk == player1)) {
     assert(!p1Revealed, "Player 1 already revealed");
-    assert(disclose(recomputed == p1Commitment), "Commitment mismatch for player 1");
-    p1c0 = c0; p1c1 = c1; p1c2 = c2; p1c3 = c3; p1c4 = c4;
+    assert(disclose(recomputed == p1Commitment),
+           "Commitment mismatch for player 1");
+    p1Shoots = shoots;
+    p1Keeps  = keeps;
     p1Revealed = true;
   } else {
     assert(disclose(pk == player2), "Not a player in this match");
     assert(!p2Revealed, "Player 2 already revealed");
-    assert(disclose(recomputed == p2Commitment), "Commitment mismatch for player 2");
-    p2c0 = c0; p2c1 = c1; p2c2 = c2; p2c3 = c3; p2c4 = c4;
+    assert(disclose(recomputed == p2Commitment),
+           "Commitment mismatch for player 2");
+    p2Shoots = shoots;
+    p2Keeps  = keeps;
     p2Revealed = true;
   }
 
   if (p1Revealed && p2Revealed) {
-    if (phase == Phase.REVEALING) {
-      // Regulation scoring — all 5 rounds
-      // R0,R2,R4: P1 shoots, P2 keeps. R1,R3: P2 shoots, P1 keeps.
-      if (p1c0 != p2c0) { p1Score.increment(1); }
-      if (p2c1 != p1c1) { p2Score.increment(1); }
-      if (p1c2 != p2c2) { p1Score.increment(1); }
-      if (p2c3 != p1c3) { p2Score.increment(1); }
-      if (p1c4 != p2c4) { p1Score.increment(1); }
+    // Score the 10 pairings:
+    //   P1 shoots[i] vs P2 keeps[i] → P1 goal if different
+    //   P2 shoots[i] vs P1 keeps[i] → P2 goal if different
+    if (p1Shoots[0] != p2Keeps[0]) { p1Score.increment(1); }
+    if (p1Shoots[1] != p2Keeps[1]) { p1Score.increment(1); }
+    if (p1Shoots[2] != p2Keeps[2]) { p1Score.increment(1); }
+    if (p1Shoots[3] != p2Keeps[3]) { p1Score.increment(1); }
+    if (p1Shoots[4] != p2Keeps[4]) { p1Score.increment(1); }
 
-      if (p1Score.read() > p2Score.read()) {
-        winner = player1;
-        phase = Phase.COMPLETE;
-      } else if (p2Score.read() > p1Score.read()) {
-        winner = player2;
-        phase = Phase.COMPLETE;
-      } else {
-        // Draw — enter sudden death
-        resetRoundState();
-        phase = Phase.SD_COMMITTING;
-        sdRound.increment(1);
-      }
+    if (p2Shoots[0] != p1Keeps[0]) { p2Score.increment(1); }
+    if (p2Shoots[1] != p1Keeps[1]) { p2Score.increment(1); }
+    if (p2Shoots[2] != p1Keeps[2]) { p2Score.increment(1); }
+    if (p2Shoots[3] != p1Keeps[3]) { p2Score.increment(1); }
+    if (p2Shoots[4] != p1Keeps[4]) { p2Score.increment(1); }
+
+    if (p1Score.read() > p2Score.read()) {
+      winner = player1;
+      phase = Phase.COMPLETE;
+    } else if (p2Score.read() > p1Score.read()) {
+      winner = player2;
+      phase = Phase.COMPLETE;
     } else {
-      // Sudden death scoring — stop at first decisive round
-      // Each SD round pair: P1 shoots then P2 shoots (alternating)
-      // Check round by round until one scores and the other doesn't
+      // Draw → sudden death
+      resetRoundState();
+      phase = Phase.SD_COMMITTING;
+      sdRound.increment(1);
+    }
+  }
+}
 
-      // Round 0: P1 shoots, P2 keeps
-      const r0Goal = p1c0 != p2c0;
-      // Round 1: P2 shoots, P1 keeps
-      const r1Goal = p2c1 != p1c1;
+// Sudden-death reveal: open this round's {shoot, keep}. Decisive
+// if exactly one player scores; otherwise advance to the next SD round.
+export circuit revealSuddenDeath(): [] {
+  assert(phase == Phase.SD_REVEALING, "Match not in SD reveal phase");
+  assert(blockTimeLt(deadline), "Reveal deadline passed");
 
-      if (disclose(r0Goal && !r1Goal)) {
-        // P1 scored, P2 didn't → P1 wins
-        winner = player1;
-        phase = Phase.COMPLETE;
-      } else if (disclose(!r0Goal && r1Goal)) {
-        // P2 scored, P1 didn't → P2 wins
-        winner = player2;
-        phase = Phase.COMPLETE;
-      } else {
-        // Both scored or both missed — check next pair
-        // Round 2: P1 shoots, Round 3: P2 shoots
-        const r2Goal = p1c2 != p2c2;
-        const r3Goal = p2c3 != p1c3;
+  const pk = publicKey(localSecretKey());
 
-        if (disclose(r2Goal && !r3Goal)) {
-          winner = player1;
-          phase = Phase.COMPLETE;
-        } else if (disclose(!r2Goal && r3Goal)) {
-          winner = player2;
-          phase = Phase.COMPLETE;
-        } else {
-          // Round 4: P1 shoots (odd one out — P2 shoots next SD batch round 0)
-          const r4Goal = p1c4 != p2c4;
-          // We can't resolve with just one shot — need the paired response
-          // in the next batch. Carry the state forward.
-          if (disclose(r4Goal)) {
-            p1Score.increment(1);
-          }
+  const shoot = disclose(localSdShoot());
+  const keep  = disclose(localSdKeep());
+  const nonce = disclose(localNonce());
 
-          // Still no decisive result — another SD batch
-          resetRoundState();
-          phase = Phase.SD_COMMITTING;
-          sdRound.increment(1);
-        }
-      }
+  assert(disclose(validDirection(shoot)), "Shoot must be 0, 1, or 2");
+  assert(disclose(validDirection(keep)),  "Keep must be 0, 1, or 2");
+
+  const recomputed = computeSuddenDeathCommitment(shoot, keep, nonce);
+
+  if (disclose(pk == player1)) {
+    assert(!p1Revealed, "Player 1 already revealed");
+    assert(disclose(recomputed == p1Commitment),
+           "Commitment mismatch for player 1");
+    p1SdShoot = shoot;
+    p1SdKeep  = keep;
+    p1Revealed = true;
+  } else {
+    assert(disclose(pk == player2), "Not a player in this match");
+    assert(!p2Revealed, "Player 2 already revealed");
+    assert(disclose(recomputed == p2Commitment),
+           "Commitment mismatch for player 2");
+    p2SdShoot = shoot;
+    p2SdKeep  = keep;
+    p2Revealed = true;
+  }
+
+  if (p1Revealed && p2Revealed) {
+    // Single pairing: P1.shoot vs P2.keep, P2.shoot vs P1.keep.
+    const p1Goal = p1SdShoot != p2SdKeep;
+    const p2Goal = p2SdShoot != p1SdKeep;
+
+    if (disclose(p1Goal)) { p1Score.increment(1); }
+    if (disclose(p2Goal)) { p2Score.increment(1); }
+
+    if (disclose(p1Goal && !p2Goal)) {
+      winner = player1;
+      phase = Phase.COMPLETE;
+    } else if (disclose(!p1Goal && p2Goal)) {
+      winner = player2;
+      phase = Phase.COMPLETE;
+    } else {
+      // Both scored or both missed — another SD round
+      resetRoundState();
+      phase = Phase.SD_COMMITTING;
+      sdRound.increment(1);
     }
   }
 }
@@ -311,7 +368,6 @@ export circuit claimTimeout(): [] {
   const pk = publicKey(localSecretKey());
 
   if (phase == Phase.COMMITTING || phase == Phase.SD_COMMITTING) {
-    // One player committed, the other didn't → committed player wins
     if (disclose(pk == player1) && p1Committed && !p2Committed) {
       winner = player1;
       phase = Phase.COMPLETE;
@@ -319,11 +375,9 @@ export circuit claimTimeout(): [] {
       winner = player2;
       phase = Phase.COMPLETE;
     } else {
-      // Neither committed, or both committed (shouldn't be in this phase)
       assert(false, "No valid timeout claim");
     }
   } else if (phase == Phase.REVEALING || phase == Phase.SD_REVEALING) {
-    // One player revealed, the other didn't → revealed player wins
     if (disclose(pk == player1) && p1Revealed && !p2Revealed) {
       winner = player1;
       phase = Phase.COMPLETE;

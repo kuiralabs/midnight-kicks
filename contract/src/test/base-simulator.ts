@@ -1,4 +1,4 @@
-// Base simulator — shared logic for both fixed and vulnerable contracts.
+// Base simulator — shared logic for both V3 and the vulnerable variant.
 
 import {
   type CircuitContext,
@@ -12,7 +12,7 @@ import {
   type PenaltyPrivateState,
   witnesses,
 } from "../witnesses.js";
-import { type Choices } from "./utils.js";
+import { type Picks5 } from "./utils.js";
 
 export interface PenaltyContractModule {
   Contract: new (w: typeof witnesses) => Contract<PenaltyPrivateState>;
@@ -29,8 +29,11 @@ export class BasePenaltySimulator {
   constructor(
     contractModule: PenaltyContractModule,
     secretKey: Uint8Array,
-    choices: Choices,
-    nonce: Uint8Array,
+    shoots: Picks5,
+    keeps:  Picks5,
+    nonce:  Uint8Array,
+    sdShoot: bigint = 0n,
+    sdKeep:  bigint = 0n,
   ) {
     this.contract = new contractModule.Contract(witnesses);
     this.ledgerFn = contractModule.ledger;
@@ -40,7 +43,7 @@ export class BasePenaltySimulator {
       currentZswapLocalState,
     } = this.contract.initialState(
       createConstructorContext(
-        { secretKey, choices, nonce },
+        { secretKey, shoots, keeps, sdShoot, sdKeep, nonce },
         "0".repeat(64),
       ),
     );
@@ -55,14 +58,39 @@ export class BasePenaltySimulator {
     };
   }
 
+  // Swap the active player's full private state (regulation picks +
+  // SD picks + secret + nonce). SD picks default to 0 for tests that
+  // only care about regulation.
   switchPlayer(
     secretKey: Uint8Array,
-    choices: Choices,
-    nonce: Uint8Array,
+    shoots: Picks5,
+    keeps:  Picks5,
+    nonce:  Uint8Array,
+    sdShoot: bigint = 0n,
+    sdKeep:  bigint = 0n,
   ): void {
     this.circuitContext.currentPrivateState = {
       secretKey,
-      choices,
+      shoots,
+      keeps,
+      sdShoot,
+      sdKeep,
+      nonce,
+    };
+  }
+
+  // Update just the SD pick + nonce, preserving secret + regulation
+  // arrays. Use this between SD rounds.
+  setSuddenDeath(
+    sdShoot: bigint,
+    sdKeep:  bigint,
+    nonce:   Uint8Array,
+  ): void {
+    const prev = this.circuitContext.currentPrivateState;
+    this.circuitContext.currentPrivateState = {
+      ...prev,
+      sdShoot,
+      sdKeep,
       nonce,
     };
   }
@@ -76,10 +104,9 @@ export class BasePenaltySimulator {
   }
 
   joinMatch(commitDeadlineSecs: bigint = FAR_FUTURE) {
-    // V2 (fixed) takes commitDeadlineSecs, V1 (vulnerable) doesn't.
-    // Always try with the arg first — if the contract doesn't accept
-    // it, fall back to no-arg. Re-throw contract assertion errors
-    // (e.g., "Cannot join your own match") so tests can catch them.
+    // V2/V3 take commitDeadlineSecs, the older vulnerable variant
+    // doesn't. Try with the arg, fall back to no-arg on signature
+    // mismatch. Re-throw contract assertion errors so tests catch them.
     try {
       this.circuitContext = this.contract.impureCircuits.joinMatch(
         this.circuitContext,
@@ -87,27 +114,40 @@ export class BasePenaltySimulator {
       ).context;
     } catch (e: any) {
       const msg = String(e?.message ?? e ?? "");
-      // If the error is about wrong arg count, retry without arg
       if (msg.includes("argument") && (msg.includes("expected") || msg.includes("received"))) {
         this.circuitContext = this.contract.impureCircuits.joinMatch(
           this.circuitContext,
         ).context;
       } else {
-        throw e; // contract assertion error — re-throw for tests
+        throw e;
       }
     }
     return this.getLedger();
   }
 
-  commitBatch() {
-    this.circuitContext = this.contract.impureCircuits.commitBatch(
+  commitRegulation() {
+    this.circuitContext = this.contract.impureCircuits.commitRegulation(
       this.circuitContext,
     ).context;
     return this.getLedger();
   }
 
-  revealBatch() {
-    this.circuitContext = this.contract.impureCircuits.revealBatch(
+  revealRegulation() {
+    this.circuitContext = this.contract.impureCircuits.revealRegulation(
+      this.circuitContext,
+    ).context;
+    return this.getLedger();
+  }
+
+  commitSuddenDeath() {
+    this.circuitContext = this.contract.impureCircuits.commitSuddenDeath(
+      this.circuitContext,
+    ).context;
+    return this.getLedger();
+  }
+
+  revealSuddenDeath() {
+    this.circuitContext = this.contract.impureCircuits.revealSuddenDeath(
       this.circuitContext,
     ).context;
     return this.getLedger();

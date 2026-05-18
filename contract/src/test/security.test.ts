@@ -1,12 +1,13 @@
 // Midnight Kicks — Security vulnerability reproductions
 //
-// These tests run against the VULNERABLE contract to prove the
-// exploits work, then against the FIXED contract to prove the
-// remediation holds. Each test maps to a VULN-XXX entry in
+// These tests run against the VULNERABLE contract (V1) to prove the
+// exploits work, then against the FIXED contract (V3) to prove the
+// remediations hold. Each test maps to a VULN-XXX entry in
 // docs/security/COMPACT_SECURITY_REGISTRY.md.
 //
-// The vulnerable contract is penalty-vulnerable.compact (V1).
-// The fixed contract is penalty.compact (V2).
+// V3 inherits every V2 fix (no disclose() of secret key or choices,
+// timeouts present) and restructures the preimage schema to support
+// the symmetric 10-pairing model — see docs/GAME_DESIGN.md §7.
 
 import { PenaltySimulator } from "./penalty-simulator.js";
 import { VulnerablePenaltySimulator } from "./penalty-vulnerable-simulator.js";
@@ -15,9 +16,10 @@ import {
   setNetworkId,
 } from "@midnight-ntwrk/midnight-js-network-id";
 import { describe, it, expect } from "vitest";
-import { randomBytes, LEFT, CENTER, RIGHT, type Choices } from "./utils.js";
+import { randomBytes, LEFT, CENTER, RIGHT, type Picks5 } from "./utils.js";
 import { Phase } from "../managed/penalty/contract/index.js";
 import { Phase as VulnPhase } from "../managed/penalty-vulnerable/contract/index.js";
+import { type VulnerableChoices } from "./witnesses-vulnerable.js";
 
 setNetworkId("undeployed" as NetworkId);
 
@@ -33,15 +35,13 @@ describe("VULN-001: Identity impersonation via secret key knowledge", () => {
   it("EXPLOIT: attacker with P1's secret key acts as P1", () => {
     const p1Secret = randomBytes(32);
     const p2Secret = randomBytes(32);
-    const choices: Choices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const choices: VulnerableChoices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
     const nonce = randomBytes(32);
 
-    // Using vulnerable contract — same behavior for this vuln
     const sim = new VulnerablePenaltySimulator(p1Secret, choices, nonce);
     sim.switchPlayer(p2Secret, choices, nonce);
     sim.joinMatch();
 
-    // ATTACK: attacker uses P1's secret key
     sim.switchPlayer(p1Secret, choices, nonce);
     const state = sim.commitBatch();
     expect(state.p1Committed).toEqual(true);
@@ -51,14 +51,13 @@ describe("VULN-001: Identity impersonation via secret key knowledge", () => {
   it("DEFENSE: without the secret key, impersonation fails", () => {
     const p1Secret = randomBytes(32);
     const p2Secret = randomBytes(32);
-    const choices: Choices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const choices: VulnerableChoices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
     const nonce = randomBytes(32);
 
     const sim = new VulnerablePenaltySimulator(p1Secret, choices, nonce);
     sim.switchPlayer(p2Secret, choices, nonce);
     sim.joinMatch();
 
-    // Wrong secret → wrong public key → rejected
     const wrongSecret = randomBytes(32);
     sim.switchPlayer(wrongSecret, choices, nonce);
     expect(() => sim.commitBatch()).toThrow("Not a player in this match");
@@ -71,87 +70,81 @@ describe("VULN-001: Identity impersonation via secret key knowledge", () => {
 
 describe("VULN-002: Choices disclosed during commitment", () => {
 
-  it("VULNERABLE: contract compiles with choices in disclose() during commit", () => {
-    // The vulnerable contract discloses choices in commitBatch:
-    //   const c0 = disclose(localChoice0());  ← LEAKED
-    // This compiles and runs — the compiler doesn't warn because
-    // disclose is explicit. But the choices are now in the proof
-    // transcript, extractable by an observer.
+  it("VULNERABLE: V1 commit discloses choices (they leak into the proof transcript)", () => {
+    // V1's commitBatch does `const c0 = disclose(localChoice0()); ...`
+    // before hashing. The choices appear as private_input instructions
+    // in the proof and are recoverable by anyone with the transaction.
 
     const p1Secret = randomBytes(32);
     const p2Secret = randomBytes(32);
-    const choices: Choices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const choices: VulnerableChoices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
     const nonce = randomBytes(32);
 
     const sim = new VulnerablePenaltySimulator(p1Secret, choices, nonce);
     sim.switchPlayer(p2Secret, choices, nonce);
     sim.joinMatch();
 
-    // Commit succeeds — vulnerable code runs fine
     sim.switchPlayer(p1Secret, choices, nonce);
     const state = sim.commitBatch();
     expect(state.p1Committed).toEqual(true);
-
-    // The problem: choices are in the proof's private_input
-    // instructions. An observer with access to the transaction
-    // could extract them before P2 commits.
   });
 
-  it("FIXED: contract compiles with choices NOT in disclose() during commit", () => {
-    // The fixed contract passes choices directly to persistentCommit
-    // without disclose(). Only the hash output is disclosed.
+  it("FIXED: V3 commit feeds shoots/keeps straight to persistentCommit — nothing disclosed but the hash", () => {
+    // V3's commitRegulation passes the witness Vectors directly into
+    // persistentCommit and only disclose()s the hash output. The
+    // shoots/keeps arrays never become private_input instructions.
 
     const p1Secret = randomBytes(32);
     const p2Secret = randomBytes(32);
-    const choices: Choices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const shoots: Picks5 = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const keeps:  Picks5 = [RIGHT, LEFT, CENTER, RIGHT, LEFT];
     const nonce = randomBytes(32);
 
-    const sim = new PenaltySimulator(p1Secret, choices, nonce);
-    sim.switchPlayer(p2Secret, choices, nonce);
+    const sim = new PenaltySimulator(p1Secret, shoots, keeps, nonce);
+    sim.switchPlayer(p2Secret, shoots, keeps, nonce);
     sim.joinMatch();
 
-    // Commit succeeds — fixed code works identically
-    sim.switchPlayer(p1Secret, choices, nonce);
-    const state = sim.commitBatch();
+    sim.switchPlayer(p1Secret, shoots, keeps, nonce);
+    const state = sim.commitRegulation();
     expect(state.p1Committed).toEqual(true);
-
-    // The fix: choices are NOT in the proof transcript.
-    // Only the commitment hash is visible. An observer sees
-    // the hash but cannot extract the choices.
+    expect(state.p1Commitment).toBeDefined();
+    expect(state.p1Commitment).not.toEqual(new Uint8Array(32));
   });
 
-  it("PROOF: same choices produce same commitment in both versions", () => {
-    // Both vulnerable and fixed contracts produce the same
-    // commitment hash — the fix doesn't change the hash, only
-    // what's disclosed in the proof.
+  it("V3 schema differs from V1: different preimages, different hashes, both still hide inputs", () => {
+    // V1 hashes BatchPreimage{c0..c4}; V3 hashes RegulationBatch{shoots, keeps}.
+    // Different structs → different commitment values for the same inputs.
+    // The security guarantee that survives is: neither commitment leaks
+    // its inputs into the proof transcript when its respective contract
+    // is built correctly. V1 broke that; V3 preserves it.
 
     const secret = randomBytes(32);
     const p2Secret = randomBytes(32);
-    const choices: Choices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const shoots: Picks5 = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const keeps:  Picks5 = [RIGHT, LEFT, CENTER, RIGHT, LEFT];
     const nonce = randomBytes(32);
 
-    const vulnSim = new VulnerablePenaltySimulator(secret, choices, nonce);
-    vulnSim.switchPlayer(p2Secret, choices, nonce);
+    const vulnSim = new VulnerablePenaltySimulator(secret, shoots, nonce);
+    vulnSim.switchPlayer(p2Secret, shoots, nonce);
     vulnSim.joinMatch();
-    vulnSim.switchPlayer(secret, choices, nonce);
+    vulnSim.switchPlayer(secret, shoots, nonce);
     const vulnState = vulnSim.commitBatch();
 
-    const fixedSim = new PenaltySimulator(secret, choices, nonce);
-    fixedSim.switchPlayer(p2Secret, choices, nonce);
+    const fixedSim = new PenaltySimulator(secret, shoots, keeps, nonce);
+    fixedSim.switchPlayer(p2Secret, shoots, keeps, nonce);
     fixedSim.joinMatch();
-    fixedSim.switchPlayer(secret, choices, nonce);
-    const fixedState = fixedSim.commitBatch();
+    fixedSim.switchPlayer(secret, shoots, keeps, nonce);
+    const fixedState = fixedSim.commitRegulation();
 
-    // Same commitment hash — the cryptography is identical
-    expect(vulnState.p1Commitment).toEqual(fixedState.p1Commitment);
-    // The only difference is what's in the proof transcript
+    expect(vulnState.p1Commitment).not.toEqual(fixedState.p1Commitment);
   });
 
-  it("MATH: only 243 choice combinations — brute-forceable without nonce", () => {
-    expect(Math.pow(3, 5)).toEqual(243);
-    // Without a nonce, an attacker could hash all 243 possible
-    // choice combinations and compare to the on-chain commitment.
-    // The 32-byte nonce makes this infeasible.
+  it("MATH: V3's pick space is 3^10 = 59049 — still brute-forceable without a nonce", () => {
+    // V3 commits 10 picks (5 shoots + 5 keeps), each in {0,1,2}.
+    expect(Math.pow(3, 10)).toEqual(59049);
+    // Without a per-commit nonce an attacker could hash all 59,049
+    // combinations and unmask the commitment before reveal. The 32-byte
+    // nonce makes this infeasible (2^256 search space).
   });
 });
 
@@ -161,52 +154,42 @@ describe("VULN-002: Choices disclosed during commitment", () => {
 
 describe("VULN-003: Secret key disclosed unnecessarily", () => {
 
-  it("VULNERABLE: secret key in disclose() — same identity derived", () => {
-    // In the vulnerable contract:
-    //   const sk = disclose(localSecretKey());  ← SECRET LEAKED
-    //   player1 = disclose(publicKey(sk));
-    // The secret key is a private_input in the ZKIR transcript.
-
+  it("VULNERABLE: V1 constructor discloses the secret key — identity still derives", () => {
+    // V1: `const sk = disclose(localSecretKey()); player1 = disclose(publicKey(sk));`
+    // The secret enters the proof's private_input section.
     const secret = randomBytes(32);
-    const choices: Choices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const choices: VulnerableChoices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
     const nonce = randomBytes(32);
 
     const sim = new VulnerablePenaltySimulator(secret, choices, nonce);
-    const vulnPlayer1 = sim.getLedger().player1;
-
-    // Identity is derived — works correctly, but the secret is
-    // unnecessarily exposed in the proof data.
-    expect(vulnPlayer1).not.toEqual(new Uint8Array(32));
+    expect(sim.getLedger().player1).not.toEqual(new Uint8Array(32));
   });
 
-  it("FIXED: secret key NOT in disclose() — same identity derived", () => {
-    // In the fixed contract:
-    //   player1 = disclose(publicKey(localSecretKey()));
-    // The secret key feeds into publicKey() without disclose().
+  it("FIXED: V3 constructor passes the secret through publicKey() without disclose()", () => {
+    // V3: `player1 = disclose(publicKey(localSecretKey()));`
     // Only the hash output crosses the privacy boundary.
-
     const secret = randomBytes(32);
-    const choices: Choices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const shoots: Picks5 = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const keeps:  Picks5 = [RIGHT, LEFT, CENTER, RIGHT, LEFT];
     const nonce = randomBytes(32);
 
-    const sim = new PenaltySimulator(secret, choices, nonce);
-    const fixedPlayer1 = sim.getLedger().player1;
-
-    expect(fixedPlayer1).not.toEqual(new Uint8Array(32));
+    const sim = new PenaltySimulator(secret, shoots, keeps, nonce);
+    expect(sim.getLedger().player1).not.toEqual(new Uint8Array(32));
   });
 
-  it("PROOF: both versions derive the same public key from same secret", () => {
+  it("PROOF: both versions derive the same public key from the same secret", () => {
+    // The publicKey() helper is identical across V1 and V3, so the
+    // derived identity is the same; only the proof transcript differs.
     const secret = randomBytes(32);
-    const choices: Choices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const choices: VulnerableChoices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const shoots:  Picks5 = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const keeps:   Picks5 = [RIGHT, LEFT, CENTER, RIGHT, LEFT];
     const nonce = randomBytes(32);
 
     const vulnSim = new VulnerablePenaltySimulator(secret, choices, nonce);
-    const fixedSim = new PenaltySimulator(secret, choices, nonce);
+    const fixedSim = new PenaltySimulator(secret, shoots, keeps, nonce);
 
-    // Same secret → same public key in both versions
     expect(vulnSim.getLedger().player1).toEqual(fixedSim.getLedger().player1);
-    // The fix doesn't change the identity — it only changes
-    // what's in the proof transcript.
   });
 });
 
@@ -216,13 +199,12 @@ describe("VULN-003: Secret key disclosed unnecessarily", () => {
 
 describe("VULN-004: Griefing via non-participation", () => {
 
-  it("EXPLOIT: contract stuck in COMMITTING — no escape", () => {
+  it("EXPLOIT: V1 contract stuck in COMMITTING — no escape", () => {
     const p1Secret = randomBytes(32);
     const p2Secret = randomBytes(32);
-    const choices: Choices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const choices: VulnerableChoices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
     const nonce = randomBytes(32);
 
-    // Both versions are vulnerable to this — V2 doesn't add timeouts
     const sim = new VulnerablePenaltySimulator(p1Secret, choices, nonce);
     sim.switchPlayer(p2Secret, choices, nonce);
     sim.joinMatch();
@@ -230,19 +212,18 @@ describe("VULN-004: Griefing via non-participation", () => {
     sim.switchPlayer(p1Secret, choices, nonce);
     sim.commitBatch();
 
-    // P2 never commits — contract stuck forever
     const state = sim.getLedger();
     expect(state.phase).toEqual(VulnPhase.COMMITTING);
     expect(state.p1Committed).toEqual(true);
     expect(state.p2Committed).toEqual(false);
-    // No claimTimeout() circuit exists — no way out
+    // V1 has no claimTimeout() — both stakes locked permanently.
   });
 
-  it("EXPLOIT: contract stuck in REVEALING — no escape", () => {
+  it("EXPLOIT: V1 contract stuck in REVEALING — no escape", () => {
     const p1Secret = randomBytes(32);
     const p2Secret = randomBytes(32);
-    const p1Choices: Choices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
-    const p2Choices: Choices = [RIGHT, LEFT, CENTER, RIGHT, LEFT];
+    const p1Choices: VulnerableChoices = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const p2Choices: VulnerableChoices = [RIGHT, LEFT, CENTER, RIGHT, LEFT];
     const p1Nonce = randomBytes(32);
     const p2Nonce = randomBytes(32);
 
@@ -258,11 +239,32 @@ describe("VULN-004: Griefing via non-participation", () => {
     sim.switchPlayer(p1Secret, p1Choices, p1Nonce);
     sim.revealBatch();
 
-    // P2 never reveals — contract stuck forever
     const state = sim.getLedger();
     expect(state.phase).toEqual(VulnPhase.REVEALING);
     expect(state.p1Revealed).toEqual(true);
     expect(state.p2Revealed).toEqual(false);
-    // Both players' stakes would be locked permanently
+  });
+
+  it("FIXED: V3 exposes claimTimeout() and cancelMatch() as escape hatches", () => {
+    // The compact simulator can't advance block time, so we can't
+    // actually fire blockTimeGte() here. What we can verify is that
+    // V3 ships the circuits — V1 doesn't, so its simulator throws.
+    const shoots: Picks5 = [LEFT, CENTER, RIGHT, LEFT, RIGHT];
+    const keeps:  Picks5 = [RIGHT, LEFT, CENTER, RIGHT, LEFT];
+    const nonce = randomBytes(32);
+
+    const v3 = new PenaltySimulator(randomBytes(32), shoots, keeps, nonce);
+    // claimTimeout exists on V3 (asserts trip on its own preconditions,
+    // not on the circuit being absent).
+    expect("claimTimeout" in v3.contract.impureCircuits).toBe(true);
+    expect("cancelMatch" in v3.contract.impureCircuits).toBe(true);
+
+    const v1 = new VulnerablePenaltySimulator(
+      randomBytes(32),
+      [LEFT, CENTER, RIGHT, LEFT, RIGHT],
+      nonce,
+    );
+    expect("claimTimeout" in v1.contract.impureCircuits).toBe(false);
+    expect("cancelMatch" in v1.contract.impureCircuits).toBe(false);
   });
 });

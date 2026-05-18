@@ -1,4 +1,4 @@
-// Midnight Kicks — Witness implementations for penalty.compact
+// Midnight Kicks — Witness implementations for penalty.compact V3
 // SPDX-License-Identifier: Apache-2.0
 
 import { Ledger } from "./managed/penalty/contract/index.js";
@@ -8,32 +8,49 @@ import { WitnessContext } from "@midnight-ntwrk/compact-runtime";
 // Private state shape
 // ═══════════════════════════════════════════════════════════════════
 
-// Each player's private state holds their secret key, 5 direction
-// choices (0=LEFT, 1=CENTER, 2=RIGHT), and a commitment nonce.
+// Each player's private state holds:
+//   - secretKey: 32 bytes, derives the player's public identity
+//   - shoots: 5 directions for the player's 5 regulation shots
+//   - keeps:  5 directions for the player's 5 regulation saves
+//   - sdShoot/sdKeep: 1 direction each for the current SD round
+//   - nonce: 32 bytes, fresh per commit (regulation + every SD round)
+//
+// Direction encoding: 0 = LEFT, 1 = CENTER, 2 = RIGHT
+// (Shooter's perspective — keeper picks the side they'll dive to,
+// matching the shooter's reference frame.)
+//
+// nonce MUST be regenerated for each commit (regulation, then once per
+// SD round) — reusing it leaks the choices after the first reveal.
+export type Picks5 = [bigint, bigint, bigint, bigint, bigint];
+
 export type PenaltyPrivateState = {
   readonly secretKey: Uint8Array;
-  readonly choices: [bigint, bigint, bigint, bigint, bigint];
+  readonly shoots: Picks5;
+  readonly keeps:  Picks5;
+  readonly sdShoot: bigint;
+  readonly sdKeep:  bigint;
   readonly nonce: Uint8Array;
 };
 
 export const createPenaltyPrivateState = (
   secretKey: Uint8Array,
-  choices: [bigint, bigint, bigint, bigint, bigint],
-  nonce: Uint8Array,
+  shoots: Picks5,
+  keeps:  Picks5,
+  nonce:  Uint8Array,
+  sdShoot: bigint = 0n,
+  sdKeep:  bigint = 0n,
 ): PenaltyPrivateState => ({
   secretKey,
-  choices,
+  shoots,
+  keeps,
+  sdShoot,
+  sdKeep,
   nonce,
 });
 
 // ═══════════════════════════════════════════════════════════════════
 // Witness implementations
 // ═══════════════════════════════════════════════════════════════════
-
-// Each witness function:
-// - Takes a WitnessContext (ledger state + private state + contract address)
-// - Returns [newPrivateState, returnValue]
-// - Private state is carried forward unchanged (read-only witnesses)
 
 export const witnesses = {
   localSecretKey: ({
@@ -43,45 +60,38 @@ export const witnesses = {
     Uint8Array,
   ] => [privateState, privateState.secretKey],
 
-  localChoice0: ({
-    privateState,
-  }: WitnessContext<Ledger, PenaltyPrivateState>): [
-    PenaltyPrivateState,
-    bigint,
-  ] => [privateState, privateState.choices[0]],
-
-  localChoice1: ({
-    privateState,
-  }: WitnessContext<Ledger, PenaltyPrivateState>): [
-    PenaltyPrivateState,
-    bigint,
-  ] => [privateState, privateState.choices[1]],
-
-  localChoice2: ({
-    privateState,
-  }: WitnessContext<Ledger, PenaltyPrivateState>): [
-    PenaltyPrivateState,
-    bigint,
-  ] => [privateState, privateState.choices[2]],
-
-  localChoice3: ({
-    privateState,
-  }: WitnessContext<Ledger, PenaltyPrivateState>): [
-    PenaltyPrivateState,
-    bigint,
-  ] => [privateState, privateState.choices[3]],
-
-  localChoice4: ({
-    privateState,
-  }: WitnessContext<Ledger, PenaltyPrivateState>): [
-    PenaltyPrivateState,
-    bigint,
-  ] => [privateState, privateState.choices[4]],
-
   localNonce: ({
     privateState,
   }: WitnessContext<Ledger, PenaltyPrivateState>): [
     PenaltyPrivateState,
     Uint8Array,
   ] => [privateState, privateState.nonce],
+
+  localShoots: ({
+    privateState,
+  }: WitnessContext<Ledger, PenaltyPrivateState>): [
+    PenaltyPrivateState,
+    Picks5,
+  ] => [privateState, privateState.shoots],
+
+  localKeeps: ({
+    privateState,
+  }: WitnessContext<Ledger, PenaltyPrivateState>): [
+    PenaltyPrivateState,
+    Picks5,
+  ] => [privateState, privateState.keeps],
+
+  localSdShoot: ({
+    privateState,
+  }: WitnessContext<Ledger, PenaltyPrivateState>): [
+    PenaltyPrivateState,
+    bigint,
+  ] => [privateState, privateState.sdShoot],
+
+  localSdKeep: ({
+    privateState,
+  }: WitnessContext<Ledger, PenaltyPrivateState>): [
+    PenaltyPrivateState,
+    bigint,
+  ] => [privateState, privateState.sdKeep],
 };
