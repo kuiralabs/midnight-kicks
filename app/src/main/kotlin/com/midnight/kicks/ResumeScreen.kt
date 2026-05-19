@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -25,10 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
+import kotlin.math.abs
 
 /**
  * Resume picker — lists every match in [MatchStore], tap a row to land
@@ -170,9 +168,14 @@ private fun MatchRow(
                 )
             }
 
-            Spacer(modifier = Modifier.fillMaxWidth(fraction = 0.04f))
+            Spacer(modifier = Modifier.width(12.dp))
 
-            Column(modifier = Modifier.fillMaxWidth(fraction = 0.75f)) {
+            // Address + deadline take the remaining row width via
+            // weight(1f); the chevron at the trailing edge gets its
+            // intrinsic width. This is the right Row idiom — the
+            // previous `fillMaxWidth(fraction = 0.75f)` was a brittle
+            // hardcode that competed with the badge + spacer layout.
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = match.address.shortAddress(),
                     color = Color.White.copy(alpha = 0.85f),
@@ -188,7 +191,7 @@ private fun MatchRow(
                 )
             }
 
-            Spacer(modifier = Modifier.fillMaxWidth(fraction = 1f))
+            Spacer(modifier = Modifier.width(8.dp))
 
             Text(
                 "›",
@@ -215,7 +218,7 @@ private fun MatchRow(
 internal fun deadlineLabel(deadlineSeconds: Long): String {
     val nowSeconds = System.currentTimeMillis() / 1000
     val deltaSeconds = deadlineSeconds - nowSeconds
-    val absSeconds = kotlin.math.abs(deltaSeconds)
+    val absSeconds = abs(deltaSeconds)
     val phrase = when {
         absSeconds < 60 -> "$absSeconds s"
         absSeconds < 3600 -> "${absSeconds / 60} min"
@@ -224,14 +227,3 @@ internal fun deadlineLabel(deadlineSeconds: Long): String {
     }
     return if (deltaSeconds >= 0) "DEADLINE IN $phrase" else "EXPIRED $phrase AGO"
 }
-
-/**
- * ISO timestamp helper for tests / debug logs. Not used by the UI today
- * but kept here so a future "show absolute time" affordance reuses the
- * same UTC-anchored format the chain uses.
- */
-@Suppress("unused")
-internal fun isoTimestamp(unixSeconds: Long): String =
-    SimpleDateFormat("yyyy-MM-dd HH:mm 'UTC'", Locale.US)
-        .apply { timeZone = TimeZone.getTimeZone("UTC") }
-        .format(Date(unixSeconds * 1000))

@@ -18,9 +18,6 @@ import org.junit.Test
  */
 class DeadlineLabelTest {
 
-    /** Test pins a fixed "now" so deltas are deterministic. */
-    private val nowSeconds: Long = 1_700_000_000L  // 2023-11-14 22:13:20 UTC
-
     @Test
     fun `future deadline within a minute reports seconds`() {
         // System.currentTimeMillis() is read inside deadlineLabel, so
@@ -64,15 +61,6 @@ class DeadlineLabelTest {
         // the inequality and silently flip the boundary case.
         val futureSecs = currentNow() + 60
         assertEquals("DEADLINE IN 1 min", deadlineLabel(futureSecs))
-    }
-
-    @Test
-    fun `isoTimestamp formats unix seconds as UTC date`() {
-        // nowSeconds == 2023-11-14 22:13:20 UTC. Locking down the format
-        // so a future relocale doesn't accidentally render local-time
-        // (chain time is always UTC; users in PT shouldn't see
-        // "2023-11-14 14:13 PST").
-        assertEquals("2023-11-14 22:13 UTC", isoTimestamp(nowSeconds))
     }
 
     @Test
