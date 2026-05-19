@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import com.midnight.kuira.dapp.PanelBar
 import com.midnight.kuira.core.network.MidnightNetwork
+import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -48,6 +49,7 @@ import org.json.JSONObject
  * Activity destruction. The owned [MatchManager] is closed in [onDestroy]
  * to release SDK / FFI resources and wipe key material.
  */
+@AndroidEntryPoint
 class KicksActivity : FragmentActivity() {
 
     private val statusMessage = mutableStateOf<String?>(null)

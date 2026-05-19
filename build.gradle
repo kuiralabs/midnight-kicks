@@ -3,4 +3,11 @@ plugins {
     id 'com.android.library' version '9.2.1' apply false
     id 'org.jetbrains.kotlin.android' version '2.3.20' apply false
     id 'org.jetbrains.kotlin.plugin.compose' version '2.3.20' apply false
+    // Hilt + KSP. Required because the `dapp-ui` panels in PanelBar
+    // (sigil + wallet) are `@HiltViewModel`-annotated and resolved via
+    // `hiltViewModel()`. Versions match the parent Kuira workspace's
+    // libs.versions.toml so the generated Hilt graph is compatible
+    // with the published AAR's annotation processing.
+    id 'com.google.dagger.hilt.android' version '2.58' apply false
+    id 'com.google.devtools.ksp' version '2.3.6' apply false
 }

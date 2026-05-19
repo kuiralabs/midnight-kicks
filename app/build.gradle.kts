@@ -2,6 +2,8 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.dagger.hilt.android")
+    id("com.google.devtools.ksp")
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -109,6 +111,13 @@ dependencies {
     // network enum, so declare them here.
     implementation("com.midnight.kuira:compact-engine:0.1.0-SNAPSHOT")
     implementation("com.midnight.kuira:network:0.1.0-SNAPSHOT")
+    // Hilt's compile-time annotation processor needs the types referenced
+    // by `dapp-ui`'s `DappUiModule` on the compile classpath. dapp-ui
+    // declares these as `implementation` (runtime scope in the POM), so
+    // they're available at runtime via transitive resolution but invisible
+    // to the consumer's compile classpath. Declare them explicitly here.
+    implementation("com.midnight.kuira:identity:0.1.0-SNAPSHOT")
+    implementation("com.midnight.kuira:auth:0.1.0-SNAPSHOT")
 
     // AndroidX directly used by Kicks's own code (FragmentActivity host,
     // Compose). Things Kuira pulls in transitively (biometric, credentials,
@@ -122,6 +131,15 @@ dependencies {
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+
+    // Hilt DI — required because `dapp-ui`'s sigil/wallet panels are
+    // `@HiltViewModel` and resolved through `hiltViewModel()`. Without
+    // the Hilt plugin + compiler the consumer graph isn't generated
+    // and the panels crash at composition with a missing-entrypoint
+    // error. Versions match parent libs.versions.toml.
+    implementation("com.google.dagger:hilt-android:2.58")
+    ksp("com.google.dagger:hilt-compiler:2.58")
+    implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
 
     // Tests (JVM unit). MatchState / ContractStateSnapshot / pure helpers
     // live here. JSON parsing uses Android's org.json, so we need its
