@@ -110,8 +110,7 @@ class MatchStoreInstrumentedTest {
         // accidentally re-flipped to apply(), this test catches the
         // SIGKILL-loses-write window directly — apply()'s async write
         // can land after a fresh process queries the file.
-        val first = store
-        first.save(fixtureMatch(address = "cccc", role = Player.P1))
+        store.save(fixtureMatch(address = "cccc", role = Player.P1))
 
         val second = MatchStore(ApplicationProvider.getApplicationContext<Context>())
         val loaded = second.load("cccc")

@@ -52,7 +52,7 @@ import java.security.SecureRandom
  * exists so a future PvP code path can swap "AI auto-decides" for "wait
  * for the friend's transaction on chain".
  */
-class MatchManager(
+open class MatchManager(
     private val context: Context,
     private val network: MidnightNetwork,
     seed: ByteArray,
@@ -158,7 +158,25 @@ class MatchManager(
     suspend fun initSdk() = withContext(Dispatchers.IO) {
         require(state.value is MatchState.Idle) { "initSdk requires Idle, got ${state.value}" }
         setState(MatchState.InitializingSdk)
+        initSdkInternal()
 
+        setState(MatchState.SdkReady)
+    }
+
+    /**
+     * Test seam — the chain-touching, dependency-heavy half of
+     * [initSdk]. Production builds a real [MidnightSdk] (Builder pulls
+     * in indexer/wallet/dust subscriptions), installs proving keys.
+     * Tests override this to skip the SDK build entirely and just
+     * return — the state-machine transitions are what they're
+     * locking down, not the SDK init pipeline.
+     *
+     * `internal open` because (1) the file already exposes a fair bit
+     * via `internal` for the in-package test surface, and (2) `open`
+     * lets a `TestableMatchManager` subclass override without
+     * stand-up of mockk-final-class machinery.
+     */
+    internal open suspend fun initSdkInternal() {
         installProvingKeys()
         val builtSdk = MidnightSdk.Builder(context)
             .network(network)
@@ -171,8 +189,6 @@ class MatchManager(
         // Seed has been copied into the SDK by build(); wipe our local copy.
         seed?.fill(0)
         seed = null
-
-        setState(MatchState.SdkReady)
     }
 
     /**
@@ -377,27 +393,22 @@ class MatchManager(
             inProgress = { MatchState.Deploying },
             onSuccess = { _, address -> MatchState.Deployed(address) },
         ) {
-            val verifierKeys = loadVerifierKeys()
-            val contract = createContractHandle(p1SecretKey, address = null, verifierKeys = verifierKeys)
-            val deploy = contract.deploy { stage -> Log.d(TAG, "deploy: ${stage.javaClass.simpleName}") }
-            Log.i(TAG, "Match at: ${deploy.contractAddress}")
+            val address = executeDeploy(p1SecretKey)
+            Log.i(TAG, "Match at: $address")
             // Persist before the indexer-settle delay below so a SIGKILL in
             // that window doesn't strand the user without the local secret
             // key that hashes into the on-chain participant set.
-            currentAddress = deploy.contractAddress
+            currentAddress = address
             store.save(
                 MatchStore.Match(
-                    address = deploy.contractAddress,
+                    address = address,
                     role = Player.P1,
                     deadline = System.currentTimeMillis() / 1000 + COMMIT_DEADLINE_DURATION_SECS,
                     secretKey = p1SecretKey.copyOf(),
                 ),
             )
 
-            // Indexer needs a beat to ingest the deploy block, and the deploy
-            // consumed a dust UTXO so we need to refresh the wallet's view.
-            delay(INDEXER_SETTLE_MS)
-            requireSdk.wallet.refresh()
+            afterDeploySettle()
 
             // StatePoller is NOT started here. It's only relevant for PvP, and
             // even then only during explicit wait windows (see waitForP2*).
@@ -405,7 +416,50 @@ class MatchManager(
             // submitted from this device, and `nodeRpcClient.submitAndWaitForFinalization`
             // already guarantees finality before each transition returns.
 
-            deploy.contractAddress
+            address
+        }
+    }
+
+    /**
+     * Test seam — the chain-touching half of [deployMatch]. Production
+     * loads verifier keys, builds a [MidnightContract], runs
+     * `contract.deploy(...)`, returns the resulting on-chain address.
+     * Tests override to return a stub address without standing up the
+     * SDK or hitting a chain.
+     */
+    internal open suspend fun executeDeploy(secretKey: ByteArray): String {
+        val verifierKeys = loadVerifierKeys()
+        val contract = createContractHandle(secretKey, address = null, verifierKeys = verifierKeys)
+        val deploy = contract.deploy { stage -> Log.d(TAG, "deploy: ${stage.javaClass.simpleName}") }
+        return deploy.contractAddress
+    }
+
+    /**
+     * Test seam — the after-deploy chain settle. Production waits for the
+     * indexer to ingest the deploy block and refreshes the wallet view
+     * so the next callCircuit sees the post-deploy UTXO state. Tests
+     * override to no-op (the chain isn't actually moving in test).
+     */
+    internal open suspend fun afterDeploySettle() {
+        delay(INDEXER_SETTLE_MS)
+        requireSdk.wallet.refresh()
+    }
+
+    /**
+     * Test seam — the chain-touching `joinMatch` circuit invocation
+     * wrapped in the indexer-readiness retry. Production calls the
+     * actual circuit on chain; tests override to either succeed
+     * (advances state to Joined) or throw a "WAITING phase" exception
+     * (exercises the rejoiner-vs-stranger branch in [joinAsP2]'s
+     * catch block).
+     */
+    internal open suspend fun executeJoinMatch(
+        secretKey: ByteArray,
+        address: String,
+        deadline: BigInteger,
+    ) {
+        retryUntilIndexerReady(JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS) {
+            callCircuit(secretKey, address, "joinMatch", arrayOf(deadline))
         }
     }
 
@@ -474,9 +528,7 @@ class MatchManager(
             val deadlineSecs = System.currentTimeMillis() / 1000 + COMMIT_DEADLINE_DURATION_SECS
             val deadline = BigInteger.valueOf(deadlineSecs)
             try {
-                retryUntilIndexerReady(JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS) {
-                    callCircuit(p2SecretKey, address, "joinMatch", arrayOf(deadline))
-                }
+                executeJoinMatch(p2SecretKey, address, deadline)
                 // Persist after the chain accepts our join — without
                 // this, a kill before the next save loses the session
                 // and a relaunch can't tell we're the rightful P2.
