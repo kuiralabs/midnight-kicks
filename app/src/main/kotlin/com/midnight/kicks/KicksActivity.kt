@@ -32,6 +32,7 @@ import androidx.lifecycle.lifecycleScope
 import com.midnight.kuira.dapp.PanelBar
 import com.midnight.kuira.core.network.MidnightNetwork
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -70,9 +71,12 @@ class KicksActivity : FragmentActivity() {
      * Unified match store, shared with the [MatchManager] this Activity
      * constructs. Activity-side reads it for the isResume gate +
      * `hasActiveSession` indicator; MatchManager writes it on every
-     * deploy/join/commit/SD success.
+     * deploy/join/commit/SD success. Hilt-provided as a Singleton via
+     * `KicksStorageModule.provideMatchStore`, so the same instance
+     * flows through to `MatchStoreBackupProvider` (which the sigil
+     * panel discovers via Optional injection for cloud backup).
      */
-    private val store by lazy { MatchStore(applicationContext) }
+    @Inject lateinit var store: MatchStore
     /**
      * Role this device is playing for the current Unity choice phase.
      * `null` → PvAI (legacy practice mode). Drives the dispatch in
@@ -355,6 +359,15 @@ class KicksActivity : FragmentActivity() {
                         context = applicationContext,
                         network = MidnightNetwork.UNDEPLOYED,
                         seed = TEST_SEED,
+                        // Pass the Hilt-singleton MatchStore so both
+                        // KicksActivity and MatchManager share one
+                        // instance — the same one MatchStoreBackupProvider
+                        // reads from for cloud backup. Without this,
+                        // MatchManager would construct its own
+                        // EncryptedSharedPreferences handle and a save
+                        // here wouldn't be visible to the Activity-side
+                        // read (or to the backup pipeline).
+                        store = store,
                     )
                     // Bind statusMessage to the SDK's published state — this
                     // is the canonical way to surface progress in a Kuira dApp.
