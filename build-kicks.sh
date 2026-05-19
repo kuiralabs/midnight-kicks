@@ -1,7 +1,18 @@
 #!/bin/bash
 # Build Midnight Kicks — full pipeline
 # Rebuilds Rust FFI → SDK AARs → Kicks APK → installs on device
+#
+# Usage:
+#   ./build-kicks.sh                    # one device connected → install on it
+#   ./build-kicks.sh emulator-5554      # pick a specific device by serial
+#   ./build-kicks.sh --all              # install on every connected device
+#
+# Without a target arg and multiple devices, the install step lists the
+# devices and exits without installing (rather than picking one at
+# random or breaking on adb's "more than one device" error).
 set -e
+
+TARGET_DEVICE="${1:-}"
 
 KUIRA_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 KICKS_ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -66,14 +77,47 @@ cd "$KICKS_ROOT"
 APK="$KICKS_ROOT/app/build/outputs/apk/debug/app-debug.apk"
 echo "  ✓ $(du -h "$APK" | cut -f1) APK"
 
-# Step 4: Install on device (if connected)
+# Step 4: Install on device(s)
+#
+# `adb install` without `-s <serial>` errors with "more than one device"
+# when multiple emulators are running — common during PvP testing where
+# we have 5554 + 5556 up at the same time. Pass a serial as $1 to pick
+# one, or `--all` to install on every connected device. With exactly
+# one device connected and no arg, default behaviour is preserved.
 echo ""
 echo "── Step 4: Install ──"
-if adb devices 2>/dev/null | grep -q "device$"; then
+connected=$(adb devices 2>/dev/null | awk 'NR>1 && $2=="device" {print $1}')
+n=$(printf '%s\n' "$connected" | grep -c .)
+
+if [ "$TARGET_DEVICE" = "--all" ]; then
+    if [ "$n" = "0" ]; then
+        echo "  ⚠ --all specified but no device connected — APK at $APK"
+    else
+        echo "  Installing on $n device(s): $connected"
+        for d in $connected; do
+            adb -s "$d" install -r "$APK"
+            echo "  ✓ Installed on $d"
+        done
+    fi
+elif [ -n "$TARGET_DEVICE" ]; then
+    if ! printf '%s\n' "$connected" | grep -qx "$TARGET_DEVICE"; then
+        echo "  ✗ Device '$TARGET_DEVICE' not connected. Connected:"
+        printf '%s\n' "$connected" | sed 's/^/      /'
+        echo "  APK at $APK"
+        exit 1
+    fi
+    adb -s "$TARGET_DEVICE" install -r "$APK"
+    echo "  ✓ Installed on $TARGET_DEVICE"
+elif [ "$n" = "1" ]; then
     adb install -r "$APK"
-    echo "  ✓ Installed"
-else
+    echo "  ✓ Installed on $connected"
+elif [ "$n" = "0" ]; then
     echo "  ⚠ No device connected — APK at $APK"
+else
+    echo "  ⚠ Multiple devices connected — pass one as arg:"
+    printf '%s\n' "$connected" | sed 's/^/      ./build-kicks.sh /'
+    echo "    Or use --all to install on every device."
+    echo "  APK at $APK"
 fi
 
 echo ""
