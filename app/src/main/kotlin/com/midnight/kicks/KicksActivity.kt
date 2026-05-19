@@ -32,6 +32,7 @@ import androidx.lifecycle.lifecycleScope
 import com.midnight.kuira.dapp.PanelBar
 import com.midnight.kuira.core.network.MidnightNetwork
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -61,11 +62,17 @@ class KicksActivity : FragmentActivity() {
     // Per-screen UX state for the create-and-go flow.
     private val creatingChecking = mutableStateOf(false)
     private val creatingStatus = mutableStateOf<String?>(null)
-    // True if KicksSessionStore has an active match — surfaces the
+    // True if [store] has any active matches — surfaces the
     // RESUME MATCH affordance on the menu.
     private val hasActiveSession = mutableStateOf(false)
     private var matchManager: MatchManager? = null
-    private val sessionStore by lazy { KicksSessionStore(applicationContext) }
+    /**
+     * Unified match store, shared with the [MatchManager] this Activity
+     * constructs. Activity-side reads it for the isResume gate +
+     * `hasActiveSession` indicator; MatchManager writes it on every
+     * deploy/join/commit/SD success.
+     */
+    private val store by lazy { MatchStore(applicationContext) }
     /**
      * Role this device is playing for the current Unity choice phase.
      * `null` → PvAI (legacy practice mode). Drives the dispatch in
@@ -88,7 +95,7 @@ class KicksActivity : FragmentActivity() {
      * SD loop is suspended on it via [gatherSdPicksFromUi]. Set inside
      * the SD callback; cleared as soon as the deferred completes.
      */
-    private var pendingSdPicks: kotlinx.coroutines.CompletableDeferred<Pair<Int, Int>>? = null
+    private var pendingSdPicks: CompletableDeferred<Pair<Int, Int>>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -101,7 +108,7 @@ class KicksActivity : FragmentActivity() {
         // Surface RESUME MATCH if a previous session is on disk. Independent
         // from any deep-link handling: even a cold launch with no intent
         // data should show the resume affordance if a session exists.
-        hasActiveSession.value = sessionStore.load() != null
+        hasActiveSession.value = store.loadAll().isNotEmpty()
 
         handleDeepLink(intent)
 
@@ -153,7 +160,7 @@ class KicksActivity : FragmentActivity() {
 
     /**
      * P1 entry point — "create and go". Deploys a fresh penalty contract,
-     * persists the session ([KicksSessionStore]) so it survives process
+     * persists the match ([MatchStore]) so it survives process
      * death, and renders the QR + COPY screen. **Does not block waiting
      * for the opponent** — matchmaking is async by nature, and pinning a
      * coroutine to this Activity's lifecycle would kill the wait the
@@ -174,11 +181,9 @@ class KicksActivity : FragmentActivity() {
                     val manager = matchManager ?: return@launch
                     val address = manager.deployMatch()
                     Log.i(TAG, "Deployed match: $address")
-                    val deadline = System.currentTimeMillis() / 1000 +
-                        COMMIT_DEADLINE_DURATION_SECS
-                    sessionStore.save(
-                        MatchSession(address = address, role = Player.P1, deadline = deadline)
-                    )
+                    // MatchManager.deployMatch already saved the new
+                    // match to [store] (role + secret key + deadline).
+                    // Just refresh the affordance flag + update the UI.
                     hasActiveSession.value = true
                     screen.value = KicksScreen.Creating(address = address)
                 } catch (e: Exception) {
@@ -213,14 +218,16 @@ class KicksActivity : FragmentActivity() {
         lifecycleScope.launch {
             try {
                 val manager = matchManager ?: return@launch
-                // Cross-process resume isn't supported yet — see the
-                // KDoc on this method. Detect and explain rather than
-                // erroring opaquely from awaitOpponentJoin's precondition.
+                // After app kill + resume, state should land at Deployed
+                // (or further) for the active match. If we somehow end up
+                // here with an earlier state, the resume path missed
+                // something — surface a clear hint instead of letting
+                // awaitOpponentJoin's precondition assertion blow up.
                 if (manager.state.value !is MatchState.Deployed &&
                     manager.state.value !is MatchState.Joined
                 ) {
                     creatingStatus.value =
-                        "Match keys lost on app kill — re-deploy to play. (Cross-process resume coming.)"
+                        "No active match in memory — go back and create one."
                     return@launch
                 }
                 manager.awaitOpponentJoin(timeoutMs = CHECK_STATUS_TIMEOUT_MS)
@@ -237,7 +244,7 @@ class KicksActivity : FragmentActivity() {
 
     /**
      * Resume the most recent persisted session. Reopens the right screen
-     * based on [MatchSession.role]:
+     * based on [MatchStore.Match.role]:
      *  - P1 → [KicksScreen.Creating] with the saved address; user can tap
      *    CHECK STATUS to see if the opponent has joined
      *  - P2 → [KicksScreen.Joining] with the address prefilled (in case
@@ -249,14 +256,17 @@ class KicksActivity : FragmentActivity() {
      * the matchmaking view.
      */
     private fun resumeMatch() {
-        val session = sessionStore.load() ?: run {
+        // Single-match resume for now: pick the first entry. Commit 3
+        // adds a Resume UI that lets the user pick among multiple
+        // active matches.
+        val match = store.loadAll().firstOrNull() ?: run {
             hasActiveSession.value = false
             return
         }
-        Log.i(TAG, "Resuming session: address=${session.address.take(20)}… role=${session.role}")
-        screen.value = when (session.role) {
-            Player.P1 -> KicksScreen.Creating(address = session.address)
-            Player.P2 -> KicksScreen.Joining(prefilledAddress = session.address)
+        Log.i(TAG, "Resuming match: address=${match.address.take(20)}… role=${match.role}")
+        screen.value = when (match.role) {
+            Player.P1 -> KicksScreen.Creating(address = match.address)
+            Player.P2 -> KicksScreen.Joining(prefilledAddress = match.address)
         }
         // Make sure the SDK is bootstrapped so CHECK STATUS / JOIN can
         // make chain calls without an additional cold-start delay.
@@ -273,15 +283,20 @@ class KicksActivity : FragmentActivity() {
      * via [KicksScreen.Joining.inFlight].
      */
     /**
-     * P2 entry point. Treats the call as a resume if `KicksSessionStore`
+     * P2 entry point. Treats the call as a resume if `MatchStore`
      * already has a P2 row for this exact address — that's how we
      * distinguish a legitimate rejoin (same device, after backing out)
      * from a stranger who got the deep link. See `MatchManager.joinAsP2`
      * KDoc for the security rationale.
      */
     private fun startJoinMatch(address: String) {
-        val saved = sessionStore.load()
-        val isResume = saved?.address == address && saved.role == Player.P2
+        // Wrong-actor gate (from MatchManager.joinAsP2 KDoc): a saved
+        // P2 record for this exact address means we've successfully
+        // joined before — treat the contract's "already joined" assert
+        // as a no-op resume. No saved record for this address (or one
+        // with role=P1) means we're a stranger to this match.
+        val saved = store.load(address)
+        val isResume = saved?.role == Player.P2
         Log.i(TAG, "Join requested for address: $address  isResume=$isResume")
         screen.value = KicksScreen.Joining(prefilledAddress = address, inFlight = true)
         ensureSdkReady {
@@ -290,14 +305,9 @@ class KicksActivity : FragmentActivity() {
                     val manager = matchManager ?: return@launch
                     manager.joinAsP2(address, isResume = isResume)
                     Log.i(TAG, "Joined as P2: $address")
-                    // Persist as P2 so the user can back out and resume.
-                    // Deadline is informational only on the join side —
-                    // P1 set the on-chain deadline at deploy time.
-                    val deadline = System.currentTimeMillis() / 1000 +
-                        COMMIT_DEADLINE_DURATION_SECS
-                    sessionStore.save(
-                        MatchSession(address = address, role = Player.P2, deadline = deadline)
-                    )
+                    // MatchManager.joinAsP2 already saved the match
+                    // record to [store]. Refresh the affordance flag +
+                    // route the UI.
                     hasActiveSession.value = true
                     screen.value = KicksScreen.MatchReady(address, Player.P2)
                 } catch (e: MatchAlreadyJoinedException) {
@@ -361,6 +371,21 @@ class KicksActivity : FragmentActivity() {
                         }
                     }
                     manager.initSdk()
+                    // After initSdk lands in SdkReady, try to resume any
+                    // active match the user left behind on a prior kill.
+                    // Returns the resumed contract address (and transitions
+                    // the state machine into the right MatchState) when
+                    // there was something to resume; null on a fresh launch.
+                    val resumedAddress = manager.tryResumeActiveMatch()
+                    if (resumedAddress != null) {
+                        // Route the UI into the create-match screen so the
+                        // user lands back on their pending match instead of
+                        // the menu. CreateMatchScreen renders the
+                        // address-aware actions for whichever phase the
+                        // state machine ended up in.
+                        Log.i(TAG, "Resumed active match: $resumedAddress")
+                        screen.value = KicksScreen.Creating(resumedAddress)
+                    }
                     matchManager = manager
                 }
                 onReady()
@@ -433,7 +458,7 @@ class KicksActivity : FragmentActivity() {
      * and falling back to 0 for the missing keep.
      */
     private fun handleSdChoicesLocked(
-        deferred: kotlinx.coroutines.CompletableDeferred<Pair<Int, Int>>,
+        deferred: CompletableDeferred<Pair<Int, Int>>,
         picks: IntArray,
     ) {
         val roles = currentChoiceRoles
@@ -469,7 +494,7 @@ class KicksActivity : FragmentActivity() {
      */
     private suspend fun gatherSdPicksFromUi(round: Int): Pair<Int, Int> {
         val roles = listOf("shoot", "keep")
-        val deferred = kotlinx.coroutines.CompletableDeferred<Pair<Int, Int>>()
+        val deferred = CompletableDeferred<Pair<Int, Int>>()
         pendingSdPicks = deferred
         currentChoiceRoles = roles
         runOnUiThread {
@@ -607,11 +632,12 @@ class KicksActivity : FragmentActivity() {
                 lastChoices.value =
                     "$youLabel: ${labels.joinToString(" ")}  $themLabel: ${opponentLabels.joinToString(" ")}"
 
-                // Match is resolved on chain — clear the persisted session
-                // so the menu's RESUME MATCH doesn't surface a finished match.
+                // Match is resolved on chain — MatchManager already
+                // deleted this specific match from [store] when its
+                // setState fired MatchState.Resolved. Refresh the
+                // affordance flag in case it was the last one.
                 if (currentRole != null) {
-                    sessionStore.clear()
-                    hasActiveSession.value = false
+                    hasActiveSession.value = store.loadAll().isNotEmpty()
                 }
 
                 // Replay payload — for PvP-as-P2, swap rounds so the
@@ -681,7 +707,7 @@ class KicksActivity : FragmentActivity() {
         private const val UNITY_BOOT_DELAY_MS = 2_000L
 
         /**
-         * Stored alongside the persisted [MatchSession] so the resume UI
+         * Stored alongside the persisted [MatchStore.Match] so the resume UI
          * can tell the user how much time is left on chain. Should match
          * `MatchManager.COMMIT_DEADLINE_DURATION_SECS`; duplicated here
          * because that value is `private` to MatchManager and exposing

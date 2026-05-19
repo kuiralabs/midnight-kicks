@@ -88,6 +88,10 @@ android {
             // Returning default values lets pure-logic tests run without
             // Robolectric or static mocking.
             isReturnDefaultValues = true
+            // Real Android system resources for Robolectric tests — MatchStore
+            // uses EncryptedSharedPreferences which reads from res/values
+            // during master-key construction.
+            isIncludeAndroidResources = true
         }
     }
 }
@@ -132,6 +136,13 @@ dependencies {
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
+    // AndroidX Security — EncryptedSharedPreferences for MatchVault
+    // (persists active-match witnesses across process kills). Backs onto
+    // a Keystore-bound master key; no biometric per access because the
+    // protected data is game-cheat sensitive, not fund-theft sensitive
+    // (witness leak only reveals one match's picks, never a wallet seed).
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
     // Hilt DI — required because `dapp-ui`'s sigil/wallet panels are
     // `@HiltViewModel` and resolved through `hiltViewModel()`. Without
     // the Hilt plugin + compiler the consumer graph isn't generated
@@ -147,4 +158,9 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testImplementation("org.json:json:20240303") // shadow Android's org.json on JVM
+    // Robolectric for MatchStore tests — needs a real Context for
+    // EncryptedSharedPreferences (Keystore master key + SharedPrefs
+    // backing). Pinned to the same version core:auth uses.
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.test:core:1.6.1")
 }

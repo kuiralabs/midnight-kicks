@@ -32,10 +32,14 @@
             </intent-filter>
         </activity>
 
-        <!-- Override Unity's launcher intent — we launch it programmatically, not from home screen -->
+        <!-- Override Unity's launcher intent — we launch it programmatically, not from home screen.
+             tools:replace forces our android:exported to win over the unityLibrary AAR's value
+             (its manifest sets exported=true so it can appear in launcher; we override). -->
         <activity
             android:name="com.unity3d.player.UnityPlayerGameActivity"
-            tools:node="merge">
+            android:exported="false"
+            tools:node="merge"
+            tools:replace="android:exported">
             <intent-filter tools:node="removeAll" />
         </activity>
     </application>

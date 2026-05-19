@@ -133,7 +133,7 @@ fun CreateMatchScreen(
                 // back to tap CHECK STATUS to see if it's their turn yet.
                 // No background coroutine pinned to this Activity's
                 // lifecycle — the session is persisted via
-                // [KicksSessionStore] so the user can fully leave the app.
+                // [MatchStore] so the user can fully leave the app.
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()

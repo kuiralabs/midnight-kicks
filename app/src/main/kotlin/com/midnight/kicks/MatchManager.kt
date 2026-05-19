@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.midnight.kuira.core.compact.MidnightContract
 import com.midnight.kuira.core.compact.WitnessResult
+import com.midnight.kuira.core.compact.proving.ProvingKeyManager
 import com.midnight.kuira.core.network.MidnightNetwork
 import com.midnight.kuira.sdk.MidnightSdk
 import kotlinx.coroutines.CoroutineScope
@@ -55,6 +56,15 @@ class MatchManager(
     private val context: Context,
     private val network: MidnightNetwork,
     seed: ByteArray,
+    /**
+     * Multi-match encrypted store. Survives `kill -9` between commit
+     * and reveal so the user's stake doesn't get stranded behind a
+     * commitment we no longer have the witnesses for. Replaces the
+     * earlier `KicksSessionStore` + `MatchVault` split — one type, one
+     * lifecycle, one source of truth. See [MatchStore] KDoc for the
+     * threat model + lifetime contract.
+     */
+    private val store: MatchStore = MatchStore(context),
 ) {
     // Take the seed by value into a local-only field so we can wipe it from
     // both the caller's reference and our own at close() time.
@@ -93,12 +103,28 @@ class MatchManager(
      */
     private val random = SecureRandom()
 
-    // P1 (local human) identity
-    private val p1SecretKey = ByteArray(SECRET_KEY_BYTES).also { random.nextBytes(it) }
+    /**
+     * Address of the match the state machine is currently driving.
+     * Set when `deployMatch` / `joinAsP2` lands; cleared on
+     * [resetForNewAction]. Determines which `MatchStore` entry the
+     * commit / reveal save targets — without this, multi-match
+     * couldn't tell which record to update on each circuit call.
+     */
+    private var currentAddress: String? = null
 
-    // P2 identity. Today this is an on-device AI; tomorrow it's the friend
-    // on the other phone (their key, not stored here at all).
-    private val p2SecretKey = ByteArray(SECRET_KEY_BYTES).also { random.nextBytes(it) }
+    // P1 (local human) identity. Fresh per session; populated from
+    // [store] when [tryResumeActiveMatch] picks up an existing match.
+    // The same key must hash into the deployed commitment for reveal
+    // to succeed, so resume MUST rehydrate it before any reveal call.
+    private var p1SecretKey: ByteArray = ByteArray(SECRET_KEY_BYTES).also { random.nextBytes(it) }
+
+    // P2 identity. `var` so [rehydrateLocalIdentity] can replace it on
+    // a P2-side resume — the joining device must commit / reveal with
+    // the exact same key it joined with (hashed into the on-chain
+    // commitment), not a freshly random one. Today still used as the
+    // AI's key in PvAI fallback; PvP joiners overwrite it via the
+    // store on every fresh joinAsP2.
+    private var p2SecretKey = ByteArray(SECRET_KEY_BYTES).also { random.nextBytes(it) }
 
     // V3 regulation picks + nonces — captured at commit, reused at reveal.
     // Each player commits shoots[5] + keeps[5] together; one nonce binds
@@ -149,30 +175,238 @@ class MatchManager(
         setState(MatchState.SdkReady)
     }
 
+    /**
+     * If the [vault] holds an active match, rehydrate the in-memory
+     * witnesses and route the state machine to whatever phase the
+     * on-chain contract is currently in. Called by [KicksActivity]
+     * right after [initSdk] so a relaunch lands the user back on the
+     * correct screen instead of the create-or-join menu.
+     *
+     * Returns the resumed address, or null if the vault was empty
+     * (= fresh-launch path, no resume needed).
+     *
+     * **Scope (initial implementation):** create-side resume for the
+     * four common regulation kill points (Deployed / P1Committed /
+     * BothCommitted / P1Revealed). Join-side resume + SD-round resume
+     * follow in a later pass — for those, killing mid-flight still
+     * forces a re-deploy.
+     *
+     * **COMPLETE short-circuit:** if the chain reports the match is
+     * already over (phase == [PHASE_COMPLETE]), the store entry is
+     * deleted and we return null. Stale resume state from a previous
+     * match doesn't follow the user across launches.
+     */
+    suspend fun tryResumeActiveMatch(): String? = withContext(Dispatchers.IO) {
+        // Pick the first match in the store as the "active" one. With
+        // multi-match storage this is a heuristic — the Resume UI (Commit
+        // 3) lets the user pick explicitly. For now first-found is fine
+        // because Kicks only writes one match at a time in this commit.
+        val match = store.loadAll().firstOrNull() ?: return@withContext null
+        require(state.value is MatchState.SdkReady) {
+            "tryResumeActiveMatch must be called from SdkReady — got ${state.value}"
+        }
+        Log.i(TAG, "Resuming from store — address=${match.address.take(16)}…")
+
+        // Rehydrate the in-memory state machine from the persisted match.
+        // Same key must hash into the deployed commitment for any reveal
+        // to succeed — write into the right field based on the saved
+        // role so a P2 resume doesn't load its key into the P1 slot
+        // (which would silently fail every later reveal: the contract
+        // would see a different key than the one in the commitment).
+        currentAddress = match.address
+        rehydrateLocalIdentity(match)
+
+        val chainSnap = StatePoller(requireSdk.config, match.address).readOnce()
+        if (chainSnap == null) {
+            Log.w(TAG, "Resume: indexer returned no snapshot — assuming Deployed and letting user retry")
+            setState(MatchState.Deployed(match.address))
+            return@withContext match.address
+        }
+        if (chainSnap.phase == PHASE_COMPLETE) {
+            Log.i(TAG, "Resume: match already COMPLETE on chain — deleting store entry, no resume")
+            store.delete(match.address)
+            currentAddress = null
+            return@withContext null
+        }
+
+        // Map the on-chain phase + flags to a MatchState. Bias toward
+        // the state where the local player still has work to do — if
+        // we're not sure, prefer the earlier state so the UI lets the
+        // user re-submit rather than wait on something already done.
+        val target = when (chainSnap.phase) {
+            PHASE_WAITING -> MatchState.Deployed(match.address)
+            PHASE_COMMITTING -> if (chainSnap.p1Committed) {
+                MatchState.P1Committed(match.address)
+            } else {
+                MatchState.Joined(match.address)
+            }
+            PHASE_REVEALING -> if (chainSnap.p1Revealed) {
+                MatchState.P1Revealed(match.address)
+            } else {
+                MatchState.BothCommitted(match.address)
+            }
+            else -> {
+                // SD phases not yet wired for resume. Bail out gracefully so
+                // the user can manually re-engage via the menu, rather than
+                // trapping the state machine in a half-restored SD round.
+                Log.w(TAG, "Resume: phase=${chainSnap.phase} not yet supported — staying on SdkReady")
+                return@withContext null
+            }
+        }
+        setState(target)
+        match.address
+    }
+
+    /**
+     * Save whatever's in-flight to [store] and reset the in-memory
+     * state machine to [MatchState.SdkReady] so the user can start a
+     * fresh top-level action (CREATE another match, JOIN a different
+     * match). Called from [deployMatch] and [joinAsP2] before their
+     * precondition check.
+     *
+     * The previous match's record stays in [store] — the user can
+     * resume it later via the Resume UI. Only the in-memory state
+     * machine resets.
+     *
+     * No-op if already on [MatchState.SdkReady] / [MatchState.Idle].
+     */
+    private fun resetForNewAction() {
+        val current = state.value
+        // Already at a clean entry point — nothing to do.
+        if (current is MatchState.SdkReady || current is MatchState.Idle) return
+
+        // Drop the in-memory match witnesses + secret key; future
+        // deploy/join generates fresh material. The store still holds
+        // the prior match for resume.
+        Log.i(TAG, "Resetting in-memory state from ${current::class.simpleName} → SdkReady (prior match preserved in store)")
+        p1SecretKey = ByteArray(SECRET_KEY_BYTES).also { random.nextBytes(it) }
+        p1Shoots = null
+        p1Keeps = null
+        p1RegulationNonce = null
+        p1SdShoot = 0
+        p1SdKeep = 0
+        p1SdNonce = null
+        currentAddress = null
+        setState(MatchState.SdkReady)
+    }
+
     // ── Transition steps (one per circuit / logical action) ─────────────
 
+    /**
+     * Clear a [MatchState.Failed] back to [MatchState.SdkReady] so the
+     * user can start a fresh top-level action (deploy a different match,
+     * join a different match) after a prior failure. No-op if state is
+     * not Failed.
+     *
+     * Symmetry with the UI: [MatchState.Failed] is informational
+     * (rendered as a toast / error banner), not blocking. Once the user
+     * acknowledges it by initiating a fresh action, the state machine
+     * should let them proceed. Auto-fired by [deployMatch] and
+     * [joinAsP2]; reveal/commit steps still require the user to land
+     * on the right state, which is why this isn't called from inside
+     * `transitionFrom`.
+     */
+    /**
+     * Restore the in-memory player identity + witnesses from a
+     * persisted [match]. Role-aware: a P1-side resume writes into the
+     * `p1*` fields; a P2-side resume writes into the `p2*` fields.
+     * Without this branch a cross-role resume would put the wrong key
+     * in the wrong slot and every subsequent reveal would fail at the
+     * proof step (the contract sees a key that doesn't match its
+     * stored commitment).
+     */
+    private fun rehydrateLocalIdentity(match: MatchStore.Match) {
+        when (match.role) {
+            Player.P1 -> {
+                p1SecretKey = match.secretKey.copyOf()
+                match.regulation?.let { reg ->
+                    p1Shoots = reg.shoots.copyOf()
+                    p1Keeps = reg.keeps.copyOf()
+                    p1RegulationNonce = reg.nonce.copyOf()
+                }
+                match.sd?.let { sd ->
+                    p1SdShoot = sd.shoot
+                    p1SdKeep = sd.keep
+                    p1SdNonce = sd.nonce.copyOf()
+                }
+            }
+            Player.P2 -> {
+                // p2SecretKey was originally `val` (PvAI assumption that
+                // both keys live on one device for life of the session).
+                // For PvP resume we need to overwrite the joining
+                // device's key with the one that's already on chain.
+                // See [p2SecretKey] declaration for the broader naming
+                // cleanup that belongs in a later refactor.
+                p2SecretKey = match.secretKey.copyOf()
+                match.regulation?.let { reg ->
+                    p2Shoots = reg.shoots.copyOf()
+                    p2Keeps = reg.keeps.copyOf()
+                    p2RegulationNonce = reg.nonce.copyOf()
+                }
+                match.sd?.let { sd ->
+                    p2SdShoot = sd.shoot
+                    p2SdKeep = sd.keep
+                    p2SdNonce = sd.nonce.copyOf()
+                }
+            }
+        }
+    }
+
+    /**
+     * Helper for the persist-on-circuit-success path: load the current
+     * active match from [store], transform via [block], save the result
+     * back. Throws if there's no current match — every caller is in
+     * `transitionFrom` where the state is post-deploy/post-join, so
+     * `currentAddress` is guaranteed non-null. If that ever changes,
+     * the IllegalStateException surfaces the lifecycle drift loudly.
+     */
+    private fun updateCurrentMatch(block: (MatchStore.Match) -> MatchStore.Match) {
+        val addr = checkNotNull(currentAddress) {
+            "updateCurrentMatch called without a currentAddress — caller invoked outside a match flow"
+        }
+        val existing = checkNotNull(store.load(addr)) {
+            "MatchStore has no record for currentAddress=$addr — was the deploy/join save skipped?"
+        }
+        store.save(block(existing))
+    }
+
     /** P1 deploys a fresh contract. Transitions [SdkReady] → [Deployed]. */
-    suspend fun deployMatch(): String = transitionFrom<MatchState.SdkReady, String>(
-        inProgress = { MatchState.Deploying },
-        onSuccess = { _, address -> MatchState.Deployed(address) },
-    ) {
-        val verifierKeys = loadVerifierKeys()
-        val contract = createContractHandle(p1SecretKey, address = null, verifierKeys = verifierKeys)
-        val deploy = contract.deploy { stage -> Log.d(TAG, "deploy: ${stage.javaClass.simpleName}") }
-        Log.i(TAG, "Match at: ${deploy.contractAddress}")
+    suspend fun deployMatch(): String {
+        resetForNewAction()
+        return transitionFrom<MatchState.SdkReady, String>(
+            inProgress = { MatchState.Deploying },
+            onSuccess = { _, address -> MatchState.Deployed(address) },
+        ) {
+            val verifierKeys = loadVerifierKeys()
+            val contract = createContractHandle(p1SecretKey, address = null, verifierKeys = verifierKeys)
+            val deploy = contract.deploy { stage -> Log.d(TAG, "deploy: ${stage.javaClass.simpleName}") }
+            Log.i(TAG, "Match at: ${deploy.contractAddress}")
+            // Persist before the indexer-settle delay below so a SIGKILL in
+            // that window doesn't strand the user without the local secret
+            // key that hashes into the on-chain participant set.
+            currentAddress = deploy.contractAddress
+            store.save(
+                MatchStore.Match(
+                    address = deploy.contractAddress,
+                    role = Player.P1,
+                    deadline = System.currentTimeMillis() / 1000 + COMMIT_DEADLINE_DURATION_SECS,
+                    secretKey = p1SecretKey.copyOf(),
+                ),
+            )
 
-        // Indexer needs a beat to ingest the deploy block, and the deploy
-        // consumed a dust UTXO so we need to refresh the wallet's view.
-        delay(INDEXER_SETTLE_MS)
-        requireSdk.wallet.refresh()
+            // Indexer needs a beat to ingest the deploy block, and the deploy
+            // consumed a dust UTXO so we need to refresh the wallet's view.
+            delay(INDEXER_SETTLE_MS)
+            requireSdk.wallet.refresh()
 
-        // StatePoller is NOT started here. It's only relevant for PvP, and
-        // even then only during explicit wait windows (see waitForP2*).
-        // PvAI has no real wait windows — both players' transactions are
-        // submitted from this device, and `nodeRpcClient.submitAndWaitForFinalization`
-        // already guarantees finality before each transition returns.
+            // StatePoller is NOT started here. It's only relevant for PvP, and
+            // even then only during explicit wait windows (see waitForP2*).
+            // PvAI has no real wait windows — both players' transactions are
+            // submitted from this device, and `nodeRpcClient.submitAndWaitForFinalization`
+            // already guarantees finality before each transition returns.
 
-        deploy.contractAddress
+            deploy.contractAddress
+        }
     }
 
     /** P2 (AI today) joins the match. Transitions [Deployed] → [Joined]. */
@@ -205,7 +439,7 @@ class MatchManager(
      * gets a [MatchAlreadyJoinedException]. Pass `isResume = true` to
      * treat that as a no-op and advance the state machine to [Joined]
      * anyway — but only the legitimate rejoiner should set this flag,
-     * and the caller (KicksActivity) gates it on `KicksSessionStore`
+     * and the caller (KicksActivity) gates it on `MatchStore` records
      * having a P2 session for the same address.
      *
      * **Why the gating matters — wrong-actor protection:** an
@@ -226,30 +460,86 @@ class MatchManager(
     suspend fun joinAsP2(
         address: String,
         isResume: Boolean = false,
-    ) = transitionFrom<MatchState.SdkReady, Unit>(
-        inProgress = { MatchState.JoiningAsP2(address) },
-        onSuccess = { _, _ -> MatchState.Joined(address) },
     ) {
-        val deadline = BigInteger.valueOf(
-            System.currentTimeMillis() / 1000 + COMMIT_DEADLINE_DURATION_SECS
-        )
-        try {
-            retryUntilIndexerReady(JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS) {
-                callCircuit(p2SecretKey, address, "joinMatch", arrayOf(deadline))
-            }
-        } catch (e: Exception) {
-            if (e.message?.contains("not in WAITING phase") == true) {
-                if (isResume) {
-                    Log.i(
-                        TAG,
-                        "joinAsP2: contract already past WAITING and caller marked " +
-                            "this as a resume — advancing to Joined without resubmitting",
-                    )
-                } else {
-                    throw MatchAlreadyJoinedException(address)
+        // Resume case: we're rejoining a match we already saved. Skip
+        // the reset so the existing store record + in-memory witnesses
+        // survive. Otherwise this is a fresh join action and we drop
+        // any prior in-flight match's in-memory state (preserved in
+        // store for the Resume UI).
+        if (!isResume) resetForNewAction()
+        transitionFrom<MatchState.SdkReady, Unit>(
+            inProgress = { MatchState.JoiningAsP2(address) },
+            onSuccess = { _, _ -> MatchState.Joined(address) },
+        ) {
+            val deadlineSecs = System.currentTimeMillis() / 1000 + COMMIT_DEADLINE_DURATION_SECS
+            val deadline = BigInteger.valueOf(deadlineSecs)
+            try {
+                retryUntilIndexerReady(JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS) {
+                    callCircuit(p2SecretKey, address, "joinMatch", arrayOf(deadline))
                 }
-            } else {
-                throw e
+                // Persist after the chain accepts our join — without
+                // this, a kill before the next save loses the session
+                // and a relaunch can't tell we're the rightful P2.
+                currentAddress = address
+                store.save(
+                    MatchStore.Match(
+                        address = address,
+                        role = Player.P2,
+                        deadline = deadlineSecs,
+                        secretKey = p2SecretKey.copyOf(),
+                    ),
+                )
+            } catch (e: Exception) {
+                // V3 contract emits two phrasings depending on which assert
+                // tripped: "not in WAITING phase" or "already past the
+                // WAITING phase — a P2 has already joined." Match on the
+                // shared substring so a future revision doesn't silently
+                // re-break this branch. Anchored to "WAITING phase" since
+                // no other Kicks circuit references that phrase.
+                val isJoinClosedAssert = e.message?.contains("WAITING phase") == true
+                if (isJoinClosedAssert) {
+                    if (isResume) {
+                        // Legitimate rejoiner — MatchStore confirmed
+                        // this device holds the P2 session for this
+                        // address. The contract correctly refuses the
+                        // resubmit, but we treat that as a no-op and
+                        // advance to Joined so the user lands back on
+                        // MatchReady → choice phase.
+                        //
+                        // Rehydrate the persisted record so subsequent
+                        // commit/reveal calls hash the original P2 key
+                        // (not a freshly random one) and find their
+                        // witnesses in [updateCurrentMatch].
+                        val persisted = store.load(address)
+                        if (persisted != null) {
+                            currentAddress = address
+                            rehydrateLocalIdentity(persisted)
+                        } else {
+                            // Caller said isResume but the store no
+                            // longer has this address (e.g. user wiped
+                            // app data between sessions). Surface as
+                            // MatchAlreadyJoined — without the key we
+                            // can't actually resume.
+                            Log.w(
+                                TAG,
+                                "joinAsP2: isResume=true but store has no record for $address — treating as wrong-actor",
+                            )
+                            throw MatchAlreadyJoinedException(address)
+                        }
+                        Log.i(
+                            TAG,
+                            "joinAsP2: contract already past WAITING and caller marked " +
+                                "this as a resume — advancing to Joined without resubmitting",
+                        )
+                    } else {
+                        // Stranger with the deep link — surface a typed
+                        // exception so the UI can render "another player
+                        // already joined" instead of a generic stack.
+                        throw MatchAlreadyJoinedException(address)
+                    }
+                } else {
+                    throw e
+                }
             }
         }
     }
@@ -296,6 +586,16 @@ class MatchManager(
             p1Shoots = shoots.copyOf()
             p1Keeps  = keeps.copyOf()
             p1RegulationNonce = nonce
+            // Persist BEFORE reveal — without these the reveal circuit
+            // can never reopen the on-chain commitment and the stake
+            // sits until the timeout-claim path fires.
+            updateCurrentMatch { it.copy(
+                regulation = MatchStore.RegulationWitnesses(
+                    shoots = shoots.copyOf(),
+                    keeps = keeps.copyOf(),
+                    nonce = nonce.copyOf(),
+                ),
+            ) }
         }
     }
 
@@ -386,6 +686,16 @@ class MatchManager(
             p1SdShoot = shoot
             p1SdKeep  = keep
             p1SdNonce = nonce
+            // Persist this round's SD witnesses so a kill before reveal
+            // doesn't lock the pot behind a sealed commitment.
+            updateCurrentMatch { it.copy(
+                sd = MatchStore.SdWitnesses(
+                    round = prev.round,
+                    shoot = shoot,
+                    keep = keep,
+                    nonce = nonce.copyOf(),
+                ),
+            ) }
         }
 
     /** P2 commits this SD round's {shoot, keep}. P1SdCommitted → BothSdCommitted. */
@@ -871,6 +1181,13 @@ class MatchManager(
     /**
      * Centralised state setter — logs the transition (essential for
      * debugging "is the state machine even running?") and updates the flow.
+     *
+     * Also deletes the resolved match from [store] on terminal-success
+     * transitions so it stops showing up in the Resume UI. The store
+     * still carries any *other* in-flight matches the user may have.
+     * [MatchState.Failed] deliberately does NOT delete — witnesses
+     * stay valid and the user may want to retry whatever step blew up
+     * (network blip on a reveal, etc.).
      */
     private fun setState(newState: MatchState) {
         val prev = _state.value
@@ -878,6 +1195,10 @@ class MatchManager(
         // Log both the class (for grep / cheap pattern matching) and the
         // human label (so the log doubles as a script of what the user sees).
         Log.i(TAG, "state: ${prev::class.simpleName} → ${newState::class.simpleName}  «${newState.label}»")
+        if (newState is MatchState.Resolved) {
+            currentAddress?.let { store.delete(it) }
+            currentAddress = null
+        }
     }
 
     private fun startStatePoller(address: String) {
@@ -1022,16 +1343,25 @@ class MatchManager(
         }
     }
 
-    private fun installProvingKeys() {
-        // BLS params + wallet keys (zswap/dust) → canonical dev installer on
-        // ProvingKeyManager. Same method the SDK e2e test and BBoard canary call.
-        com.midnight.kuira.core.compact.proving.ProvingKeyManager(context).installFromLocalTmp()
+    private suspend fun installProvingKeys() {
+        // BLS params + zswap/dust wallet keys — try local-tmp first
+        // (dev shortcut from `adb push`), fall back to S3 download
+        // on a fresh emulator / new device. The SDK owns the recipe;
+        // we just invoke it.
+        ProvingKeyManager(context).ensureWalletKeysAvailable(
+            logger = { Log.i(TAG, it) },
+        )
+        installContractCircuitKeys()
+    }
 
-        // Kicks-specific: V3 contract circuit keys (joinMatch,
-        // commitRegulation, revealRegulation, commitSuddenDeath,
-        // revealSuddenDeath, claimTimeout, cancelMatch) ship inside
-        // the APK at assets/keys/ — copied into keysDir for the Rust
-        // prover to find.
+    /**
+     * Copies the V3 contract's circuit keys (joinMatch, commitRegulation,
+     * revealRegulation, commitSuddenDeath, revealSuddenDeath, claimTimeout,
+     * cancelMatch) from the APK's `assets/keys/` into `filesDir/proving_keys/`
+     * where the Rust prover expects them. APK-bundled means no per-device
+     * setup — these never need to be downloaded.
+     */
+    private fun installContractCircuitKeys() {
         val keysDir = File(context.filesDir, "proving_keys")
         val assetKeys = context.assets.list("keys") ?: emptyArray()
         assetKeys.filter { it.endsWith(".prover") || it.endsWith(".bzkir") || it.endsWith(".verifier") }.forEach { name ->
@@ -1059,9 +1389,25 @@ class MatchManager(
         // Phase enum values mirroring penalty.compact's `enum Phase`.
         // Mapping: 0 WAITING, 1 COMMITTING, 2 REVEALING, 3 SD_COMMITTING,
         // 4 SD_REVEALING, 5 COMPLETE.
+        private const val PHASE_WAITING = 0
+        private const val PHASE_COMMITTING = 1
+        private const val PHASE_REVEALING = 2
         private const val PHASE_COMPLETE = 5
 
-        private const val COMMIT_DEADLINE_DURATION_SECS = 300L
+        // 24 hours — humans pause for meals, sleep, time-zone-offset
+        // opponents. The contract is a chain primitive, not a real-time
+        // game timer; players should be able to walk away from a join
+        // and come back the next morning to commit. 5 minutes was a
+        // localnet smoke-test value; this is the right number for any
+        // production scenario.
+        //
+        // Note (chain-anchored time): we still set the deadline from
+        // System.currentTimeMillis(), so chain ⟷ device clock skew
+        // erodes the budget. At 24 hours the budget tolerates skews
+        // up to several hours — far above what any reasonable device
+        // would drift. If we ever ship to a setting with multi-hour
+        // chain lag, switch this to an indexer-reported block time.
+        private const val COMMIT_DEADLINE_DURATION_SECS = 24L * 60L * 60L
         private const val SECRET_KEY_BYTES = 32
         private const val NONCE_BYTES = 32
 
@@ -1183,7 +1529,7 @@ data class MatchResult(
  * should refuse).
  *
  * The distinction is made at the call site (KicksActivity) via the
- * local [KicksSessionStore]: if a P2 session exists for [address],
+ * local [MatchStore]: if a P2 session exists for [address],
  * treat as resume; otherwise refuse and tell the user the match is
  * taken.
  */
