@@ -35,6 +35,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -44,7 +45,8 @@ import org.json.JSONObject
  * Hosts the Compose menu UI (match creation, joining, results) and launches
  * Unity (via UaaL) for the 3D game portions.
  *
- * Flow: Menu → launch UnityPlayerGameActivity → Unity shows choice UI →
+ * Flow: Menu → launch KicksMatchActivity (UnityPlayerGameActivity subclass
+ * with the MatchHudOverlay on top) → Unity shows choice UI →
  * player picks 5 directions → Unity sends choicesLocked → back to Kotlin.
  *
  * All coroutines run on [lifecycleScope] so they cancel automatically on
@@ -440,7 +442,12 @@ class KicksActivity : FragmentActivity() {
             statusMessage.value = "Pick your 5 directions!"
             Log.i(TAG, "Launching Unity for choice phase...")
 
-            val intent = Intent(this@KicksActivity, com.unity3d.player.UnityPlayerGameActivity::class.java)
+            // Launch our subclass [KicksMatchActivity], not Unity's
+            // default activity directly — the subclass attaches the
+            // MatchHudOverlay ComposeView on top of Unity's surface so
+            // the user sees state / tx-progress / opponent-wait during
+            // gameplay instead of a frozen 3D scene.
+            val intent = Intent(this@KicksActivity, KicksMatchActivity::class.java)
             startActivity(intent)
 
             // Wait briefly for Unity's Activity to come up before sending
@@ -532,6 +539,42 @@ class KicksActivity : FragmentActivity() {
      * orchestrator call starts clean.
      */
     private suspend fun gatherSdPicksFromUi(round: Int): Pair<Int, Int> {
+        // Round 1 = the FIRST SD round, opened immediately after a
+        // regulation tie. The user must see the regulation replay
+        // (rendered by MatchReplayOverlay above Unity) before learning
+        // SD exists. Players don't get the SD picker until the replay
+        // is dismissed.
+        //
+        // MatchManager.publishRegulationReplay has already populated
+        // MatchHud.replay by the time this is called (it fires inside
+        // waitForP2Revealed / revealP2, both of which complete before
+        // the orchestrator hits the SD loop). If for any reason the
+        // replay state is empty (e.g. orchestrator skipped the publish),
+        // the `first { it == null }` predicate is already true and we
+        // proceed immediately — no deadlock on a missing replay.
+        // Gate on replay dismissal for EVERY round, not just round 1.
+        //   - Round 1: a regulation-end replay was published in
+        //     waitForP2Revealed/revealP2 and the user hasn't dismissed.
+        //   - Rounds 2+: the previous SD round's replay was published
+        //     in waitForP2SdRevealed/revealP2Sd; the user must see
+        //     "round N — both scored / both saved → going to round N+1"
+        //     before being asked to pick again.
+        //
+        // StateFlow.first { it == null } returns IMMEDIATELY if no
+        // replay is currently showing (the user already dismissed it,
+        // or it was never published), and suspends only if a replay is
+        // mid-flight. SharedFlow had a dismissal-before-await race:
+        // if the user tapped Continue between the check and the await,
+        // the dismissal-event subscription would arrive too late and
+        // we'd deadlock waiting for a signal that already fired.
+        // StateFlow's replay-the-current-value-on-collect semantics
+        // makes the check + wait one atomic step.
+        if (MatchHud.replay.value != null) {
+            Log.i(TAG, "gatherSdPicksFromUi(round=$round): waiting for replay dismissal before SD picker")
+        }
+        MatchHud.replay.first { it == null }
+        Log.i(TAG, "gatherSdPicksFromUi(round=$round): replay clear, proceeding to SD picker")
+
         val roles = listOf("shoot", "keep")
         val deferred = CompletableDeferred<Pair<Int, Int>>()
         pendingSdPicks = deferred
@@ -618,6 +661,13 @@ class KicksActivity : FragmentActivity() {
                 // end-to-end) and log the mismatch so we know to re-export.
                 val picks  = choiceList.toIntArray()
                 val roles  = currentChoiceRoles
+                // Diagnostic — log the raw inputs to the bucketer so a tie
+                // pattern can be traced back to either (a) overlapping
+                // human picks, (b) a legacy 5-pick Unity APK, or (c) a
+                // role-mismatch between sent-to-Unity and applied-here.
+                // Always-on Log.i: these are public game inputs, no
+                // secret material.
+                Log.i(TAG, "choicesLocked-IN: role=${currentRole ?: "PvAI"} picks=${picks.toList()} roles=$roles")
                 val (shoots, keeps) = if (picks.size == roles.size && picks.size == 10) {
                     val s = mutableListOf<Int>()
                     val k = mutableListOf<Int>()
@@ -635,12 +685,22 @@ class KicksActivity : FragmentActivity() {
                     val legacy = picks.copyOf(5)
                     legacy to legacy.copyOf()
                 }
+                Log.i(TAG, "choicesLocked-OUT: shoots=${shoots.toList()} keeps=${keeps.toList()}")
 
                 val result = when (currentRole) {
                     null -> manager.playAgainstAi(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
                     Player.P1 -> manager.playAsP1(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
                     Player.P2 -> manager.playAsP2(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
                 }
+
+                // Decisive endings (regulation 5-3 or SD round N decisive)
+                // publish a replay overlay but never enter `gatherSdPicksFromUi`
+                // to wait it out. Gate the winner UI on dismissal here so
+                // the user sees the kicks before the score line lands.
+                if (MatchHud.replay.value != null) {
+                    Log.i(TAG, "handleChoicesLocked: waiting for final replay dismissal before winner UI")
+                }
+                MatchHud.replay.first { it == null }
 
                 val (p1Score, p2Score) = result.scores()
                 val winner = when {
@@ -742,7 +802,7 @@ class KicksActivity : FragmentActivity() {
     companion object {
         private const val TAG = "Kicks"
 
-        /** How long to wait for UnityPlayerGameActivity to come up before sending the first bridge message. */
+        /** How long to wait for KicksMatchActivity (Unity host) to come up before sending the first bridge message. */
         private const val UNITY_BOOT_DELAY_MS = 2_000L
 
         /**

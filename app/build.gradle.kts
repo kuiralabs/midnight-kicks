@@ -107,6 +107,23 @@ tasks.named("preBuild") { dependsOn(syncContractAssets) }
 dependencies {
     // Unity as a Library
     implementation(project(":unityLibrary"))
+    // KicksMatchActivity subclasses UnityPlayerGameActivity, which
+    // extends GameActivity → AppCompatActivity AND implements
+    // IUnityPlayer{Lifecycle,Support,Permission}* interfaces. The
+    // unityLibrary AAR declares these (games-activity, appcompat, and
+    // unity-classes.jar) as `implementation` (private), so the app
+    // module has to re-expose them here for the compiler to see the
+    // full supertype chain.
+    //
+    // - appcompat / games-activity: pinned to match
+    //   ../unityLibrary/build.gradle (don't drift; the Unity-generated
+    //   GameActivity assumes a specific games-activity ABI).
+    // - unity-classes.jar: contains the IUnityPlayer* interfaces.
+    //   Referenced through the same fileTree the unityLibrary module
+    //   reads; one source of truth, re-importable when Unity re-exports.
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("androidx.games:games-activity:4.4.0")
+    implementation(files("../unityLibrary/libs/unity-classes.jar"))
 
     // Kuira SDK — consumed as Maven artifacts published to mavenLocal by the
     // parent project (`./gradlew publishToMavenLocal`). POMs include all

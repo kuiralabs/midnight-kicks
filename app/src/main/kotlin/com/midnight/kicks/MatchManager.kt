@@ -2,6 +2,8 @@ package com.midnight.kicks
 
 import android.content.Context
 import android.util.Log
+import com.midnight.kuira.core.compact.BalanceProgress
+import com.midnight.kuira.core.compact.ContractCallStage
 import com.midnight.kuira.core.compact.MidnightContract
 import com.midnight.kuira.core.compact.WitnessKind
 import com.midnight.kuira.core.compact.WitnessResult
@@ -304,6 +306,11 @@ open class MatchManager(
         p1SdKeep = 0
         p1SdNonce = null
         currentAddress = null
+        // Clear the HUD overlay state too — stale replay / banner from a
+        // prior match must not survive into a new one. Without this,
+        // the user can briefly see the previous match's "FINAL 3-2"
+        // scoreboard flash on top of a brand-new deploy.
+        MatchHud.reset()
         setState(MatchState.SdkReady)
     }
 
@@ -627,6 +634,13 @@ open class MatchManager(
     suspend fun submitP1Picks(shoots: IntArray, keeps: IntArray) {
         require(shoots.size == PICKS_PER_ARRAY) { "Need $PICKS_PER_ARRAY shoots" }
         require(keeps.size == PICKS_PER_ARRAY)  { "Need $PICKS_PER_ARRAY keeps" }
+        // Diagnostic: every regulation commit prints the bucketed picks
+        // so a logcat grep proves what this device actually committed —
+        // without this we can only see opaque "score=3-3" results and
+        // can't tell whether a tie came from misaligned bucketing,
+        // overlapping player choices, or a witness encoding bug. Cheap
+        // to log (10 ints), critical to debugging tie patterns.
+        Log.i(TAG, "submitP1Picks: shoots=${shoots.toList()} keeps=${keeps.toList()}")
         transitionFrom<MatchState.Joined, Unit>(
             inProgress = { MatchState.P1Committing(it.address) },
             onSuccess = { prev, _ -> MatchState.P1Committed(prev.address) },
@@ -656,6 +670,8 @@ open class MatchManager(
     suspend fun submitP2Picks(shoots: IntArray, keeps: IntArray) {
         require(shoots.size == PICKS_PER_ARRAY) { "Need $PICKS_PER_ARRAY shoots" }
         require(keeps.size == PICKS_PER_ARRAY)  { "Need $PICKS_PER_ARRAY keeps" }
+        // Diagnostic — see [submitP1Picks] for rationale.
+        Log.i(TAG, "submitP2Picks: shoots=${shoots.toList()} keeps=${keeps.toList()}")
         transitionFrom<MatchState.P1Committed, Unit>(
             inProgress = { MatchState.P2Committing(it.address) },
             onSuccess = { prev, _ -> MatchState.BothCommitted(prev.address) },
@@ -710,6 +726,24 @@ open class MatchManager(
         // Did regulation decide it, or did we draw into SD?
         val snap = StatePoller(requireSdk.config, prev.address).readOnce()
         val phase = snap?.phase ?: -1
+        // Diagnostic — mirror of waitForP2Revealed's log on the P2 side
+        // (or PvAI side). Same goal: prove what the contract has stored
+        // for both players' picks after both reveals landed.
+        if (snap != null) {
+            Log.i(
+                TAG,
+                "regulation reveal landed (P2-side / PvAI): " +
+                    "p1Shoots=${snap.p1Shoots.toList()} p1Keeps=${snap.p1Keeps.toList()} " +
+                    "p2Shoots=${snap.p2Shoots.toList()} p2Keeps=${snap.p2Keeps.toList()} " +
+                    "score=${snap.p1Score}-${snap.p2Score} phase=${snap.phase}",
+            )
+            // Mirror of the P1-side replay publish — same data contract
+            // so the overlay renders identically on both devices and
+            // PvAI.
+            publishRegulationReplay(snap)
+        } else {
+            Log.w(TAG, "regulation reveal landed (P2-side / PvAI): readOnce returned null")
+        }
         if (phase == PHASE_COMPLETE) {
             buildMatchResult(prev.address).also { lastResult = it }
         } else {
@@ -732,6 +766,25 @@ open class MatchManager(
             inProgress = { MatchState.P1SdCommitting(it.address, it.round) },
             onSuccess  = { prev, _ -> MatchState.P1SdCommitted(prev.address, prev.round) },
         ) { prev ->
+            // Diagnostic — log the SD pick + a warning when shoot==keep
+            // because that is the input pattern that guarantees "both
+            // score or both miss" on every round (SD scoring is
+            // symmetric: P1goal = p1Shoot!=p2Keep, P2goal = p2Shoot!=p1Keep,
+            // so when each player picks the same direction for both
+            // their shoot and keep, the scoring becomes mutually
+            // entangled and no round can ever be decisive). Surface
+            // this as a Log.w so it's easy to grep when debugging
+            // never-ending SD loops.
+            Log.i(TAG, "submitP1SdPick round=${prev.round} shoot=$shoot keep=$keep")
+            if (shoot == keep) {
+                Log.w(
+                    TAG,
+                    "submitP1SdPick: shoot==keep (=$shoot). If P2 also has " +
+                        "shoot==keep this round, scoring collapses to a " +
+                        "symmetric equation and SD will never resolve. " +
+                        "Pick different shoot/keep directions to break ties.",
+                )
+            }
             delay(INTER_TX_SETTLE_MS)
             requireSdk.wallet.refresh()
             val nonce = ByteArray(NONCE_BYTES).also { random.nextBytes(it) }
@@ -757,6 +810,23 @@ open class MatchManager(
             inProgress = { MatchState.P2SdCommitting(it.address, it.round) },
             onSuccess  = { prev, _ -> MatchState.BothSdCommitted(prev.address, prev.round) },
         ) { prev ->
+            // Diagnostic — mirror of submitP1SdPick. The shoot==keep
+            // warning matters here too: if BOTH players pick the same
+            // direction for shoot AND keep, the contract's symmetric
+            // SD scoring (p1Goal=p1Shoot!=p2Keep, p2Goal=p2Shoot!=p1Keep)
+            // collapses to a single boolean that's always true-for-both
+            // or false-for-both → continue forever. Same trap whether
+            // it bites on the P1 or P2 device.
+            Log.i(TAG, "submitP2SdPick round=${prev.round} shoot=$shoot keep=$keep")
+            if (shoot == keep) {
+                Log.w(
+                    TAG,
+                    "submitP2SdPick: shoot==keep (=$shoot). If P1 also has " +
+                        "shoot==keep this round, scoring collapses to a " +
+                        "symmetric equation and SD will never resolve. " +
+                        "Pick different shoot/keep directions to break ties.",
+                )
+            }
             delay(INTER_TX_SETTLE_MS)
             requireSdk.wallet.refresh()
             val nonce = ByteArray(NONCE_BYTES).also { random.nextBytes(it) }
@@ -799,13 +869,19 @@ open class MatchManager(
             revealSuddenDeath(p2SecretKey, prev.address, p2SdShoot, p2SdKeep, nonce)
 
             // Record this pairing for the replay UI.
-            sdRoundsForReplay += SdRoundData(
+            val sdData = SdRoundData(
                 round = prev.round,
                 p1Shoot = p1SdShoot, p1Keep = p1SdKeep,
                 p2Shoot = p2SdShoot, p2Keep = p2SdKeep,
             )
+            sdRoundsForReplay += sdData
 
             val snap = StatePoller(requireSdk.config, prev.address).readOnce()
+            // Publish the per-round replay BEFORE returning, mirroring
+            // the regulation pattern. The activity's `gatherSdPicksFromUi`
+            // (or its terminal "show winner" path on decisive SD)
+            // awaits dismissal before proceeding.
+            if (snap != null) publishSdRoundReplay(sdData, snap)
             if (snap?.phase == PHASE_COMPLETE) {
                 buildMatchResult(prev.address).also { lastResult = it }
             } else {
@@ -1020,11 +1096,15 @@ open class MatchManager(
         // covered by contract test "stalemate revealSuddenDeath: …".
         p2SdShoot = snap.p2SdShoot
         p2SdKeep  = snap.p2SdKeep
-        sdRoundsForReplay += SdRoundData(
+        val sdData = SdRoundData(
             round = prev.round,
             p1Shoot = p1SdShoot, p1Keep = p1SdKeep,
             p2Shoot = p2SdShoot, p2Keep = p2SdKeep,
         )
+        sdRoundsForReplay += sdData
+        // Publish per-SD-round replay so the user sees the pairing
+        // resolve before either the next SD picker or the winner UI.
+        publishSdRoundReplay(sdData, snap)
 
         if (snap.phase == PHASE_COMPLETE) {
             buildMatchResult(prev.address).also { lastResult = it }
@@ -1051,6 +1131,25 @@ open class MatchManager(
         // invariants)".
         p2Shoots = snap.p2Shoots.copyOf()
         p2Keeps  = snap.p2Keeps.copyOf()
+        // Diagnostic — log the FULL chain-stored regulation outcome so
+        // we can prove the contract has the picks we sent and rule out
+        // a "always tie" bucketing bug. Pairs with the
+        // submit{P1,P2}Picks logging that printed the values we
+        // committed.
+        Log.i(
+            TAG,
+            "regulation reveal landed (P1-side): " +
+                "p1Shoots=${snap.p1Shoots.toList()} p1Keeps=${snap.p1Keeps.toList()} " +
+                "p2Shoots=${snap.p2Shoots.toList()} p2Keeps=${snap.p2Keeps.toList()} " +
+                "score=${snap.p1Score}-${snap.p2Score}",
+        )
+        // Publish the regulation replay BEFORE returning, so the HUD
+        // overlay can render its row-by-row scoreboard above Unity
+        // before the orchestrator advances into either SD or Resolved.
+        // Both code paths (decisive → Resolved, drew → SdRoundOpen) get
+        // the replay; the activity decides what beat comes AFTER the
+        // user dismisses it (winner announce vs SD round 1).
+        publishRegulationReplay(snap)
         if (snap.phase == PHASE_COMPLETE) {
             buildMatchResult(prev.address).also { lastResult = it }
         } else {
@@ -1301,6 +1400,10 @@ open class MatchManager(
         // Log both the class (for grep / cheap pattern matching) and the
         // human label (so the log doubles as a script of what the user sees).
         Log.i(TAG, "state: ${prev::class.simpleName} → ${newState::class.simpleName}  «${newState.label}»")
+        // Mirror to the HUD overlay. The Compose layer over Unity
+        // subscribes to MatchHud.state to keep the in-game status
+        // banner alive during long blockchain waits.
+        MatchHud.publishPrimary(label = newState.label, mode = hudModeFor(newState))
         if (newState is MatchState.Resolved) {
             currentAddress?.let { store.delete(it) }
             currentAddress = null
@@ -1334,6 +1437,102 @@ open class MatchManager(
     }
 
     /**
+     * Publish the regulation replay payload to [MatchHud] so the
+     * Compose overlay (rendered above Unity by [KicksMatchActivity])
+     * can show the row-by-row scoreboard before the orchestrator
+     * advances into SD or Resolved.
+     *
+     * Why we read the four arrays straight from [snap] instead of the
+     * locally-cached `p1Shoots`/`p2Shoots`/etc. members: the snapshot
+     * is the chain's authoritative version, and it's present on BOTH
+     * devices' post-reveal observation (the chain has all four arrays
+     * stored by the time `secondRegulationRevealLanded` fires). Using
+     * the snapshot keeps both sides showing the same data without
+     * special-casing which member field is populated on which device.
+     *
+     * The replay also flows through Unity (eventually) via
+     * `UnityBridge.sendReplay(...)` — the data shape produced here is
+     * the same one the cinematic will consume. See `GAME_DESIGN.md`
+     * §4 "After regulation reveal".
+     */
+    private fun publishRegulationReplay(snap: ContractStateSnapshot) {
+        val replayResult = MatchResult(
+            p1Shoots = snap.p1Shoots.copyOf(),
+            p1Keeps  = snap.p1Keeps.copyOf(),
+            p2Shoots = snap.p2Shoots.copyOf(),
+            p2Keeps  = snap.p2Keeps.copyOf(),
+            sdRounds = emptyList(),
+            contractAddress = state.value.address ?: "",
+        )
+        val regulationRounds = replayResult.toRoundResults().take(REGULATION_ROUNDS)
+        Log.i(TAG, "publishRegulationReplay: ${regulationRounds.size} rounds, score=${snap.p1Score}-${snap.p2Score}")
+        MatchHud.publishReplay(
+            MatchHud.ReplayShow(
+                rounds = regulationRounds,
+                p1Score = snap.p1Score,
+                p2Score = snap.p2Score,
+                kind = MatchHud.ReplayKind.REGULATION,
+            ),
+        )
+    }
+
+    /**
+     * Publish the SD-round replay — two entries (P1 shoot vs P2 keep,
+     * P2 shoot vs P1 keep) — to [MatchHud] so the overlay can show
+     * what happened in this SD round before the user is asked to pick
+     * again (or before the winner UI lands on a decisive resolution).
+     *
+     * Without this, every SD round looks identical from the player's
+     * point of view: "submit picks → submit picks → submit picks…"
+     * with no signal of what just happened. The replay closes that
+     * gap — even when the kicks are simple, seeing them resolve gives
+     * the user agency over their next pick.
+     *
+     * Score in the replay is the CURRENT chain score (post-this-round),
+     * so the climbing scoreboard reflects reality. The scoring rule
+     * (P1 goal = p1Shoot != p2Keep, P2 goal = p2Shoot != p1Keep) is
+     * the same as `SdRoundData.p1Goal`/`p2Goal` — single source of
+     * truth.
+     */
+    private fun publishSdRoundReplay(
+        sdData: SdRoundData,
+        snap: ContractStateSnapshot,
+    ) {
+        val rounds = listOf(
+            RoundResult(
+                round = sdData.round,
+                shooter = "P1",
+                shootDir = sdData.p1Shoot,
+                keepDir  = sdData.p2Keep,
+                result = if (sdData.p1Goal) "goal" else "save",
+            ),
+            RoundResult(
+                round = sdData.round,
+                shooter = "P2",
+                shootDir = sdData.p2Shoot,
+                keepDir  = sdData.p1Keep,
+                result = if (sdData.p2Goal) "goal" else "save",
+            ),
+        )
+        Log.i(
+            TAG,
+            "publishSdRoundReplay: round=${sdData.round} " +
+                "p1=${sdData.p1Shoot}vs${sdData.p2Keep} (${if (sdData.p1Goal) "GOAL" else "SAVE"}) " +
+                "p2=${sdData.p2Shoot}vs${sdData.p1Keep} (${if (sdData.p2Goal) "GOAL" else "SAVE"}) " +
+                "score=${snap.p1Score}-${snap.p2Score}",
+        )
+        MatchHud.publishReplay(
+            MatchHud.ReplayShow(
+                rounds = rounds,
+                p1Score = snap.p1Score,
+                p2Score = snap.p2Score,
+                kind = MatchHud.ReplayKind.SUDDEN_DEATH_ROUND,
+                sdRoundNumber = sdData.round,
+            ),
+        )
+    }
+
+    /**
      * Test seam — position the state machine at an arbitrary state so a
      * predicate-focused test can call `waitFor…` directly without
      * running the full deploy/commit/reveal pipeline. Production must
@@ -1352,7 +1551,7 @@ open class MatchManager(
         args: Array<Any?> = emptyArray(),
     ) {
         val contract = createContractHandle(secretKey, address)
-        contract.call(circuitName, *args) { stage -> Log.d(TAG, "$circuitName: ${stage.javaClass.simpleName}") }
+        contract.call(circuitName, *args, onProgress = stageReporter(circuitName))
     }
 
     private suspend fun commitRegulation(
@@ -1365,7 +1564,7 @@ open class MatchManager(
         val contract = createContractHandle(
             secretKey, address, shoots = shoots, keeps = keeps, nonce = nonce,
         )
-        contract.call("commitRegulation") { stage -> Log.d(TAG, "commitRegulation: ${stage.javaClass.simpleName}") }
+        contract.call("commitRegulation", onProgress = stageReporter("commitRegulation"))
     }
 
     private suspend fun revealRegulation(
@@ -1378,7 +1577,7 @@ open class MatchManager(
         val contract = createContractHandle(
             secretKey, address, shoots = shoots, keeps = keeps, nonce = nonce,
         )
-        contract.call("revealRegulation") { stage -> Log.d(TAG, "revealRegulation: ${stage.javaClass.simpleName}") }
+        contract.call("revealRegulation", onProgress = stageReporter("revealRegulation"))
     }
 
     private suspend fun commitSuddenDeath(
@@ -1391,7 +1590,7 @@ open class MatchManager(
         val contract = createContractHandle(
             secretKey, address, sdShoot = sdShoot, sdKeep = sdKeep, nonce = nonce,
         )
-        contract.call("commitSuddenDeath") { stage -> Log.d(TAG, "commitSD: ${stage.javaClass.simpleName}") }
+        contract.call("commitSuddenDeath", onProgress = stageReporter("commitSD"))
     }
 
     private suspend fun revealSuddenDeath(
@@ -1404,7 +1603,23 @@ open class MatchManager(
         val contract = createContractHandle(
             secretKey, address, sdShoot = sdShoot, sdKeep = sdKeep, nonce = nonce,
         )
-        contract.call("revealSuddenDeath") { stage -> Log.d(TAG, "revealSD: ${stage.javaClass.simpleName}") }
+        contract.call("revealSuddenDeath", onProgress = stageReporter("revealSD"))
+    }
+
+    /**
+     * Build a stage callback that logs and mirrors the stage to
+     * [MatchHud]. Centralized here so every circuit call gets the same
+     * dual behavior (log + HUD) without duplicating the lambda body.
+     *
+     * Returns `(ContractCallStage) -> Unit` so the lambda can be passed
+     * straight into [MidnightContract.call]'s `onProgress`. Captures
+     * [circuitName] for the log line — useful when the user has stacked
+     * multiple operations and we want to know which circuit emitted a
+     * stage in the logs.
+     */
+    private fun stageReporter(circuitName: String): (ContractCallStage) -> Unit = { stage ->
+        Log.d(TAG, "$circuitName: ${stage.javaClass.simpleName}")
+        MatchHud.publishSecondary(formatContractCallStage(stage))
     }
 
     /**
@@ -1682,3 +1897,87 @@ data class MatchResult(
  */
 class MatchAlreadyJoinedException(val address: String) :
     Exception("Match $address is already past the WAITING phase — a P2 has already joined.")
+
+// ── HUD mapping helpers ─────────────────────────────────────────────────
+//
+// Presentation policy for [MatchHud] — kept at file scope (not member of
+// MatchManager) because they're pure functions of public types and want
+// to remain trivially testable in isolation. Adjust copy / mode mapping
+// here without touching the state machine.
+
+/**
+ * Map a [MatchState] to the coarse [MatchHud.Mode] that the overlay
+ * uses to pick a color / icon / animation.
+ *
+ *  - In-flight local tx (commit / reveal on this device) → TX_IN_FLIGHT.
+ *  - Anything where we're blocked on the opponent → WAITING_FOR_OPPONENT.
+ *  - Resolved → DONE, Failed → ERROR.
+ *  - Setup states (Idle / InitializingSdk / SdkReady) and the moment
+ *    after a new SD round opens (which is waiting on the user to pick)
+ *    → IDLE so the banner hides and the choice UI gets full focus.
+ */
+internal fun hudModeFor(state: MatchState): MatchHud.Mode = when (state) {
+    // Pre-match — banner hidden so the menu / picker is uncluttered.
+    is MatchState.Idle,
+    is MatchState.InitializingSdk,
+    is MatchState.SdkReady -> MatchHud.Mode.IDLE
+
+    // User is interacting with Unity (regulation or SD picker open).
+    // The banner shows context like "Sudden death round 3" so the user
+    // knows which round they're picking for. Critical for SD where the
+    // picker UI is identical across rounds — without the label the
+    // game reads as a restart loop.
+    is MatchState.Joined,           // regulation picker open in Unity
+    is MatchState.SdRoundOpen ->    // SD picker open in Unity
+        MatchHud.Mode.PICKING
+
+    // Local tx in flight.
+    is MatchState.Deploying,
+    is MatchState.JoiningAsP2,
+    is MatchState.P1Committing,
+    is MatchState.P1Revealing,
+    is MatchState.P1SdCommitting,
+    is MatchState.P1SdRevealing -> MatchHud.Mode.TX_IN_FLIGHT
+
+    // Local tx landed, blocked on the opponent.
+    is MatchState.Deployed,        // waiting for P2 to join
+    is MatchState.P1Committed,
+    is MatchState.P2Committing,
+    is MatchState.BothCommitted,
+    is MatchState.P1Revealed,
+    is MatchState.P2Revealing,
+    is MatchState.P1SdCommitted,
+    is MatchState.P2SdCommitting,
+    is MatchState.BothSdCommitted,
+    is MatchState.P1SdRevealed,
+    is MatchState.P2SdRevealing -> MatchHud.Mode.WAITING_FOR_OPPONENT
+
+    is MatchState.Resolved -> MatchHud.Mode.DONE
+    is MatchState.Failed -> MatchHud.Mode.ERROR
+}
+
+/**
+ * User-facing label for a contract-call stage. Returns `null` to clear
+ * the sub-line (e.g. when the stage doesn't add information the user
+ * needs to see).
+ *
+ * Stage class names are emitted to logs as-is for grep; the *user* sees
+ * these humanized strings instead. Adjust freely — these are
+ * presentation copy, not protocol.
+ */
+internal fun formatContractCallStage(stage: ContractCallStage): String? = when (stage) {
+    is ContractCallStage.FetchingState -> "Fetching contract state…"
+    is ContractCallStage.Executing -> "Building transaction…"
+    is ContractCallStage.Proving -> "Generating zero-knowledge proof…"
+    is ContractCallStage.Balancing -> "Balancing dust fee…"
+    is ContractCallStage.BalancingDetail -> when (val progress = stage.progress) {
+        is BalanceProgress.SyncingDust -> "Syncing dust wallet…"
+        is BalanceProgress.SyncingDustProgress ->
+            "Syncing dust (${progress.eventsProcessed}/${progress.totalEvents})…"
+        is BalanceProgress.ProvingDust -> "Proving dust payment…"
+        is BalanceProgress.Submitting -> "Submitting to chain…"
+        is BalanceProgress.WaitingFinalization -> "Waiting for block finalization…"
+        is BalanceProgress.RetryingDustSync -> "Retrying dust sync…"
+    }
+    is ContractCallStage.Submitting -> "Submitting to chain…"
+}

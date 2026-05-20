@@ -42,5 +42,21 @@
             tools:replace="android:exported">
             <intent-filter tools:node="removeAll" />
         </activity>
+
+        <!-- Kicks-specific Unity host: subclasses UnityPlayerGameActivity to
+             attach the MatchHudOverlay ComposeView on top of Unity's surface.
+             Matches the base activity's config (single-task launch, full-user
+             orientation, the same BaseUnityGameActivityTheme so Unity's
+             initialization doesn't see a different theme than upstream
+             expects). -->
+        <activity
+            android:name=".KicksMatchActivity"
+            android:exported="false"
+            android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|orientation|screenLayout|uiMode|screenSize|smallestScreenSize|fontScale|layoutDirection|density"
+            android:hardwareAccelerated="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:screenOrientation="fullUser"
+            android:theme="@style/BaseUnityGameActivityTheme" />
     </application>
 </manifest>
