@@ -418,6 +418,173 @@ describe("Penalty contract V3", () => {
     });
   });
 
+  // ── Second-reveal atomicity — regression guard for the app-layer poll predicate ──
+  //
+  // Context for future readers: the regulation reveal circuit and the
+  // sudden-death reveal circuit BOTH do the second-reveal score-and-
+  // dispatch in a single atomic call. When the result is a draw /
+  // stalemate, `resetRoundState()` runs *inside the same circuit call*
+  // that set `p2Revealed = true`, so the ledger never contains an
+  // observable snapshot with `p2Revealed == true` along the draw path.
+  //
+  // The Kotlin app's `StatePoller` reads the ledger every ~3 s. Any
+  // predicate that watches for a transient flag (e.g. `p2Revealed`)
+  // will miss the draw path and deadlock waiting for a state that
+  // never exists. The supported predicates for "second reveal landed"
+  // therefore have to key off either:
+  //   - phase == COMPLETE       (decisive path), or
+  //   - sdRound >= 1            (drew into SD round 1), or
+  //   - phase moved out of REVEALING / SD_REVEALING (either path).
+  //
+  // These tests pin the contract behavior so a future contract refactor
+  // can't silently break the assumption (e.g. by clearing the round
+  // state in a *separate* circuit call, which would re-introduce the
+  // race in a different shape).
+  describe("second-reveal atomicity (app-poll predicate invariants)", () => {
+    it("drawn revealRegulation: p1Revealed AND p2Revealed both observe as false (poller cannot witness p2Revealed=true)", () => {
+      // Same fixture as the existing `"draw enters SD_COMMITTING …"`
+      // test, but asserts the *reveal* flags. The existing test only
+      // covered the commit flags — leaving the bug we hit live in the
+      // app layer (waitForP2Revealed polling on { it.p2Revealed }).
+      const p1 = makePlayer(DRAW_P1_SHOOTS, DRAW_P1_KEEPS);
+      const p2 = makePlayer(DRAW_P2_SHOOTS, DRAW_P2_KEEPS);
+      const sim = setupMatch(p1, p2);
+      const state = playRegulation(sim, p1, p2);
+
+      // Sanity — we are on the draw path.
+      expect(state.phase).toEqual(Phase.SD_COMMITTING);
+      expect(state.sdRound).toEqual(1n);
+
+      // The load-bearing assertions:
+      expect(state.p1Revealed).toEqual(false);
+      expect(state.p2Revealed).toEqual(false);
+    });
+
+    it("drawn revealRegulation: phase==SD_COMMITTING AND sdRound==1 are visible in the same atomic snapshot (fix-predicate witness)", () => {
+      // This pins the *positive* signal that the corrected app-layer
+      // predicate keys off: even though pXRevealed flags reset, the
+      // transition to SD is observable in the same post-call ledger.
+      const p1 = makePlayer(DRAW_P1_SHOOTS, DRAW_P1_KEEPS);
+      const p2 = makePlayer(DRAW_P2_SHOOTS, DRAW_P2_KEEPS);
+      const sim = setupMatch(p1, p2);
+      const state = playRegulation(sim, p1, p2);
+
+      // Combined predicate the poller MUST use after the fix.
+      const predicateSecondRevealLanded =
+        state.p2Revealed ||
+        state.phase === Phase.COMPLETE ||
+        state.sdRound >= 1n;
+      expect(predicateSecondRevealLanded).toEqual(true);
+
+      // And the specific signals — split out for diagnosability if the
+      // combined assertion ever fires.
+      expect(state.phase).toEqual(Phase.SD_COMMITTING);
+      expect(state.sdRound).toEqual(1n);
+    });
+
+    it("decisive revealRegulation: p2Revealed remains true (non-regression for non-draw path)", () => {
+      // The old predicate { it.p2Revealed } worked here. Lock that in
+      // so the fix doesn't accidentally drop the decisive-path signal.
+      const p1 = makePlayer(P1_SWEEP_SHOOTS, P1_PERFECT_KEEPS);
+      const p2 = makePlayer(P2_BLOCKED_SHOOTS, P2_SWEEP_KEEPS);
+      const sim = setupMatch(p1, p2);
+      const state = playRegulation(sim, p1, p2);
+
+      expect(state.phase).toEqual(Phase.COMPLETE);
+      expect(state.p1Revealed).toEqual(true);
+      expect(state.p2Revealed).toEqual(true);
+
+      // Combined predicate also passes — keeps the test honest.
+      const predicateSecondRevealLanded =
+        state.p2Revealed ||
+        state.phase === Phase.COMPLETE ||
+        state.sdRound >= 1n;
+      expect(predicateSecondRevealLanded).toEqual(true);
+    });
+
+    it("stalemate revealSuddenDeath: p1Revealed AND p2Revealed both reset, sdRound advances atomically", () => {
+      // Same race shape as the regulation-draw case, in the SD loop.
+      // After a stalemate round, the contract calls resetRoundState()
+      // and increments sdRound in the same circuit. Any P1-side poll
+      // predicate on `p2Revealed && sdRound == prev.round` would
+      // deadlock the same way once a stalemate round closes.
+      const p1 = makePlayer(DRAW_P1_SHOOTS, DRAW_P1_KEEPS);
+      const p2 = makePlayer(DRAW_P2_SHOOTS, DRAW_P2_KEEPS);
+      const sim = setupMatch(p1, p2);
+      playRegulation(sim, p1, p2);
+
+      // Round 1 stalemate (both miss). Lifted from existing
+      // `"SD continues when both miss"` test.
+      const afterRound1 = playSdRound(
+        sim,
+        p1.key, LEFT,  RIGHT, randomBytes(32),
+        p2.key, RIGHT, LEFT,  randomBytes(32),
+      );
+
+      expect(afterRound1.phase).toEqual(Phase.SD_COMMITTING);
+      expect(afterRound1.sdRound).toEqual(2n);
+
+      // The race-evidence assertions — both pXRevealed flags should be
+      // cleared in the same observable snapshot that advanced sdRound.
+      expect(afterRound1.p1Revealed).toEqual(false);
+      expect(afterRound1.p2Revealed).toEqual(false);
+
+      // The fix-predicate signal for the SD-loop variant: phase still
+      // SD_COMMITTING but sdRound has advanced past the round the
+      // caller was waiting on. The app-layer
+      // `waitForP2SdRevealed` must accept "sdRound > prev.round" as
+      // a stalemate completion signal.
+      const sdRoundCaller = 1n; // the round the poller was watching
+      const predicateSdRevealResolved =
+        afterRound1.p2Revealed ||
+        afterRound1.phase === Phase.COMPLETE ||
+        afterRound1.sdRound > sdRoundCaller;
+      expect(predicateSdRevealResolved).toEqual(true);
+    });
+
+    it("mid-reveal: after P1 revealed but before P2 revealed, p1Revealed observes as true (P2-side predicate is race-free)", () => {
+      // Why this exists: the P2-side orchestrator polls on
+      // { it.p1Revealed } to learn that P1 finished revealing. Unlike
+      // the second-reveal path, this snapshot is stable — there is no
+      // reset between the two reveal calls, so the predicate is safe.
+      // Pin that here so a future contract refactor can't silently
+      // collapse the two reveals into one transaction (which would
+      // break P2's predicate too).
+      const p1 = makePlayer(DRAW_P1_SHOOTS, DRAW_P1_KEEPS);
+      const p2 = makePlayer(DRAW_P2_SHOOTS, DRAW_P2_KEEPS);
+      const sim = setupMatch(p1, p2);
+      loadPlayer(sim, p1); sim.commitRegulation();
+      loadPlayer(sim, p2); sim.commitRegulation();
+      loadPlayer(sim, p1); const midReveal = sim.revealRegulation();
+
+      // Mid-reveal-phase snapshot: P1 done, P2 still pending. The chain
+      // holds this state stably for as long as P2 takes to submit; the
+      // 3-second app poller has any amount of time to observe it.
+      expect(midReveal.phase).toEqual(Phase.REVEALING);
+      expect(midReveal.p1Revealed).toEqual(true);
+      expect(midReveal.p2Revealed).toEqual(false);
+    });
+
+    it("decisive revealSuddenDeath: p2Revealed remains true, phase==COMPLETE (non-regression for decisive SD)", () => {
+      // Mirror of the decisive-regulation test, for the SD path.
+      const p1 = makePlayer(DRAW_P1_SHOOTS, DRAW_P1_KEEPS);
+      const p2 = makePlayer(DRAW_P2_SHOOTS, DRAW_P2_KEEPS);
+      const sim = setupMatch(p1, p2);
+      playRegulation(sim, p1, p2);
+
+      // P1 scores, P2 misses — decisive (lifted from existing test).
+      const state = playSdRound(
+        sim,
+        p1.key, LEFT, LEFT,  randomBytes(32),
+        p2.key, LEFT, RIGHT, randomBytes(32),
+      );
+
+      expect(state.phase).toEqual(Phase.COMPLETE);
+      expect(state.p1Revealed).toEqual(true);
+      expect(state.p2Revealed).toEqual(true);
+    });
+  });
+
   describe("cancelMatch", () => {
     it("creator cancels a WAITING match → COMPLETE + isDraw=true", () => {
       const p1 = makePlayer(DRAW_P1_SHOOTS, DRAW_P1_KEEPS);

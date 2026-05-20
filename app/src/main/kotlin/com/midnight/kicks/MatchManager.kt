@@ -824,6 +824,50 @@ open class MatchManager(
     // PvAI does NOT use these — see [playAgainstAi].
 
     /**
+     * Predicate: "the second regulation reveal has landed (either path)."
+     *
+     * The naive predicate `{ it.p2Revealed }` is unsafe: when regulation
+     * draws, the contract sets `p2Revealed = true`, scores, then calls
+     * `resetRoundState()` and advances to SD — all inside a single
+     * atomic circuit call. The poller's 3-second cadence cannot observe
+     * the transient `p2Revealed = true` state, so it would deadlock
+     * forever on a drawn match.
+     *
+     * The fix accepts three equivalent witnesses for "second reveal
+     * landed":
+     *   - `p2Revealed`           — decisive path, flag persists.
+     *   - `phase == COMPLETE`    — decisive path (both paths set this).
+     *   - `sdRound >= 1`         — drew into SD; flags reset but
+     *                              sdRound increment is observable in
+     *                              the same snapshot.
+     *
+     * Pinned by contract test "second-reveal atomicity (app-poll
+     * predicate invariants)".
+     */
+    internal fun secondRegulationRevealLanded(snap: ContractStateSnapshot): Boolean =
+        snap.p2Revealed ||
+            snap.phase == PHASE_COMPLETE ||
+            snap.sdRound >= 1
+
+    /**
+     * Predicate: "this SD round's second reveal has landed (either path)."
+     *
+     * Same atomic-reset problem as regulation, scoped to one SD round:
+     * on stalemate the contract resets `p1Revealed`/`p2Revealed` and
+     * bumps `sdRound` in the same call. The poll-safe witness set:
+     *   - `p2Revealed && sdRound == callerRound` — decisive within this round.
+     *   - `phase == COMPLETE`                    — decisive within this round.
+     *   - `sdRound > callerRound`                — stalemate; next round opened.
+     *
+     * Pinned by contract test "stalemate revealSuddenDeath: p1Revealed
+     * AND p2Revealed both reset, sdRound advances atomically".
+     */
+    internal fun secondSdRevealLanded(snap: ContractStateSnapshot, callerRound: Int): Boolean =
+        (snap.p2Revealed && snap.sdRound == callerRound) ||
+            snap.phase == PHASE_COMPLETE ||
+            snap.sdRound > callerRound
+
+    /**
      * Wait for the on-chain contract state to satisfy [predicate]. Starts the
      * [StatePoller] if not already running (and stops it before returning if
      * this call was the one that started it).
@@ -831,7 +875,7 @@ open class MatchManager(
      * Throws [kotlinx.coroutines.TimeoutCancellationException] if [timeoutMs]
      * elapses before a matching snapshot arrives.
      */
-    private suspend fun awaitContractState(
+    internal suspend fun awaitContractState(
         timeoutMs: Long,
         predicate: (ContractStateSnapshot) -> Boolean,
     ): ContractStateSnapshot {
@@ -967,9 +1011,13 @@ open class MatchManager(
         },
     ) { prev ->
         val snap = awaitContractState(timeoutMs) {
-            it.p2Revealed && it.sdRound == prev.round
+            secondSdRevealLanded(it, callerRound = prev.round)
         }
-        // Capture P2's SD pair for the replay payload.
+        // Capture P2's SD pair for the replay payload. On the stalemate
+        // path the contract has just cleared p1Revealed/p2Revealed and
+        // bumped sdRound past prev.round, but p2SdShoot/p2SdKeep persist
+        // on chain (resetRoundState doesn't touch them). Same guarantee
+        // covered by contract test "stalemate revealSuddenDeath: …".
         p2SdShoot = snap.p2SdShoot
         p2SdKeep  = snap.p2SdKeep
         sdRoundsForReplay += SdRoundData(
@@ -981,7 +1029,7 @@ open class MatchManager(
         if (snap.phase == PHASE_COMPLETE) {
             buildMatchResult(prev.address).also { lastResult = it }
         } else {
-            null
+            null  // Stalemate — orchestrator opens the next SD round.
         }
     }
 
@@ -994,14 +1042,19 @@ open class MatchManager(
             else MatchState.SdRoundOpen(prev.address, round = 1)
         },
     ) { prev ->
-        val snap = awaitContractState(timeoutMs) { it.p2Revealed }
-        // Capture P2's regulation picks for the replay payload.
+        val snap = awaitContractState(timeoutMs, ::secondRegulationRevealLanded)
+        // Capture P2's regulation picks for the replay payload. On the
+        // draw path, p1Revealed/p2Revealed are observably false in this
+        // snapshot (contract reset them atomically when entering SD),
+        // but p2Shoots/p2Keeps persist on chain for the replay — see
+        // contract test "second-reveal atomicity (app-poll predicate
+        // invariants)".
         p2Shoots = snap.p2Shoots.copyOf()
         p2Keeps  = snap.p2Keeps.copyOf()
         if (snap.phase == PHASE_COMPLETE) {
             buildMatchResult(prev.address).also { lastResult = it }
         } else {
-            null  // SD round 1 open
+            null  // Drew into SD — orchestrator drives the SD loop next.
         }
     }
 
@@ -1254,12 +1307,40 @@ open class MatchManager(
         }
     }
 
-    private fun startStatePoller(address: String) {
+    /**
+     * Test seam — production wires the indexer-backed [StatePoller] to
+     * [_contractState]. The two `predicate` tests in
+     * `MatchManagerStateMachineTest` override this to a no-op and
+     * publish snapshots directly via [publishContractStateForTest].
+     *
+     * `internal open` matches the rest of the seam conventions in this
+     * file (see `initSdkInternal` etc.) — keeps the production path
+     * exactly as it was.
+     */
+    internal open fun startStatePoller(address: String) {
         pollerJob?.cancel()
         val poller = StatePoller(requireSdk.config, address)
         pollerJob = managerScope.launch {
             poller.snapshots().collect { _contractState.value = it }
         }
+    }
+
+    /**
+     * Test seam — drive a snapshot into the StateFlow that
+     * [awaitContractState] consumes. Production uses [startStatePoller].
+     */
+    internal fun publishContractStateForTest(snapshot: ContractStateSnapshot) {
+        _contractState.value = snapshot
+    }
+
+    /**
+     * Test seam — position the state machine at an arbitrary state so a
+     * predicate-focused test can call `waitFor…` directly without
+     * running the full deploy/commit/reveal pipeline. Production must
+     * never call this; transitions always go through `transitionFrom`.
+     */
+    internal fun setStateForTest(target: MatchState) {
+        _state.value = target
     }
 
     // ── Circuit invocations ─────────────────────────────────────────────

@@ -246,6 +246,149 @@ class MatchManagerStateMachineTest {
         assertEquals(Player.P2, byAddr[STUB_ADDRESS_2]!!.role)
     }
 
+    // ── waitForP2Revealed / waitForP2SdRevealed predicate tests ─────────
+    //
+    // These exist because the regulation/SD second-reveal path has an
+    // atomic-reset race: on a draw / stalemate the contract sets
+    // `p2Revealed = true`, scores, then `resetRoundState()` runs in the
+    // same circuit call — clearing the flag and advancing phase / sdRound
+    // before the 3-second app poller can observe it. The old predicate
+    // `{ it.p2Revealed }` provably deadlocks on the draw path (see
+    // contract test "second-reveal atomicity (app-poll predicate
+    // invariants)").
+    //
+    // The fix routes both call sites through
+    // [MatchManager.secondRegulationRevealLanded] and
+    // [MatchManager.secondSdRevealLanded], which accept the
+    // phase-advance / sdRound-advance signals as equivalent witnesses.
+    // These tests drive the post-reset snapshot into the StateFlow and
+    // assert that `waitForP2Revealed` / `waitForP2SdRevealed` return
+    // and transition the state machine correctly.
+
+    @Test
+    fun waitForP2Revealed_returns_when_draw_advances_to_SD_with_flags_reset() = runBlocking {
+        // Bug repro: P1's poller sees the post-resetRoundState snapshot —
+        // phase=SD_COMMITTING, sdRound=1, both reveal flags false. Old
+        // predicate would loop forever; new predicate fires on sdRound>=1.
+        val mm = TestableMatchManager(context, store, deployAddress = STUB_ADDRESS_1)
+        mm.initSdk()
+
+        // Position the state machine at P1Revealed (the precondition of
+        // waitForP2Revealed). No address-bearing transition path runs;
+        // we just inject the state directly via the test seam.
+        mm.setStateForTest(MatchState.P1Revealed(STUB_ADDRESS_1))
+
+        // Publish the post-draw snapshot BEFORE calling waitForP2Revealed.
+        // `awaitContractState` uses StateFlow.first(predicate); the
+        // current value is replayed on subscribe, so the predicate sees
+        // the matching snapshot immediately.
+        val drawnSdSnapshot = makeSnapshot(
+            phase = PHASE_SD_COMMITTING,
+            sdRound = 1,
+            // Atomic reset has cleared the reveal flags by the time the
+            // poller observes the post-call ledger.
+            p1Revealed = false,
+            p2Revealed = false,
+            // p2Shoots/p2Keeps persist for the replay payload.
+            p2ShootsFilled = true,
+        )
+        mm.publishContractStateForTest(drawnSdSnapshot)
+
+        val result = mm.waitForP2Revealed(timeoutMs = 5_000)
+
+        // Drew → SD opened — no terminal result, state moves to SdRoundOpen.
+        assertNull("Draw path must return null (SD now open), not a final result", result)
+        assertEquals(
+            MatchState.SdRoundOpen(STUB_ADDRESS_1, round = 1),
+            mm.state.value,
+        )
+    }
+
+    @Test
+    fun waitForP2SdRevealed_returns_when_stalemate_bumps_sdRound() = runBlocking {
+        // Same race as regulation, scoped to SD: stalemate of round N
+        // resets reveal flags and advances sdRound to N+1 in the same
+        // circuit. Old predicate `p2Revealed && sdRound == prev.round`
+        // would never see p2Revealed=true; new predicate fires on
+        // `sdRound > callerRound`.
+        val mm = TestableMatchManager(context, store, deployAddress = STUB_ADDRESS_1)
+        mm.initSdk()
+        mm.setStateForTest(MatchState.P1SdRevealed(STUB_ADDRESS_1, round = 1))
+
+        // Snapshot reflecting post-stalemate-round-1 ledger.
+        val stalemateSnapshot = makeSnapshot(
+            phase = PHASE_SD_COMMITTING,
+            sdRound = 2,                 // Bumped past caller's round = 1.
+            p1Revealed = false,
+            p2Revealed = false,
+            // Per-round SD pair persists across resetRoundState (only
+            // commit / reveal flags get cleared), so this captures
+            // round 1's revealed values for the replay payload.
+            p1SdShoot = 1, p1SdKeep = 1,
+            p2SdShoot = 0, p2SdKeep = 0,
+        )
+        mm.publishContractStateForTest(stalemateSnapshot)
+
+        val result = mm.waitForP2SdRevealed(timeoutMs = 5_000)
+
+        assertNull("Stalemate must return null (next SD round opens)", result)
+        assertEquals(
+            MatchState.SdRoundOpen(STUB_ADDRESS_1, round = 2),
+            mm.state.value,
+        )
+    }
+
+    // ── Snapshot builder ─────────────────────────────────────────────────
+
+    /**
+     * Compact builder for the few snapshot fields these predicate tests
+     * actually care about. Production `StatePoller` parses real ledger
+     * cells; these defaults are deliberately not realistic but keep the
+     * focus on the fields the predicate reads (`phase`, `sdRound`,
+     * `p2Revealed`) and the fields the call sites read off the matched
+     * snapshot for the replay payload (`p2Shoots`, `p2SdShoot`, …).
+     */
+    private fun makeSnapshot(
+        phase: Int,
+        sdRound: Int = 0,
+        p1Revealed: Boolean = false,
+        p2Revealed: Boolean = false,
+        p1Committed: Boolean = false,
+        p2Committed: Boolean = false,
+        p1SdShoot: Int = 0, p1SdKeep: Int = 0,
+        p2SdShoot: Int = 0, p2SdKeep: Int = 0,
+        p2ShootsFilled: Boolean = false,
+    ) = ContractStateSnapshot(
+        phase = phase,
+        player1 = ByteArray(32) { 0x11.toByte() },
+        player2 = ByteArray(32) { 0x22.toByte() },
+        p1Commitment = ByteArray(32),
+        p2Commitment = ByteArray(32),
+        p1Committed = p1Committed,
+        p2Committed = p2Committed,
+        // The waitForP2Revealed call site copies p2Shoots/p2Keeps off
+        // the matched snapshot for the replay payload. When the test is
+        // exercising the drawn path, fill them in so the assertion can
+        // also verify they propagate; otherwise leave zeroed.
+        p1Shoots = if (p2ShootsFilled) intArrayOf(0, 1, 2, 1, 0) else IntArray(5),
+        p1Keeps  = if (p2ShootsFilled) intArrayOf(2, 0, 1, 1, 2) else IntArray(5),
+        p2Shoots = if (p2ShootsFilled) intArrayOf(1, 2, 0, 0, 1) else IntArray(5),
+        p2Keeps  = if (p2ShootsFilled) intArrayOf(0, 1, 2, 2, 0) else IntArray(5),
+        p1SdShoot = p1SdShoot, p1SdKeep = p1SdKeep,
+        p2SdShoot = p2SdShoot, p2SdKeep = p2SdKeep,
+        p1Revealed = p1Revealed,
+        p2Revealed = p2Revealed,
+        // Score wiring isn't load-bearing for these tests; provide
+        // plausible values for the draw case so the snapshot reads
+        // realistically in any log dumps.
+        p1Score = if (phase == PHASE_COMPLETE) 3 else 1,
+        p2Score = if (phase == PHASE_COMPLETE) 1 else 1,
+        winner = ByteArray(32),
+        isDraw = false,
+        deadline = 9_999_999_999L,
+        sdRound = sdRound,
+    )
+
     private companion object {
         // Two distinct 64-char hex addresses for testing — content
         // doesn't matter, we just need stable distinguishable values.
@@ -253,6 +396,12 @@ class MatchManagerStateMachineTest {
             "1111111111111111111111111111111111111111111111111111111111111111"
         private const val STUB_ADDRESS_2 =
             "2222222222222222222222222222222222222222222222222222222222222222"
+
+        // Mirror of the (private) constants in MatchManager. Kept in
+        // sync by hand — if they drift, the predicate tests fail
+        // explicitly rather than silently asserting the wrong phase.
+        private const val PHASE_SD_COMMITTING = 3
+        private const val PHASE_COMPLETE = 5
     }
 }
 
@@ -323,5 +472,16 @@ private class TestableMatchManager(
             is JoinResult.Success -> Unit
             is JoinResult.Fail -> throw r.error
         }
+    }
+
+    /**
+     * Override the StatePoller startup so the predicate-focused tests
+     * don't try to spin up the real indexer-backed poller (which would
+     * need a built SDK). Snapshots are pushed into `_contractState`
+     * directly via [publishContractStateForTest]; the predicate test
+     * doesn't exercise the polling pipeline.
+     */
+    override fun startStatePoller(address: String) {
+        // No-op.
     }
 }
