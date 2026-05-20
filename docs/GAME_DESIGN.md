@@ -346,11 +346,42 @@ KicksActivity.handleChoicesLocked dispatches by currentRole:
   Player.P2 → MatchManager.playAsP2(choices)       ── await P1 commit, submit,
                                                        await P1 reveal, reveal
 
-On result:
+After regulation reveal (both reveals landed, chain phase advanced past
+REVEALING — i.e. either COMPLETE or SD_COMMITTING):
+  • REGULATION REPLAY (always, regardless of decisive/tied) — players
+    must see all 10 kicks resolve cinematically before learning the
+    outcome. SD must NOT be announced before the replay.
+    – Kotlin: build a RegulationReplay payload from chain snapshot
+      (p1Shoots, p1Keeps, p2Shoots, p2Keeps, p1Score, p2Score). The
+      contract preserves these across `resetRoundState()`, so they're
+      readable even on the post-tie SD snapshot.
+    – Trigger: UnityBridge.sendReplay(rounds=regulationRounds,
+        p1Score, p2Score, winner=null /* unknown until SD resolves */)
+        → Unity cinematic.
+    – Compose-only fallback (current prototype): MatchReplayOverlay
+      renders a row-by-row scoreboard above Unity's surface. Used until
+      the Unity cinematic exists.
+    – Unity sends replayComplete → KicksActivity dispatches:
+        · phase == COMPLETE (decisive regulation) → winner announce
+          beat → claim payout
+        · phase == SD_COMMITTING (tied)           → "SUDDEN DEATH —
+          ROUND 1" full-screen beat → SD choicePhase to Unity
+  • SD picker dispatch (UnityBridge.sendChoicePhase round=suddenDeath)
+    must NOT fire until replay dismissal. Players do not learn that SD
+    exists until the regulation replay has played.
+
+After every SD round reveal (similar shape):
+  • SD round replay — single pairing animation (P1 shoot vs P2 keep,
+    P2 shoot vs P1 keep). Same gate as regulation: replay first, THEN
+    either winner reveal or next SD round prompt.
+  • If decisive → winner announce → claim payout
+  • If stalemate → "SUDDEN DEATH — ROUND N+1" beat → next SD choicePhase
+
+On final result (MatchState → Resolved):
   • sessionStore.clear() if PvP (RESUME MATCH disappears from menu)
-  • UnityBridge.sendReplay(rounds, p1Score, p2Score, winner) → Unity
-    cinematic
-  • Unity sends replayComplete → KicksActivity shows score line
+  • Winner announce beat (full-screen, opaque) — score + winner + payout
+    claim CTA. Surfaces only after the relevant replay has played, never
+    before.
 
 [Forfeit / Timeout]
   • Each MatchManager.waitFor* helper has a timeout default
@@ -365,9 +396,20 @@ On result:
 - **Pause / mid-match exit** — Unity pause button hard-kills the process
   (workaround for shared-process ANR); user relaunches from launcher.
   Proper polish item, see PLAN Phase 5.
-- **Sudden death loop** — contract supports SD; orchestrator hand-off
-  not yet wired into the UI flow. After regulation resolves tied, the
-  state ends at Resolved without auto-routing into SD_COMMITTING.
+- **Regulation replay** — Unity cinematic per `sendReplay` not built. The
+  current prototype is a Compose-only row-by-row scoreboard
+  (MatchReplayOverlay) rendered above Unity's surface. Unity cinematic
+  is the eventual end state. **Required** for the SD-gate per the
+  "regulation replay before SD" rule — players must not learn about SD
+  until the replay plays.
+- **SD transition + winner announce beats** — full-screen "SUDDEN DEATH
+  — ROUND N" and "YOU WON / YOU LOST" overlays still missing. Today
+  the HUD badge label changes but there's no full-screen moment, so
+  the SD picker re-appearing reads as "the game restarted".
+- **SD round replay** — single-pairing cinematic between each SD round.
+  Same Compose-fallback approach as regulation replay.
+- **Result screen + leaderboard** — PLAN Phase 4 step "Results screen +
+  leaderboard query" still pending. Payout claim CTA also lives here.
 - **Result screen + leaderboard** — PLAN Phase 4 step "Results screen +
   leaderboard query" still pending.
 - **QR scanner** — JoinMatchScreen accepts hex paste / deep link only.
