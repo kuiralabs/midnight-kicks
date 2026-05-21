@@ -170,6 +170,15 @@ class MatchStore internal constructor(
         }
     }
 
+    /**
+     * Guards every read-modify-write of the address-index + per-match
+     * record pair. Without it, concurrent `save(A)`/`delete(B)` can
+     * race on the index list and resurrect a deleted address. Reads
+     * (`load`, `loadAll`) don't need it — `EncryptedSharedPreferences`
+     * reads are atomic and a stale view is acceptable.
+     */
+    private val indexLock = Any()
+
     /** All matches currently in flight on this device. */
     fun loadAll(): List<Match> = readAddressIndex().mapNotNull { load(it) }
 
@@ -182,25 +191,29 @@ class MatchStore internal constructor(
     /** Persist (insert or update). Idempotent on identical content. */
     fun save(match: Match) {
         val json = encodeMatch(match).toString()
-        // Update the index in place without decoding every stored
-        // record (which `loadAll()` would do). Decoding is O(n) per
-        // save, and save runs on every commit/SD/reveal — wasteful.
-        val newAddresses = (readAddressIndex() + match.address).distinct()
-        prefs.edit()
-            .putString(matchKey(match.address), json)
-            .putString(KEY_INDEX, JSONArray(newAddresses).toString())
-            .commit()
-        Log.i(TAG, "Saved match ${match.address.take(16)}… (${match.role}), ${newAddresses.size} total")
+        synchronized(indexLock) {
+            // Read the current index inside the lock — TOCTOU-safe
+            // against a concurrent delete that filters out an address
+            // we'd otherwise re-distinct here.
+            val newAddresses = (readAddressIndex() + match.address).distinct()
+            prefs.edit()
+                .putString(matchKey(match.address), json)
+                .putString(KEY_INDEX, JSONArray(newAddresses).toString())
+                .commit()
+            Log.i(TAG, "Saved match ${match.address.take(16)}… (${match.role}), ${newAddresses.size} total")
+        }
     }
 
     /** Remove a single match. No-op if [address] isn't stored. */
     fun delete(address: String) {
-        val remaining = readAddressIndex().filter { it != address }
-        prefs.edit()
-            .remove(matchKey(address))
-            .putString(KEY_INDEX, JSONArray(remaining).toString())
-            .commit()
-        Log.i(TAG, "Deleted match ${address.take(16)}… (${remaining.size} remaining)")
+        synchronized(indexLock) {
+            val remaining = readAddressIndex().filter { it != address }
+            prefs.edit()
+                .remove(matchKey(address))
+                .putString(KEY_INDEX, JSONArray(remaining).toString())
+                .commit()
+            Log.i(TAG, "Deleted match ${address.take(16)}… (${remaining.size} remaining)")
+        }
     }
 
     /**
@@ -217,8 +230,10 @@ class MatchStore internal constructor(
 
     /** Wipe everything. Called on factory reset / sigil restore-and-replace. */
     fun clear() {
-        prefs.edit().clear().commit()
-        Log.i(TAG, "Cleared all matches")
+        synchronized(indexLock) {
+            prefs.edit().clear().commit()
+            Log.i(TAG, "Cleared all matches")
+        }
     }
 
     // ── Cloud-backup seam ──
@@ -249,9 +264,7 @@ class MatchStore internal constructor(
      * **Safety:** unknown schema versions, non-JSON blobs, or blobs
      * where every record fails to decode are dropped — the existing
      * local store is preserved untouched. Only blobs we can decode at
-     * least one record from trigger a clear-and-replace. Without this
-     * guarantee a sigil restore against a future-schema blob would
-     * silently nuke a working local store.
+     * least one record from trigger a clear-and-replace.
      */
     fun restoreFromBytes(blob: ByteArray) {
         val text = blob.toString(Charsets.UTF_8)
@@ -279,8 +292,20 @@ class MatchStore internal constructor(
             return
         }
 
-        clear()
-        decoded.forEach { save(it) }
+        // Atomic restore: hold the index lock across the
+        // clear-and-replace so a concurrent save() can't interleave a
+        // local match between clear() and the loop's saves.
+        synchronized(indexLock) {
+            prefs.edit().clear().commit()
+            decoded.forEach { match ->
+                val json = encodeMatch(match).toString()
+                val newAddresses = (readAddressIndex() + match.address).distinct()
+                prefs.edit()
+                    .putString(matchKey(match.address), json)
+                    .putString(KEY_INDEX, JSONArray(newAddresses).toString())
+                    .commit()
+            }
+        }
         Log.i(TAG, "Restored ${decoded.size} matches from cloud blob")
     }
 

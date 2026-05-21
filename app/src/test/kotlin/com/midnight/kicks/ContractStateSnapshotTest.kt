@@ -1,300 +1,238 @@
 package com.midnight.kicks
 
-import org.json.JSONArray
-import org.json.JSONObject
+import com.midnight.kuira.core.compact.MidnightLedger
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.math.BigInteger
 
 /**
- * Unit tests for [ContractStateSnapshot] parsing (V3 layout).
+ * Unit tests for [ContractStateSnapshot] — the typed snapshot of the
+ * penalty contract's ledger.
  *
- * V3 stores its ledger in two groups (8 cells + 15 cells = 23 cells flat).
- * Each `Vector<5, Uint<8>>` occupies one cell whose hex is the 5
- * concatenated element bytes (10 hex chars).
+ * Now that the lossy cell-hex parser is gone (replaced by
+ * `MidnightContract.ledger()` driven by the runtime), these tests
+ * focus on what's left at this layer:
+ *  - [ContractStateSnapshot.fromLedger] correctly threads each
+ *    typed `MidnightLedger.getX` into the right field — a wrong
+ *    accessor or a swapped field would fail loudly here, before
+ *    reaching live code.
+ *  - The hand-rolled `equals` / `hashCode` work as expected over
+ *    array fields (otherwise `distinctUntilChanged` in the poller
+ *    re-emits on identical snapshots).
+ *  - Convenience accessors (`bothCommitted`, `matchJoined`, etc.)
+ *    reflect their underlying fields.
  *
- * These tests guard the cell-index map against drift from
- * `penalty-contract.js`. If the .compact field order changes, exactly
- * these tests will start failing — far better than the silent "Match
- * complete" with garbage scores you'd see if the parser kept rolling.
+ * Lossless decoding of `Vector<N, Uint<8>>` (the bug class this whole
+ * refactor eliminated — see PLAN.md wishlist #9) is now tested at the
+ * SDK level in `MidnightLedgerTest` and (eventually) in an
+ * instrumented test against the real penalty runtime.
  */
 class ContractStateSnapshotTest {
 
     @Test
-    fun `parse returns null for a too-short array`() {
-        val short = JSONArray().apply { put(numberCell(0)) }
-        assertNull(ContractStateSnapshot.parse(short))
-    }
+    fun `fromLedger threads each typed accessor into the right field`() {
+        val ledger = ledgerOf(
+            "phase"        to BigInteger.valueOf(3),
+            "player1"      to ByteArray(32) { 0x11.toByte() },
+            "player2"      to ByteArray(32) { 0x22.toByte() },
+            "p1Commitment" to ByteArray(32) { 0xAA.toByte() },
+            "p2Commitment" to ByteArray(32) { 0xBB.toByte() },
+            "p1Committed"  to true,
+            "p2Committed"  to true,
+            "p1Shoots"     to listOfBig(0, 1, 2, 1, 0),
+            "p1Keeps"      to listOfBig(2, 1, 0, 1, 2),  // internal zero — the bug case
+            "p2Shoots"     to listOfBig(1, 0, 2, 0, 1),  // multiple internal zeros
+            "p2Keeps"      to listOfBig(0, 0, 0, 1, 2),  // leading zeros
+            "p1SdShoot"    to BigInteger.valueOf(1),
+            "p1SdKeep"     to BigInteger.valueOf(2),
+            "p2SdShoot"    to BigInteger.valueOf(0),
+            "p2SdKeep"     to BigInteger.valueOf(1),
+            "p1Revealed"   to true,
+            "p2Revealed"   to false,
+            "p1Score"      to BigInteger.valueOf(3),
+            "p2Score"      to BigInteger.valueOf(2),
+            "winner"       to ByteArray(32),
+            "isDraw"       to false,
+            "deadline"     to BigInteger.valueOf(9_999_999_999L),
+            "sdRound"      to BigInteger.valueOf(1),
+        )
 
-    @Test
-    fun `parse returns null for an empty array`() {
-        assertNull(ContractStateSnapshot.parse(JSONArray()))
-    }
+        val snap = ContractStateSnapshot.fromLedger(ledger)
 
-    @Test
-    fun `parse returns null when neither flat nor nested layout matches`() {
-        val malformed = JSONArray()
-            .put(numberCell(0))
-            .put(numberCell(1))
-        assertNull(ContractStateSnapshot.parse(malformed))
-    }
-
-    // ── Split-storage on-chain shape: 8 cells in group 0 + 15 in group 1 ─
-
-    @Test
-    fun `parse handles real split-storage layout`() {
-        val state = defaultStateArray()
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertEquals(0, snap.phase)
-        assertFalse(snap.p1Committed)
-        assertFalse(snap.p2Committed)
-        assertEquals(0, snap.p1Score)
-        assertEquals(0, snap.p2Score)
-        assertEquals(0, snap.sdRound)
-    }
-
-    @Test
-    fun `parse fills empty vectors with zeros (fresh post-deploy state)`() {
-        val snap = ContractStateSnapshot.parse(defaultStateArray())
-        requireNotNull(snap)
-        assertEquals(5, snap.p1Shoots.size)
-        assertEquals(5, snap.p1Keeps.size)
-        assertEquals(5, snap.p2Shoots.size)
-        assertEquals(5, snap.p2Keeps.size)
-        assertArrayEquals(IntArray(5), snap.p1Shoots)
-        assertArrayEquals(IntArray(5), snap.p2Keeps)
-    }
-
-    @Test
-    fun `parse reads player1 from group 0 cell 1`() {
-        val player1Hex = "e8fde5e25c2d4c589f181c10042304f1e9badca11baabafeac4d53812a7b7c07"
-        val state = defaultStateArray().apply {
-            // group 0 is state[0]; player1 is at group 0 index 1
-            (get(0) as JSONArray).put(1, hexCell(player1Hex))
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertEquals(player1Hex.length / 2, snap.player1.size)
-        assertEquals(0xe8.toByte(), snap.player1[0])
-    }
-
-    @Test
-    fun `parse decodes p1Committed when hex is 01`() {
-        val state = defaultStateArray().apply {
-            // p1Committed is at group 0 index 5
-            (get(0) as JSONArray).put(5, hexCell("01"))
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
+        assertEquals(3, snap.phase)
+        assertEquals(0x11.toByte(), snap.player1[0])
+        assertEquals(0x22.toByte(), snap.player2[0])
+        assertEquals(0xAA.toByte(), snap.p1Commitment[0])
+        assertEquals(0xBB.toByte(), snap.p2Commitment[0])
         assertTrue(snap.p1Committed)
-        assertFalse(snap.p2Committed)
+        assertTrue(snap.p2Committed)
+        assertArrayEquals(intArrayOf(0, 1, 2, 1, 0), snap.p1Shoots)
+        // The load-bearing assertion: internal zeros survive the
+        // ledger → snapshot pipeline. Pre-refactor, this position
+        // would be silently zeroed by the lossy cell-hex parser.
+        assertArrayEquals(intArrayOf(2, 1, 0, 1, 2), snap.p1Keeps)
+        assertArrayEquals(intArrayOf(1, 0, 2, 0, 1), snap.p2Shoots)
+        assertArrayEquals(intArrayOf(0, 0, 0, 1, 2), snap.p2Keeps)
+        assertEquals(1, snap.p1SdShoot)
+        assertEquals(2, snap.p1SdKeep)
+        assertEquals(0, snap.p2SdShoot)  // zero is real data, not "missing"
+        assertEquals(1, snap.p2SdKeep)
+        assertTrue(snap.p1Revealed)
+        assertFalse(snap.p2Revealed)
+        assertEquals(3, snap.p1Score)
+        assertEquals(2, snap.p2Score)
+        assertEquals(9_999_999_999L, snap.deadline)
+        assertEquals(1, snap.sdRound)
     }
 
     @Test
-    fun `parse decodes p2Revealed from group 1 cell 8`() {
-        val state = defaultStateArray().apply {
-            (get(1) as JSONArray).put(8, hexCell("01"))
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertTrue(snap.p2Revealed)
-        assertFalse(snap.p1Revealed)
-    }
+    fun `fromLedger preserves all-zero arrays — pre-commit and pre-reveal state`() {
+        // Fresh-deploy or pre-reveal cells return all zeros from the
+        // ledger. Used to be the smoking-gun pattern for the lossy
+        // parser (which also returned all zeros even POST-reveal).
+        val ledger = ledgerOf(
+            "phase"        to BigInteger.ZERO,
+            "player1"      to ByteArray(32),
+            "player2"      to ByteArray(32),
+            "p1Commitment" to ByteArray(32),
+            "p2Commitment" to ByteArray(32),
+            "p1Committed"  to false,
+            "p2Committed"  to false,
+            "p1Shoots"     to listOfBig(0, 0, 0, 0, 0),
+            "p1Keeps"      to listOfBig(0, 0, 0, 0, 0),
+            "p2Shoots"     to listOfBig(0, 0, 0, 0, 0),
+            "p2Keeps"      to listOfBig(0, 0, 0, 0, 0),
+            "p1SdShoot"    to BigInteger.ZERO,
+            "p1SdKeep"     to BigInteger.ZERO,
+            "p2SdShoot"    to BigInteger.ZERO,
+            "p2SdKeep"     to BigInteger.ZERO,
+            "p1Revealed"   to false,
+            "p2Revealed"   to false,
+            "p1Score"      to BigInteger.ZERO,
+            "p2Score"      to BigInteger.ZERO,
+            "winner"       to ByteArray(32),
+            "isDraw"       to false,
+            "deadline"     to BigInteger.ZERO,
+            "sdRound"      to BigInteger.ZERO,
+        )
 
-    // ── Vector<5, Uint<8>> decoding — the V3 headline change ────────────
+        val snap = ContractStateSnapshot.fromLedger(ledger)
 
-    @Test
-    fun `parse decodes p1Shoots from a single 5-byte hex cell`() {
-        // Vector<5, Uint<8>> serializes as 5 concatenated bytes; the
-        // ledger holds them in one cell at group 0 index 7.
-        val shoots = intArrayOf(0, 1, 2, 1, 0)
-        val state = defaultStateArray().apply {
-            (get(0) as JSONArray).put(7, hexCell("0001020100"))
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertArrayEquals(shoots, snap.p1Shoots)
-        // Other vectors should still be zeroed.
+        assertArrayEquals(IntArray(5), snap.p1Shoots)
         assertArrayEquals(IntArray(5), snap.p1Keeps)
         assertArrayEquals(IntArray(5), snap.p2Shoots)
         assertArrayEquals(IntArray(5), snap.p2Keeps)
-    }
-
-    @Test
-    fun `parse decodes p1Keeps p2Shoots p2Keeps from group 1 cells 0-2`() {
-        val keeps   = intArrayOf(2, 2, 0, 1, 2)
-        val p2Sh    = intArrayOf(0, 2, 0, 2, 0)
-        val p2K     = intArrayOf(1, 1, 1, 1, 1)
-        val state = defaultStateArray().apply {
-            (get(1) as JSONArray).put(0, hexCell("0202000102"))
-            (get(1) as JSONArray).put(1, hexCell("0002000200"))
-            (get(1) as JSONArray).put(2, hexCell("0101010101"))
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertArrayEquals(keeps,  snap.p1Keeps)
-        assertArrayEquals(p2Sh,   snap.p2Shoots)
-        assertArrayEquals(p2K,    snap.p2Keeps)
-        assertArrayEquals(IntArray(5), snap.p1Shoots)
-    }
-
-    // ── SD pick scalars (group 1 cells 3-6) ─────────────────────────────
-
-    @Test
-    fun `parse decodes SD shoot and keep scalars`() {
-        val state = defaultStateArray().apply {
-            (get(1) as JSONArray).put(3, hexCell("01")) // p1SdShoot = 1
-            (get(1) as JSONArray).put(4, hexCell("02")) // p1SdKeep  = 2
-            (get(1) as JSONArray).put(5, hexCell("00")) // p2SdShoot = 0
-            (get(1) as JSONArray).put(6, hexCell("01")) // p2SdKeep  = 1
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertEquals(1, snap.p1SdShoot)
-        assertEquals(2, snap.p1SdKeep)
-        assertEquals(0, snap.p2SdShoot)
-        assertEquals(1, snap.p2SdKeep)
-    }
-
-    @Test
-    fun `parse decodes scores from group 1 cells 9-10`() {
-        val state = defaultStateArray().apply {
-            (get(1) as JSONArray).put(9,  hexCell("03"))   // p1Score = 3
-            (get(1) as JSONArray).put(10, hexCell("02"))   // p2Score = 2
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertEquals(3, snap.p1Score)
-        assertEquals(2, snap.p2Score)
-    }
-
-    @Test
-    fun `parse decodes winner bytes from group 1 cell 11`() {
-        val winnerHex = "ab".repeat(32)
-        val state = defaultStateArray().apply {
-            (get(1) as JSONArray).put(11, hexCell(winnerHex))
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertEquals(32, snap.winner.size)
-        assertEquals(0xab.toByte(), snap.winner[0])
-        assertEquals(0xab.toByte(), snap.winner[31])
-    }
-
-    @Test
-    fun `parse decodes deadline as little-endian Uint64`() {
-        val state = defaultStateArray().apply {
-            // deadline at group 1 index 13; 0x12345678 = 305_419_896 LE
-            (get(1) as JSONArray).put(13, hexCell("78563412"))
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertEquals(0x12345678L, snap.deadline)
-    }
-
-    @Test
-    fun `parse decodes sdRound from group 1 cell 14`() {
-        val state = defaultStateArray().apply {
-            (get(1) as JSONArray).put(14, hexCell("02")) // sdRound = 2
-        }
-        val snap = ContractStateSnapshot.parse(state)
-        requireNotNull(snap)
-        assertEquals(2, snap.sdRound)
-    }
-
-    // ── Derived helpers ─────────────────────────────────────────────────
-
-    @Test
-    fun `bothCommitted is true only when both flags are set`() {
-        val state = defaultStateArray().apply {
-            (get(0) as JSONArray).put(5, hexCell("01")) // p1Committed
-            (get(0) as JSONArray).put(6, hexCell("01")) // p2Committed
-        }
-        val snap = ContractStateSnapshot.parse(state)!!
-        assertTrue(snap.bothCommitted)
-    }
-
-    @Test
-    fun `matchJoined is true when player2 has any non-zero byte`() {
-        val state = defaultStateArray().apply {
-            (get(0) as JSONArray).put(2, hexCell("01" + "00".repeat(31)))
-        }
-        val snap = ContractStateSnapshot.parse(state)!!
-        assertTrue(snap.matchJoined)
-    }
-
-    @Test
-    fun `matchJoined is false when player2 is all zeros`() {
-        val snap = ContractStateSnapshot.parse(defaultStateArray())!!
         assertFalse(snap.matchJoined)
+        assertFalse(snap.bothCommitted)
+        assertFalse(snap.bothRevealed)
     }
 
     @Test
-    fun `equals returns true for two identical snapshots`() {
-        val a = ContractStateSnapshot.parse(defaultStateArray())!!
-        val b = ContractStateSnapshot.parse(defaultStateArray())!!
+    fun `equals uses content equality on array fields`() {
+        // Without content-aware equals, two structurally-equal
+        // snapshots produced by two consecutive polls would compare
+        // as different (Array reference equality), and
+        // distinctUntilChanged would re-emit every tick.
+        val fields = defaultLedger()
+        val a = ContractStateSnapshot.fromLedger(MidnightLedgerTestFactory.fromMap(fields))
+        val b = ContractStateSnapshot.fromLedger(MidnightLedgerTestFactory.fromMap(fields))
         assertEquals(a, b)
         assertEquals(a.hashCode(), b.hashCode())
     }
 
     @Test
-    fun `equals returns false when one boolean flag differs`() {
-        val a = ContractStateSnapshot.parse(defaultStateArray())!!
-        val b = ContractStateSnapshot.parse(defaultStateArray().apply {
-            (get(0) as JSONArray).put(5, hexCell("01"))
-        })!!
+    fun `equals returns false when a Vector field differs`() {
+        val a = ContractStateSnapshot.fromLedger(MidnightLedgerTestFactory.fromMap(defaultLedger()))
+        val b = ContractStateSnapshot.fromLedger(
+            MidnightLedgerTestFactory.fromMap(
+                defaultLedger() + ("p1Shoots" to listOfBig(2, 1, 0, 1, 2)),
+            ),
+        )
         assertNotEquals(a, b)
     }
 
     @Test
-    fun `equals returns false when a Vector differs`() {
-        val a = ContractStateSnapshot.parse(defaultStateArray())!!
-        val b = ContractStateSnapshot.parse(defaultStateArray().apply {
-            (get(0) as JSONArray).put(7, hexCell("0102000201"))
-        })!!
-        assertNotEquals(a, b)
+    fun `matchJoined flips true when player2 has any non-zero byte`() {
+        val a = ContractStateSnapshot.fromLedger(MidnightLedgerTestFactory.fromMap(defaultLedger()))
+        assertFalse(a.matchJoined)
+
+        val withP2 = ContractStateSnapshot.fromLedger(
+            MidnightLedgerTestFactory.fromMap(
+                defaultLedger() + ("player2" to ByteArray(32) { if (it == 0) 0x99.toByte() else 0 }),
+            ),
+        )
+        assertTrue(withP2.matchJoined)
     }
 
     @Test
-    fun `summary string mentions all critical flags`() {
-        val state = defaultStateArray().apply {
-            (get(0) as JSONArray).put(5, hexCell("01"))  // p1Committed
-            (get(1) as JSONArray).put(9, hexCell("02"))  // p1Score
-            (get(1) as JSONArray).put(10, hexCell("01")) // p2Score
-        }
-        val snap = ContractStateSnapshot.parse(state)!!
+    fun `summary contains the high-signal fields a developer scans for`() {
+        val fields = defaultLedger()
+            .toMutableMap()
+            .apply { put("phase", BigInteger.valueOf(3)); put("sdRound", BigInteger.valueOf(2)) }
+        val snap = ContractStateSnapshot.fromLedger(MidnightLedgerTestFactory.fromMap(fields))
         val s = snap.summary()
-        assertTrue(s, s.contains("p1Committed=true"))
-        assertTrue(s, s.contains("score=2-1"))
-        assertTrue(s, s.contains("phase=0"))
+        assertTrue(s, s.contains("phase=3"))
+        assertTrue(s, s.contains("sdRound=2"))
+        assertTrue(s, s.contains("score=0-0"))
     }
 
     // ── Test helpers ────────────────────────────────────────────────────
 
-    /**
-     * Build a fresh post-deploy state array — 2 groups, all cells default
-     * to empty hex (the shape MidnightConfig.queryState actually returns
-     * before any tx lands). Tests override specific group/index cells.
-     */
-    private fun defaultStateArray(): JSONArray {
-        val group0 = JSONArray().apply { repeat(GROUP0_CELLS) { put(hexCell("")) } }
-        val group1 = JSONArray().apply { repeat(GROUP1_CELLS) { put(hexCell("")) } }
-        return JSONArray().put(group0).put(group1)
-    }
+    /** Build a [MidnightLedger] from raw `name to value` pairs. */
+    private fun ledgerOf(vararg pairs: Pair<String, Any?>): MidnightLedger =
+        MidnightLedgerTestFactory.fromMap(pairs.toMap())
 
-    private fun numberCell(value: Number): JSONObject =
-        JSONObject().put("type", "cell").put("number", value)
+    /** Construct a list of BigIntegers from Ints. */
+    private fun listOfBig(vararg values: Int): List<BigInteger> =
+        values.map { BigInteger.valueOf(it.toLong()) }
 
-    private fun hexCell(hex: String): JSONObject =
-        JSONObject().put("type", "cell").put("hex", hex)
+    private fun defaultLedger(): Map<String, Any?> = mapOf(
+        "phase"        to BigInteger.ZERO,
+        "player1"      to ByteArray(32),
+        "player2"      to ByteArray(32),
+        "p1Commitment" to ByteArray(32),
+        "p2Commitment" to ByteArray(32),
+        "p1Committed"  to false,
+        "p2Committed"  to false,
+        "p1Shoots"     to listOfBig(0, 0, 0, 0, 0),
+        "p1Keeps"      to listOfBig(0, 0, 0, 0, 0),
+        "p2Shoots"     to listOfBig(0, 0, 0, 0, 0),
+        "p2Keeps"      to listOfBig(0, 0, 0, 0, 0),
+        "p1SdShoot"    to BigInteger.ZERO,
+        "p1SdKeep"     to BigInteger.ZERO,
+        "p2SdShoot"    to BigInteger.ZERO,
+        "p2SdKeep"     to BigInteger.ZERO,
+        "p1Revealed"   to false,
+        "p2Revealed"   to false,
+        "p1Score"      to BigInteger.ZERO,
+        "p2Score"      to BigInteger.ZERO,
+        "winner"       to ByteArray(32),
+        "isDraw"       to false,
+        "deadline"     to BigInteger.ZERO,
+        "sdRound"      to BigInteger.ZERO,
+    )
+}
 
-    companion object {
-        private const val GROUP0_CELLS = 8
-        private const val GROUP1_CELLS = 15
+/**
+ * Test-only factory for [MidnightLedger] — the production constructor
+ * is `internal` to the SDK module. This exists in the test source so
+ * Kicks tests can drive the snapshot factory directly without spinning
+ * up the full QuickJs runtime. Uses Kotlin reflection to access the
+ * SDK's package-private constructor.
+ */
+private object MidnightLedgerTestFactory {
+    fun fromMap(fields: Map<String, Any?>): MidnightLedger {
+        // The internal constructor takes `Map<String, Any?>` — we hit
+        // it via reflection. This couples the test to the SDK's
+        // current internal shape; if MidnightLedger's constructor
+        // signature ever changes, this factory needs an update too
+        // (compile-time error in the SDK module would surface that).
+        val ctor = MidnightLedger::class.java.getDeclaredConstructor(Map::class.java)
+        ctor.isAccessible = true
+        return ctor.newInstance(fields)
     }
 }

@@ -224,6 +224,91 @@ class MatchManagerStateMachineTest {
         }
     }
 
+    @Test
+    fun joinAsP2_isResume_true_while_state_on_a_different_match_resets_and_proceeds() = runBlocking {
+        // Live-bug scenario (2026-05-20): app launched with a stored P1
+        // match → `tryResumeActiveMatch` routed state to
+        // Deployed(p1Address). User then tapped Join for a separate P2
+        // address (stored as role=P2 → isResume=true). The old guard
+        // `if (!isResume) resetForNewAction()` skipped the reset, so
+        // `transitionFrom<SdkReady>` threw "expected SdkReady, got
+        // Deployed". This test pins the fix: when isResume=true and the
+        // address differs from the current in-memory match, the
+        // manager resets, runs the chain join (which fails with the
+        // WAITING assert), and rehydrates from the P2 store record.
+        val p2SecretKey = ByteArray(32) { 0x42.toByte() }
+        store.save(
+            MatchStore.Match(
+                address = STUB_ADDRESS_2,
+                role = Player.P2,
+                deadline = 1_900_000_000L,
+                secretKey = p2SecretKey,
+            ),
+        )
+        val mm = TestableMatchManager(context, store, deployAddress = STUB_ADDRESS_1)
+        mm.initSdk()
+
+        // Position the manager as if `tryResumeActiveMatch` had
+        // restored the P1 match. State is Deployed for ADDRESS_1; the
+        // user's now-tapped Join is for ADDRESS_2.
+        mm.deployMatch()
+        assertEquals(MatchState.Deployed(STUB_ADDRESS_1), mm.state.value)
+
+        mm.setNextJoinResult(
+            JoinResult.Fail(IllegalStateException("not in WAITING phase — already joined")),
+        )
+
+        mm.joinAsP2(STUB_ADDRESS_2, isResume = true)
+
+        // We end up on the P2 match — the resume path rehydrated and
+        // advanced the state machine past Joined.
+        assertEquals(MatchState.Joined(STUB_ADDRESS_2), mm.state.value)
+        // Both matches survive in the store: the P1 deploy stays
+        // available via the Resume UI, the P2 rejoin still has its
+        // record intact.
+        val byAddr = store.loadAll().associateBy { it.address }
+        assertEquals(Player.P1, byAddr[STUB_ADDRESS_1]!!.role)
+        assertEquals(Player.P2, byAddr[STUB_ADDRESS_2]!!.role)
+    }
+
+    @Test
+    fun joinAsP2_isResume_true_when_already_joined_to_same_address_is_a_no_op() = runBlocking {
+        // Idempotent shortcut: a process-restart resume that already
+        // landed in Joined(address) shouldn't pay the cost of a fresh
+        // chain attempt (which would always fail with the WAITING
+        // assert and then rehydrate). Tap-Join after tryResumeActiveMatch
+        // already settled here ⇒ early return, no state change.
+        val p2SecretKey = ByteArray(32) { 0x55.toByte() }
+        store.save(
+            MatchStore.Match(
+                address = STUB_ADDRESS_1,
+                role = Player.P2,
+                deadline = 1_900_000_000L,
+                secretKey = p2SecretKey,
+            ),
+        )
+        val mm = TestableMatchManager(context, store)
+        mm.initSdk()
+        mm.setStateForTest(MatchState.Joined(STUB_ADDRESS_1))
+
+        // Arm a failing chain stub — if the no-op shortcut works, this
+        // never fires; if it doesn't, the state-machine catch path
+        // would still land us in Joined, but the join lambda would be
+        // invoked, proving the shortcut didn't trigger.
+        mm.setNextJoinResult(
+            JoinResult.Fail(IllegalStateException("test should not call executeJoinMatch")),
+        )
+
+        mm.joinAsP2(STUB_ADDRESS_1, isResume = true)
+
+        assertEquals(MatchState.Joined(STUB_ADDRESS_1), mm.state.value)
+        // Stub never consumed → shortcut hit.
+        assertTrue(
+            "no-op shortcut should not call executeJoinMatch",
+            mm.executeJoinMatchCalls == 0,
+        )
+    }
+
     // ── Multi-match ──
 
     @Test
@@ -244,6 +329,332 @@ class MatchManagerStateMachineTest {
         val byAddr = all.associateBy { it.address }
         assertEquals(Player.P1, byAddr[STUB_ADDRESS_1]!!.role)
         assertEquals(Player.P2, byAddr[STUB_ADDRESS_2]!!.role)
+    }
+
+    // ── Resume + downstream actions ──────────────────────────────────
+    //
+    // These tests exercise the *real* tryResumeActiveMatch path (not
+    // setStateForTest) followed by a downstream user action. The
+    // existing tests all start at SdkReady or inject a state directly;
+    // neither covers "resume into a post-Deployed state, then call X".
+    // That gap let the 2026-05-20 joinAsP2 + awaitOpponentJoin
+    // precondition bugs ship.
+
+    @Test
+    fun tryResumeActiveMatch_for_P1_with_chain_at_COMMITTING_lands_in_Joined_and_awaitOpponentJoin_succeeds() = runBlocking {
+        // Live-bug repro: P1 resumed, chain phase=COMMITTING and
+        // p1Committed=false → state target is Joined. User then taps
+        // CHECK STATUS, which calls awaitOpponentJoin. Pre-fix this
+        // threw IllegalArgumentException ("expected Deployed, got
+        // Joined"); post-fix it's an idempotent no-op success.
+        val secretKey = ByteArray(32) { 0x77.toByte() }
+        store.save(
+            MatchStore.Match(
+                address = STUB_ADDRESS_1,
+                role = Player.P1,
+                deadline = 1_900_000_000L,
+                secretKey = secretKey,
+            ),
+        )
+        val mm = TestableMatchManager(context, store).apply {
+            stubResumeSnapshot = makeSnapshot(phase = PHASE_COMMITTING)
+        }
+        mm.initSdk()
+
+        val resumed = mm.tryResumeActiveMatch()
+
+        assertEquals(STUB_ADDRESS_1, resumed)
+        assertEquals(MatchState.Joined(STUB_ADDRESS_1), mm.state.value)
+
+        // Downstream user action — the actual bug surface. Should
+        // return cleanly (idempotent no-op), state unchanged.
+        mm.awaitOpponentJoin(timeoutMs = 50L)
+        assertEquals(MatchState.Joined(STUB_ADDRESS_1), mm.state.value)
+    }
+
+    @Test
+    fun tryResumeActiveMatch_for_P2_with_chain_at_COMMITTING_lands_in_Joined_and_joinAsP2_resume_is_noop() = runBlocking {
+        // Symmetric to the P1 case but for the P2-side bug class.
+        // Emulator B (P2) resumed → state=Joined. If the user (or a
+        // deep-link tap) re-fires joinAsP2(address, isResume=true),
+        // the idempotent shortcut should fire — no extra chain call,
+        // no state change.
+        val secretKey = ByteArray(32) { 0x88.toByte() }
+        store.save(
+            MatchStore.Match(
+                address = STUB_ADDRESS_1,
+                role = Player.P2,
+                deadline = 1_900_000_000L,
+                secretKey = secretKey,
+            ),
+        )
+        val mm = TestableMatchManager(context, store).apply {
+            stubResumeSnapshot = makeSnapshot(phase = PHASE_COMMITTING)
+        }
+        mm.initSdk()
+        mm.tryResumeActiveMatch()
+        assertEquals(MatchState.Joined(STUB_ADDRESS_1), mm.state.value)
+
+        // Arm a failing chain stub — if the shortcut works, this
+        // never fires.
+        mm.setNextJoinResult(
+            JoinResult.Fail(IllegalStateException("should not be called — idempotent path")),
+        )
+
+        mm.joinAsP2(STUB_ADDRESS_1, isResume = true)
+
+        assertEquals(MatchState.Joined(STUB_ADDRESS_1), mm.state.value)
+        assertEquals(
+            "idempotent shortcut should skip executeJoinMatch entirely",
+            0,
+            mm.executeJoinMatchCalls,
+        )
+    }
+
+    @Test
+    fun tryResumeActiveMatch_for_P1_with_chain_at_WAITING_lands_in_Deployed_and_awaitOpponentJoin_polls() = runBlocking {
+        // Negative-control for the idempotency change. When chain is
+        // still in WAITING (opponent hasn't joined), state lands at
+        // Deployed and awaitOpponentJoin must take the real polling
+        // branch — not the no-op. We exercise the timeout path to
+        // keep the test bounded.
+        val secretKey = ByteArray(32) { 0x44.toByte() }
+        store.save(
+            MatchStore.Match(
+                address = STUB_ADDRESS_1,
+                role = Player.P1,
+                deadline = 1_900_000_000L,
+                secretKey = secretKey,
+            ),
+        )
+        val mm = TestableMatchManager(context, store).apply {
+            stubResumeSnapshot = makeSnapshot(phase = PHASE_WAITING)
+        }
+        mm.initSdk()
+
+        mm.tryResumeActiveMatch()
+        assertEquals(MatchState.Deployed(STUB_ADDRESS_1), mm.state.value)
+
+        // No snapshot ever published, so awaitContractState times
+        // out. We expect TimeoutCancellationException to bubble — the
+        // important assertion is that the precondition didn't reject
+        // the call before the wait even started.
+        var timedOut = false
+        try {
+            mm.awaitOpponentJoin(timeoutMs = 100L)
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            timedOut = true
+        }
+        assertTrue("Deployed state must reach the polling branch", timedOut)
+        // State stayed on Deployed — opponent never came, no transition.
+        assertEquals(MatchState.Deployed(STUB_ADDRESS_1), mm.state.value)
+    }
+
+    // ── awaitOpponentJoin idempotency ────────────────────────────────
+
+    @Test
+    fun awaitOpponentJoin_is_no_op_when_state_is_already_past_Deployed() = runBlocking {
+        // Live-bug scenario (2026-05-20): the app resumed P1 into
+        // state=Joined because the chain showed phase=COMMITTING (i.e.
+        // the opponent had already joined and we were past the WAITING
+        // phase). The user then tapped CHECK STATUS, which called
+        // awaitOpponentJoin — the old precondition `require(state is
+        // Deployed)` threw, the catch logged "Opponent not yet joined"
+        // and showed "Still waiting", trapping the user on the Create
+        // screen despite the match being live. Fix: treat all
+        // post-join states as idempotent successes.
+        val mm = TestableMatchManager(context, store)
+        mm.initSdk()
+        mm.setStateForTest(MatchState.Joined(STUB_ADDRESS_1))
+
+        // Returns without throwing and without changing state — the
+        // poller / next user action picks up from here.
+        mm.awaitOpponentJoin(timeoutMs = 50L)
+        assertEquals(MatchState.Joined(STUB_ADDRESS_1), mm.state.value)
+    }
+
+    @Test
+    fun awaitOpponentJoin_rejects_address_less_states() = runBlocking<Unit> {
+        // SdkReady has no match — calling awaitOpponentJoin here is a
+        // logic bug in the caller and should fail loudly, not silently
+        // succeed. Same for Idle / InitializingSdk.
+        val mm = TestableMatchManager(context, store)
+        mm.initSdk()
+        assertEquals(MatchState.SdkReady, mm.state.value)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { mm.awaitOpponentJoin(timeoutMs = 50L) }
+        }
+    }
+
+    // ── Resume orchestrator preconditions ────────────────────────────
+    //
+    // These pin the resumePlayAsP1 / resumePlayAsP2 entry rules. The
+    // 2026-05-20 live bug was the screenshot showing Unity asking for
+    // "Round 1 / 10" picks on a session where state was already
+    // P1Committed. The activity-side gate now routes those to
+    // resumePlayAsP1, and resumePlayAsP1 itself must reject the
+    // shape that would silently break the orchestrator
+    // (state==Joined, no picks rehydrated). These tests pin the
+    // contract so a future refactor can't reintroduce the gap.
+
+    @Test
+    fun resumePlayAsP1_rejects_state_Joined_caller_must_use_playAsP1() = runBlocking<Unit> {
+        // Post-audit (High #3): exception type changed from
+        // IllegalArgumentException to typed NeedFreshPicksException so
+        // the activity can branch instead of crash.
+        val mm = TestableMatchManager(context, store)
+        mm.initSdk()
+        mm.setStateForTest(MatchState.Joined(STUB_ADDRESS_1))
+
+        val ex = assertThrows(NeedFreshPicksException::class.java) {
+            runBlocking { mm.resumePlayAsP1() }
+        }
+        assertTrue(
+            "error should hint at the correct entry point: ${ex.message}",
+            ex.message?.contains("playAsP1") == true,
+        )
+    }
+
+    @Test
+    fun resumePlayAsP1_rejects_states_without_an_address() = runBlocking<Unit> {
+        val mm = TestableMatchManager(context, store)
+        mm.initSdk()
+        assertEquals(MatchState.SdkReady, mm.state.value)
+
+        // SdkReady has no address → NoActiveMatchException (also a
+        // typed swap from the old IllegalArgumentException).
+        assertThrows(NoActiveMatchException::class.java) {
+            runBlocking { mm.resumePlayAsP1() }
+        }
+    }
+
+    @Test
+    fun resumePlayAsP2_rejects_states_at_or_before_P1Committed() = runBlocking<Unit> {
+        // P2 still owes a commit in these states — the caller must
+        // route through playAsP2 with fresh picks from Unity, not
+        // resume. Each rejection is one variant. Audit High #3 — now
+        // typed as NeedFreshPicksException.
+        val mm = TestableMatchManager(context, store)
+        mm.initSdk()
+
+        listOf(
+            MatchState.Joined(STUB_ADDRESS_1),
+            MatchState.JoiningAsP2(STUB_ADDRESS_1),
+            MatchState.P1Committing(STUB_ADDRESS_1),
+            MatchState.P1Committed(STUB_ADDRESS_1),
+            MatchState.P2Committing(STUB_ADDRESS_1),
+        ).forEach { rejected ->
+            mm.setStateForTest(rejected)
+            val ex = assertThrows(NeedFreshPicksException::class.java) {
+                runBlocking { mm.resumePlayAsP2() }
+            }
+            assertTrue(
+                "rejection for $rejected should hint at playAsP2: ${ex.message}",
+                ex.message?.contains("playAsP2") == true,
+            )
+        }
+    }
+
+    @Test
+    fun resumePlayAsP2_rejects_states_without_an_address() = runBlocking<Unit> {
+        val mm = TestableMatchManager(context, store)
+        mm.initSdk()
+        assertEquals(MatchState.SdkReady, mm.state.value)
+
+        assertThrows(NoActiveMatchException::class.java) {
+            runBlocking { mm.resumePlayAsP2() }
+        }
+    }
+
+    // ── Audit fixes — state-classifier (`require`-rigidity bug class) ──
+
+    @Test
+    fun waitForP1Committed_is_no_op_when_chain_already_advanced_past_P1Committed() = runBlocking {
+        // Audit High #3: the previous `require(state is Joined)` threw
+        // on resume-into-P1Committed (and beyond). The state-classifier
+        // refactor replaces it with rank-based "already done" detection.
+        // Pin every post-P1Committed state as no-op.
+        val mm = TestableMatchManager(context, store)
+        mm.initSdk()
+
+        listOf(
+            MatchState.P1Committed(STUB_ADDRESS_1),
+            MatchState.BothCommitted(STUB_ADDRESS_1),
+            MatchState.P1Revealed(STUB_ADDRESS_1),
+            MatchState.SdRoundOpen(STUB_ADDRESS_1, round = 1),
+        ).forEach { advanced ->
+            mm.setStateForTest(advanced)
+            // Should not throw + should not change state — the chain
+            // already shows what we were going to wait for.
+            mm.waitForP1Committed(timeoutMs = 50L)
+            assertEquals(
+                "waitForP1Committed should leave state unchanged for $advanced",
+                advanced,
+                mm.state.value,
+            )
+        }
+    }
+
+    @Test
+    fun waitForP1Revealed_predicate_fires_on_drawn_regulation_atomic_reset() = runBlocking {
+        // Audit Critical #2: the bare `{ it.p1Revealed }` predicate
+        // hung every drawn regulation on the P2 side because the
+        // contract atomically clears `p1Revealed=false` + sets
+        // `sdRound=1` in the same tx. New predicate accepts any of
+        // p1Revealed / phase==COMPLETE / sdRound >= 1.
+        val mm = TestableMatchManager(context, store)
+        mm.initSdk()
+        mm.setStateForTest(MatchState.BothCommitted(STUB_ADDRESS_1))
+
+        // Post-draw snapshot: reveal flags are reset, sdRound=1.
+        // Pre-fix this snapshot would never satisfy `{ it.p1Revealed }`
+        // — predicate would loop until timeout. Post-fix: `sdRound >= 1`
+        // catches it. p1Shoots/p1Keeps persist past the reset.
+        val drawnIntoSdSnapshot = makeSnapshot(
+            phase = PHASE_SD_COMMITTING,
+            sdRound = 1,
+            p1Revealed = false,
+            p2Revealed = false,
+            p2ShootsFilled = true,
+        )
+        mm.publishContractStateForTest(drawnIntoSdSnapshot)
+
+        mm.waitForP1Revealed(timeoutMs = 5_000)
+
+        assertEquals(MatchState.P1Revealed(STUB_ADDRESS_1), mm.state.value)
+    }
+
+    @Test
+    fun tryResumeActiveMatch_with_multiple_stored_matches_defers_to_picker() = runBlocking {
+        // Audit High #5: when store has more than one entry, the
+        // arbitrary-first-found heuristic was bouncing the user into
+        // an unintended match. Now `tryResumeActiveMatch` returns
+        // null so the activity can route to the Resume UI.
+        val secretKey = ByteArray(32) { 0x33.toByte() }
+        store.save(MatchStore.Match(
+            address = STUB_ADDRESS_1,
+            role = Player.P1,
+            deadline = 1_900_000_000L,
+            secretKey = secretKey,
+        ))
+        store.save(MatchStore.Match(
+            address = STUB_ADDRESS_2,
+            role = Player.P2,
+            deadline = 1_900_000_000L,
+            secretKey = secretKey,
+        ))
+        val mm = TestableMatchManager(context, store)
+        mm.initSdk()
+
+        val resumed = mm.tryResumeActiveMatch()
+
+        assertNull("multi-match store should defer to Resume UI", resumed)
+        assertEquals(
+            "state stays SdkReady when resume defers",
+            MatchState.SdkReady,
+            mm.state.value,
+        )
     }
 
     // ── waitForP2Revealed / waitForP2SdRevealed predicate tests ─────────
@@ -400,6 +811,9 @@ class MatchManagerStateMachineTest {
         // Mirror of the (private) constants in MatchManager. Kept in
         // sync by hand — if they drift, the predicate tests fail
         // explicitly rather than silently asserting the wrong phase.
+        private const val PHASE_WAITING = 0
+        private const val PHASE_COMMITTING = 1
+        private const val PHASE_REVEALING = 2
         private const val PHASE_SD_COMMITTING = 3
         private const val PHASE_COMPLETE = 5
     }
@@ -440,6 +854,25 @@ private class TestableMatchManager(
     private var nextDeployAddress: String = deployAddress
     private var nextJoinResult: JoinResult = JoinResult.Success
 
+    /**
+     * Stub chain snapshot returned by [readResumeSnapshot]. Lets a test
+     * drive the real [tryResumeActiveMatch] code path end-to-end —
+     * including the phase → MatchState mapping — without a live indexer.
+     * `null` (the default) mimics "indexer returned no snapshot", which
+     * sends the resume into its Deployed fallback.
+     */
+    var stubResumeSnapshot: ContractStateSnapshot? = null
+
+    /**
+     * Count of how many times [executeJoinMatch] was actually invoked.
+     * Lets a test prove the idempotent-shortcut path in
+     * [MatchManager.joinAsP2] avoided the chain attempt entirely
+     * (instead of catching a thrown error and recovering, which would
+     * still leave us in Joined but would touch the chain).
+     */
+    var executeJoinMatchCalls: Int = 0
+        private set
+
     fun setNextDeployAddress(address: String) {
         nextDeployAddress = address
     }
@@ -468,6 +901,7 @@ private class TestableMatchManager(
         address: String,
         deadline: BigInteger,
     ) {
+        executeJoinMatchCalls++
         when (val r = nextJoinResult) {
             is JoinResult.Success -> Unit
             is JoinResult.Fail -> throw r.error
@@ -484,4 +918,12 @@ private class TestableMatchManager(
     override fun startStatePoller(address: String) {
         // No-op.
     }
+
+    /**
+     * Returns the test-controlled snapshot so [tryResumeActiveMatch]
+     * can be driven end-to-end without a live indexer. Honours the
+     * "null means no snapshot" contract of the production method.
+     */
+    override suspend fun readResumeSnapshot(address: String): ContractStateSnapshot? =
+        stubResumeSnapshot
 }

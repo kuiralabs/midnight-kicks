@@ -68,6 +68,14 @@ class KicksActivity : FragmentActivity() {
     // True if [store] has any active matches — surfaces the
     // RESUME MATCH affordance on the menu.
     private val hasActiveSession = mutableStateOf(false)
+
+    /**
+     * Non-null while the abandon-match confirmation dialog is up
+     * for a specific [MatchStore.Match] row. The dialog is rendered
+     * by the top-level Compose tree — when the user confirms, we
+     * delete from [store] and refresh the Resume list.
+     */
+    private val pendingAbandon = mutableStateOf<MatchStore.Match?>(null)
     private var matchManager: MatchManager? = null
     /**
      * Unified match store, shared with the [MatchManager] this Activity
@@ -151,8 +159,27 @@ class KicksActivity : FragmentActivity() {
                     onBack = { screen.value = KicksScreen.Menu },
                     onContinue = {
                         currentRole = s.role
-                        Log.i(TAG, "CONTINUE: role=${s.role} address=${s.address} → launching Unity")
-                        launchUnityChoicePhase()
+                        // Gate on state — resuming a match where picks
+                        // are already committed must NOT re-launch the
+                        // Unity choice phase. The resume orchestrator
+                        // drives the remaining steps from the
+                        // rehydrated picks.
+                        val managerState = matchManager?.state?.value
+                        val needsFreshPicks = when {
+                            managerState is MatchState.Joined -> true
+                            // P1Committed + P2 role → P2 still owes a
+                            // commit. P1Committed + P1 role → P1 done,
+                            // resume the rest.
+                            managerState is MatchState.P1Committed && s.role == Player.P2 -> true
+                            else -> false
+                        }
+                        if (needsFreshPicks) {
+                            Log.i(TAG, "CONTINUE: role=${s.role} state=$managerState → launching Unity for picks")
+                            launchUnityChoicePhase()
+                        } else {
+                            Log.i(TAG, "CONTINUE: role=${s.role} state=$managerState → resume orchestrator")
+                            resumeOrchestrator(s.role)
+                        }
                     },
                 )
                 KicksScreen.Resume -> ResumeScreen(
@@ -163,6 +190,29 @@ class KicksActivity : FragmentActivity() {
                     matches = store.loadAll(),
                     onBack = { screen.value = KicksScreen.Menu },
                     onMatchSelected = ::resumeIntoMatch,
+                    onAbandon = { pendingAbandon.value = it },
+                )
+            }
+            // Abandon-match confirmation dialog. Sits outside the
+            // screen `when` so it overlays whichever screen is up.
+            // Confirming deletes the local witness key — the match
+            // address on chain is unaffected, but this device can no
+            // longer act on it.
+            pendingAbandon.value?.let { match ->
+                AbandonMatchDialog(
+                    match = match,
+                    onConfirm = {
+                        Log.i(TAG, "Abandoning match ${match.address.take(16)}… (role=${match.role})")
+                        store.delete(match.address)
+                        hasActiveSession.value = store.loadAll().isNotEmpty()
+                        pendingAbandon.value = null
+                        // If we were on Resume and this was the last
+                        // match, fall back to the Menu.
+                        if (store.loadAll().isEmpty()) {
+                            screen.value = KicksScreen.Menu
+                        }
+                    },
+                    onCancel = { pendingAbandon.value = null },
                 )
             }
         }
@@ -233,18 +283,23 @@ class KicksActivity : FragmentActivity() {
         lifecycleScope.launch {
             try {
                 val manager = matchManager ?: return@launch
-                // After app kill + resume, state should land at Deployed
-                // (or further) for the active match. If we somehow end up
-                // here with an earlier state, the resume path missed
-                // something — surface a clear hint instead of letting
-                // awaitOpponentJoin's precondition assertion blow up.
-                if (manager.state.value !is MatchState.Deployed &&
-                    manager.state.value !is MatchState.Joined
-                ) {
+                // After app kill + resume, state should land somewhere
+                // with an address attached — Deployed (still waiting),
+                // Joined (opponent in), or any later phase if the user
+                // already committed / revealed before the kill. Only
+                // address-less states (Idle / SdkReady / InitializingSdk)
+                // mean we have nothing to check — typically because the
+                // resume already concluded the prior match was over
+                // (see the "your previous match finished" banner in
+                // ensureSdkReady — that already explained it).
+                if (manager.state.value.address == null) {
                     creatingStatus.value =
-                        "No active match in memory — go back and create one."
+                        "No match in progress — tap CREATE MATCH on the menu to start a new one."
                     return@launch
                 }
+                // awaitOpponentJoin is idempotent — on any post-join
+                // state it returns immediately (the opponent's already
+                // in), so we land on MatchReady without retrying.
                 manager.awaitOpponentJoin(timeoutMs = CHECK_STATUS_TIMEOUT_MS)
                 Log.i(TAG, "Opponent joined: $address")
                 screen.value = KicksScreen.MatchReady(address, Player.P1)
@@ -296,13 +351,54 @@ class KicksActivity : FragmentActivity() {
      */
     private fun resumeIntoMatch(match: MatchStore.Match) {
         Log.i(TAG, "Resuming into match: address=${match.address.take(20)}… role=${match.role}")
-        screen.value = when (match.role) {
-            Player.P1 -> KicksScreen.Creating(address = match.address)
-            Player.P2 -> KicksScreen.Joining(prefilledAddress = match.address)
+        ensureSdkReady {
+            lifecycleScope.launch {
+                val manager = matchManager ?: return@launch
+                // Advance the state machine into the picked match.
+                // Without this the SdkReady → … transition never
+                // fires; CHECK STATUS subsequently sees
+                // state.value.address == null and bails with "no
+                // match in progress".
+                val resumed = try {
+                    manager.resumeSpecificMatch(match.address)
+                } catch (e: Exception) {
+                    Log.e(TAG, "resumeSpecificMatch failed", e)
+                    statusMessage.value = "Resume failed: ${e.message}"
+                    return@launch
+                }
+                if (resumed == null) {
+                    // Match either disappeared from the store or
+                    // was already COMPLETE on chain — surface the
+                    // priorMatchFinished banner if available.
+                    manager.consumePriorMatchFinished()?.let { finished ->
+                        val (you, them) = when (finished.role) {
+                            Player.P1 -> finished.p1Score to finished.p2Score
+                            Player.P2 -> finished.p2Score to finished.p1Score
+                        }
+                        statusMessage.value = when (finished.outcome) {
+                            PriorMatchFinished.Outcome.Win ->
+                                "Match already finished — YOU WIN $you – $them"
+                            PriorMatchFinished.Outcome.Loss ->
+                                "Match already finished — you lost $you – $them"
+                            PriorMatchFinished.Outcome.Draw ->
+                                "Match already finished — drawn $you – $them"
+                        }
+                    }
+                    hasActiveSession.value = store.loadAll().isNotEmpty()
+                    screen.value = KicksScreen.Menu
+                    return@launch
+                }
+                // Route based on actual chain-derived state, not
+                // just the stored role — a P1 whose match is already
+                // in SD should land on MatchReady (CONTINUE → resume
+                // orchestrator), not Creating (CHECK STATUS).
+                screen.value = chooseResumeScreen(
+                    address = resumed,
+                    role = match.role,
+                    state = manager.state.value,
+                )
+            }
         }
-        // Make sure the SDK is bootstrapped so CHECK STATUS / JOIN can
-        // make chain calls without an additional cold-start delay.
-        ensureSdkReady { }
     }
 
     /**
@@ -342,6 +438,18 @@ class KicksActivity : FragmentActivity() {
                     // route the UI.
                     hasActiveSession.value = true
                     screen.value = KicksScreen.MatchReady(address, Player.P2)
+                } catch (e: MatchAlreadyResolvedException) {
+                    // Match is over — show the final score instead of
+                    // the misleading "another player already joined"
+                    // copy. Also clean up any stale session affordance.
+                    Log.w(TAG, "joinAsP2 refused: match already finished — ${e.p1Score}-${e.p2Score}")
+                    hasActiveSession.value = store.loadAll().isNotEmpty()
+                    statusMessage.value =
+                        "Match is over. Final score: P1 ${e.p1Score} – ${e.p2Score} P2."
+                    screen.value = KicksScreen.Joining(
+                        prefilledAddress = address,
+                        inFlight = false,
+                    )
                 } catch (e: MatchAlreadyJoinedException) {
                     // Wrong actor — contract is past WAITING and we
                     // have no local session for this match. Don't fake
@@ -418,14 +526,48 @@ class KicksActivity : FragmentActivity() {
                     // the state machine into the right MatchState) when
                     // there was something to resume; null on a fresh launch.
                     val resumedAddress = manager.tryResumeActiveMatch()
-                    if (resumedAddress != null) {
-                        // Route the UI into the create-match screen so the
-                        // user lands back on their pending match instead of
-                        // the menu. CreateMatchScreen renders the
-                        // address-aware actions for whichever phase the
-                        // state machine ended up in.
+                    // ensureSdkReady is called lazily by every flow
+                    // (CREATE, JOIN, deep link, RESUME-picker tap), not
+                    // just at app launch. If the user has already
+                    // initiated a different action (screen past Menu),
+                    // do NOT clobber it with auto-resume routing.
+                    val screenIsMenu = screen.value is KicksScreen.Menu
+                    if (resumedAddress != null && screenIsMenu) {
                         Log.i(TAG, "Resumed active match: $resumedAddress")
-                        screen.value = KicksScreen.Creating(resumedAddress)
+                        screen.value = chooseResumeScreen(
+                            address = resumedAddress,
+                            role = store.load(resumedAddress)?.role,
+                            state = manager.state.value,
+                        )
+                    } else if (resumedAddress == null && store.loadAll().size > 1 && screenIsMenu) {
+                        // tryResumeActiveMatch returns null for multi-match
+                        // stores — defer to the Resume picker so the
+                        // user chooses explicitly instead of bouncing
+                        // into an arbitrary first-found.
+                        Log.i(TAG, "Multiple stored matches — routing to Resume picker")
+                        statusMessage.value = "Pick a match to resume."
+                        screen.value = KicksScreen.Resume
+                    } else if (!screenIsMenu) {
+                        Log.i(TAG, "Bootstrap auto-resume skipped — user is on ${screen.value::class.simpleName}")
+                    }
+                    // Surface a "your prior match finished" banner when
+                    // the resume bailed because chain is COMPLETE. The
+                    // manager populates [priorMatchFinished]; we
+                    // consume it once and write a friendly status line.
+                    manager.consumePriorMatchFinished()?.let { finished ->
+                        val (you, them) = when (finished.role) {
+                            Player.P1 -> finished.p1Score to finished.p2Score
+                            Player.P2 -> finished.p2Score to finished.p1Score
+                        }
+                        statusMessage.value = when (finished.outcome) {
+                            PriorMatchFinished.Outcome.Win ->
+                                "Your previous match finished — YOU WIN $you – $them"
+                            PriorMatchFinished.Outcome.Loss ->
+                                "Your previous match finished — you lost $you – $them"
+                            PriorMatchFinished.Outcome.Draw ->
+                                "Your previous match finished — drawn $you – $them"
+                        }
+                        Log.i(TAG, "Prior match finished banner: ${statusMessage.value}")
                     }
                     matchManager = manager
                 }
@@ -692,66 +834,141 @@ class KicksActivity : FragmentActivity() {
                     Player.P1 -> manager.playAsP1(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
                     Player.P2 -> manager.playAsP2(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
                 }
-
-                // Decisive endings (regulation 5-3 or SD round N decisive)
-                // publish a replay overlay but never enter `gatherSdPicksFromUi`
-                // to wait it out. Gate the winner UI on dismissal here so
-                // the user sees the kicks before the score line lands.
-                if (MatchHud.replay.value != null) {
-                    Log.i(TAG, "handleChoicesLocked: waiting for final replay dismissal before winner UI")
-                }
-                MatchHud.replay.first { it == null }
-
-                val (p1Score, p2Score) = result.scores()
-                val winner = when {
-                    p1Score > p2Score -> "P1"
-                    p2Score > p1Score -> "P2"
-                    else -> null
-                }
-
-                Log.i(TAG, "Match result: P1=$p1Score P2=$p2Score winner=$winner role=$currentRole")
-                statusMessage.value = when (currentRole) {
-                    null -> "You $p1Score - $p2Score AI"
-                    Player.P1 -> "You $p1Score - $p2Score opponent"
-                    Player.P2 -> "Opponent $p1Score - $p2Score You"
-                }
-
-                // Opponent's regulation shoots — whichever side this
-                // device is, the *other* player's picks form the line we
-                // show. In Phase C we'll show shoots + keeps; for now
-                // the shoots-only summary mirrors the legacy display.
-                val opponentShoots = if (currentRole == Player.P2) {
-                    result.p1Shoots
-                } else {
-                    result.p2Shoots
-                }
-                val opponentLabels = opponentShoots.map(::directionLabel)
-                val youLabel = if (currentRole == Player.P2) "P2 (you)" else "You"
-                val themLabel = if (currentRole == null) "AI" else "Opponent"
-                lastChoices.value =
-                    "$youLabel: ${labels.joinToString(" ")}  $themLabel: ${opponentLabels.joinToString(" ")}"
-
-                // Match is resolved on chain — MatchManager already
-                // deleted this specific match from [store] when its
-                // setState fired MatchState.Resolved. Refresh the
-                // affordance flag in case it was the last one.
-                if (currentRole != null) {
-                    hasActiveSession.value = store.loadAll().isNotEmpty()
-                }
-
-                // Replay payload — for PvP-as-P2, swap rounds so the
-                // replay always renders from P1's perspective (the
-                // contract treats P1 as the shooter sequence; reversing
-                // would confuse the cinematic).
-                UnityBridge.sendReplay(
-                    rounds = result.toRoundResults(),
-                    p1Score = p1Score,
-                    p2Score = p2Score,
-                    winner = winner,
-                )
+                handleMatchResult(result, deviceLabels = labels)
             } catch (e: Exception) {
                 Log.e(TAG, "Match failed", e)
                 statusMessage.value = "Match failed: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * Post-orchestrator result rendering. Extracted from
+     * [handleChoicesLocked] so the resume entry point
+     * ([resumeOrchestrator]) can run the same closing UX (replay
+     * dismissal wait → status update → opponent-picks line →
+     * sendReplay) without duplicating the block.
+     *
+     * @param result        the orchestrator's final [MatchResult].
+     * @param deviceLabels  direction labels for the picks THIS device
+     *   committed. Live path passes the freshly-locked Unity picks;
+     *   resume path passes the rehydrated picks pulled out of
+     *   [result] (since the user didn't re-pick).
+     */
+    private suspend fun handleMatchResult(result: MatchResult, deviceLabels: List<String>) {
+        // Decisive endings (regulation 5-3 or SD round N decisive)
+        // publish a replay overlay but never enter `gatherSdPicksFromUi`
+        // to wait it out. Gate the winner UI on dismissal here so
+        // the user sees the kicks before the score line lands.
+        if (MatchHud.replay.value != null) {
+            Log.i(TAG, "handleMatchResult: waiting for final replay dismissal before winner UI")
+        }
+        MatchHud.replay.first { it == null }
+
+        val (p1Score, p2Score) = result.scores()
+        val winner = when {
+            p1Score > p2Score -> "P1"
+            p2Score > p1Score -> "P2"
+            else -> null
+        }
+
+        Log.i(TAG, "Match result: P1=$p1Score P2=$p2Score winner=$winner role=$currentRole")
+        statusMessage.value = when (currentRole) {
+            null -> "You $p1Score - $p2Score AI"
+            Player.P1 -> "You $p1Score - $p2Score opponent"
+            Player.P2 -> "Opponent $p1Score - $p2Score You"
+        }
+
+        // Opponent's regulation shoots — whichever side this device is,
+        // the *other* player's picks form the line we show.
+        val opponentShoots = if (currentRole == Player.P2) result.p1Shoots else result.p2Shoots
+        val opponentLabels = opponentShoots.map(::directionLabel)
+        val youLabel = if (currentRole == Player.P2) "P2 (you)" else "You"
+        val themLabel = if (currentRole == null) "AI" else "Opponent"
+        lastChoices.value =
+            "$youLabel: ${deviceLabels.joinToString(" ")}  $themLabel: ${opponentLabels.joinToString(" ")}"
+
+        // Match is resolved on chain — MatchManager already deleted this
+        // specific match from [store] when its setState fired
+        // MatchState.Resolved. Refresh the affordance flag in case it
+        // was the last one.
+        if (currentRole != null) {
+            hasActiveSession.value = store.loadAll().isNotEmpty()
+        }
+
+        UnityBridge.sendReplay(
+            rounds = result.toRoundResults(),
+            p1Score = p1Score,
+            p2Score = p2Score,
+            winner = winner,
+        )
+    }
+
+    /**
+     * Resume entry point — fired by [MatchReadyScreen]'s CONTINUE button
+     * when [MatchManager.state] is already past the regulation commit
+     * (so re-launching Unity for picks would be wrong — picks are on
+     * chain and rehydrated from [MatchStore]).
+     *
+     * Drives whichever steps haven't been done yet via
+     * [MatchManager.resumePlayAsP1] / [MatchManager.resumePlayAsP2].
+     * Unity is still launched so the user has a place to see the
+     * replay overlay land and (for any future SD rounds) provide
+     * input via [gatherSdPicksFromUi] — but **no `choicePhase`
+     * message is sent**, since the regulation picker would re-ask
+     * for picks already committed.
+     */
+    private fun resumeOrchestrator(role: Player) {
+        ensureSdkReady {
+            statusMessage.value = "Resuming match…"
+            val intent = Intent(this@KicksActivity, KicksMatchActivity::class.java)
+            startActivity(intent)
+
+            lifecycleScope.launch {
+                // The role array must be set BEFORE any SD pick comes
+                // back — handleSdChoicesLocked reads it to bucket the
+                // returned picks. Same value the live path computes.
+                currentChoiceRoles = rolesForCurrentDevice()
+
+                // Wait for Unity's IL2CPP/GameController to initialize
+                // before the orchestrator fires UnityBridge messages —
+                // otherwise the first sendChoicePhase races Unity's
+                // boot and gets dropped, leaving the orchestrator
+                // hanging on a picker Unity never shows.
+                // [launchUnityChoicePhase] pays the same cost for the
+                // fresh-match path.
+                delay(UNITY_BOOT_DELAY_MS)
+
+                val manager = matchManager ?: run {
+                    Log.e(TAG, "resumeOrchestrator: manager not ready")
+                    statusMessage.value = "Not ready yet — try again"
+                    return@launch
+                }
+                try {
+                    val result = when (role) {
+                        Player.P1 -> manager.resumePlayAsP1(getSdPicks = ::gatherSdPicksFromUi)
+                        Player.P2 -> manager.resumePlayAsP2(getSdPicks = ::gatherSdPicksFromUi)
+                    }
+                    // Device's own pick labels for the bottom-of-screen
+                    // recap — read from the rehydrated picks in result.
+                    val deviceShoots = if (role == Player.P2) result.p2Shoots else result.p1Shoots
+                    handleMatchResult(result, deviceLabels = deviceShoots.map(::directionLabel))
+                } catch (e: NeedFreshPicksException) {
+                    // State machine isn't past the role's commit yet —
+                    // the user needs to pick fresh picks via Unity. The
+                    // CONTINUE gate normally routes these via
+                    // [launchUnityChoicePhase] directly, but a race
+                    // between resume and chain-state read can land us
+                    // here. Re-route.
+                    Log.i(TAG, "resumeOrchestrator: ${e.message} — routing to fresh-picks flow")
+                    launchUnityChoicePhase()
+                } catch (e: NoActiveMatchException) {
+                    Log.w(TAG, "resumeOrchestrator: no active match — ${e.message}")
+                    statusMessage.value = "No match to resume — tap CREATE on the menu."
+                } catch (e: Exception) {
+                    Log.e(TAG, "Resume orchestrator failed", e)
+                    statusMessage.value = "Resume failed: ${e.message}"
+                }
             }
         }
     }

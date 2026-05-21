@@ -15,6 +15,33 @@ package com.midnight.kicks
  * resume after process death or render stage-specific UX without
  * cross-referencing the [MatchManager].
  */
+/**
+ * Named rank constants matching [MatchState.protocolRank] for the
+ * specific transition points wait functions test against. Use
+ * `state.protocolRank >= PhaseRank.X` for idempotent skips. SD
+ * ranks need to be combined with the round number — see KDoc on
+ * [MatchState.protocolRank].
+ */
+object PhaseRank {
+    const val SDK_READY = 0
+    const val DEPLOYED = 10
+    const val JOINED = 20
+    const val P1_COMMITTED = 30
+    const val BOTH_COMMITTED = 40
+    const val P1_REVEALED = 50
+    // SD ranks are 100 + step + round*10. The step offsets:
+    const val SD_ROUND_OPEN_STEP = 0
+    const val SD_P1_COMMITTED_STEP = 2
+    const val SD_BOTH_COMMITTED_STEP = 4
+    const val SD_P1_REVEALED_STEP = 6
+    /** P1's SdCommitted rank for [round]: 102, 112, 122, … */
+    fun sdP1CommittedAt(round: Int): Int = 100 + SD_P1_COMMITTED_STEP + round * 10
+    /** BothSdCommitted rank for [round]: 104, 114, 124, … */
+    fun sdBothCommittedAt(round: Int): Int = 100 + SD_BOTH_COMMITTED_STEP + round * 10
+    /** P1SdRevealed rank for [round]: 106, 116, 126, … */
+    fun sdP1RevealedAt(round: Int): Int = 100 + SD_P1_REVEALED_STEP + round * 10
+}
+
 sealed class MatchState {
     /** Contract address once known; null only in [Idle], [InitializingSdk], [SdkReady]. */
     open val address: String? = null
@@ -68,31 +95,110 @@ sealed class MatchState {
         override val address: String? get() = previous.address
     }
 
-    /** Human-friendly label, used as the [MatchManager] progress string. */
-    val label: String get() = when (this) {
-        is Idle               -> "Idle"
-        is InitializingSdk    -> "Initializing SDK…"
-        is SdkReady           -> "SDK ready"
-        is Deploying          -> "Deploying match…"
-        is Deployed           -> "Match deployed"
-        is JoiningAsP2        -> "Opponent joining…"
-        is Joined             -> "Both players in"
-        is P1Committing       -> "Committing your picks…"
-        is P1Committed        -> "Your picks committed"
-        is P2Committing       -> "Opponent committing…"
-        is BothCommitted      -> "Both players committed"
-        is P1Revealing        -> "Revealing your picks…"
-        is P1Revealed         -> "Your picks revealed"
-        is P2Revealing        -> "Opponent revealing…"
-        is SdRoundOpen        -> "Sudden death round $round"
-        is P1SdCommitting     -> "Committing SD round $round…"
-        is P1SdCommitted      -> "Your SD pick committed (round $round)"
-        is P2SdCommitting     -> "Opponent committing SD round $round…"
-        is BothSdCommitted    -> "Both committed (SD round $round)"
-        is P1SdRevealing      -> "Revealing SD round $round…"
-        is P1SdRevealed       -> "Your SD pick revealed (round $round)"
-        is P2SdRevealing      -> "Opponent revealing SD round $round…"
-        is Resolved           -> "Match complete!"
-        is Failed             -> "Failed: ${error.message ?: error.javaClass.simpleName}"
+    /**
+     * P1-perspective label (default). The state names are P1-centric
+     * (`P1Committed` = P1 has committed, P2 hasn't), and so are these
+     * labels — they're correct for P1 and for PvAI (where the human
+     * is P1). For PvP-as-P2, use [labelFor] which flips the wording.
+     */
+    val label: String get() = labelFor(role = null)
+
+    /**
+     * Role-aware label. The protocol's state machine names states
+     * from P1's perspective (`P1Committed`, `P1Revealing`, …); for
+     * PvP-as-P2, the same chain state reads inverted (when chain shows
+     * "P1 committed, P2 hasn't", P2's user is the one with work).
+     */
+    /**
+     * Linear ordering along the protocol progression. Use for
+     * idempotent "is the chain already at or past this step?" checks —
+     * the chain can validly be at any later state by the time a wait
+     * runs (resume mid-match, opponent acted between local writes).
+     *
+     * SD rounds use `round * 10` offset so round-2 sub-states all
+     * rank above round-1's. [Failed] delegates to its previous state.
+     * [Resolved] is `Int.MAX_VALUE`; pre-match states are negative so
+     * `rank >= JOINED` cleanly excludes pre-match.
+     */
+    val protocolRank: Int get() = when (this) {
+        is Idle -> -20
+        is InitializingSdk -> -10
+        is SdkReady -> 0
+        is Deploying -> 5
+        is Deployed -> 10
+        is JoiningAsP2 -> 15
+        is Joined -> 20
+        is P1Committing -> 25
+        is P1Committed -> 30
+        is P2Committing -> 35
+        is BothCommitted -> 40
+        is P1Revealing -> 45
+        is P1Revealed -> 50
+        is P2Revealing -> 55
+        is SdRoundOpen -> 100 + round * 10
+        is P1SdCommitting -> 101 + round * 10
+        is P1SdCommitted -> 102 + round * 10
+        is P2SdCommitting -> 103 + round * 10
+        is BothSdCommitted -> 104 + round * 10
+        is P1SdRevealing -> 105 + round * 10
+        is P1SdRevealed -> 106 + round * 10
+        is P2SdRevealing -> 107 + round * 10
+        is Resolved -> Int.MAX_VALUE
+        is Failed -> previous.protocolRank
+    }
+
+    /**
+     * The current SD round number if this state carries one,
+     * `null` otherwise. Used by SD wait predicates that need to
+     * scope their predicate to a specific round (e.g.
+     * `it.p1Committed && it.sdRound == round`).
+     */
+    val sdRound: Int? get() = when (this) {
+        is SdRoundOpen -> round
+        is P1SdCommitting -> round
+        is P1SdCommitted -> round
+        is P2SdCommitting -> round
+        is BothSdCommitted -> round
+        is P1SdRevealing -> round
+        is P1SdRevealed -> round
+        is P2SdRevealing -> round
+        is Failed -> previous.sdRound
+        else -> null
+    }
+
+    fun labelFor(role: Player?): String {
+        // PvAI / unknown — fall back to P1-perspective text (the
+        // human is always P1 in PvAI).
+        val isP2 = role == Player.P2
+        return when (this) {
+            is Idle               -> "Idle"
+            is InitializingSdk    -> "Initializing SDK…"
+            is SdkReady           -> "SDK ready"
+            is Deploying          -> "Deploying match…"
+            is Deployed           -> "Match deployed"
+            // P2 device sees "Joining…"; P1 device sees the joining
+            // tx coming from the opponent.
+            is JoiningAsP2        -> if (isP2) "Joining match…" else "Opponent joining…"
+            is Joined             -> "Both players in"
+            // P1-named commit phase from P2's view = "opponent committing".
+            is P1Committing       -> if (isP2) "Opponent committing…" else "Committing your picks…"
+            // P2 sees this when P1 landed their commit and P2 still owes one.
+            is P1Committed        -> if (isP2) "Opponent committed — your turn to pick" else "Your picks committed"
+            is P2Committing       -> if (isP2) "Committing your picks…" else "Opponent committing…"
+            is BothCommitted      -> "Both players committed"
+            is P1Revealing        -> if (isP2) "Opponent revealing…" else "Revealing your picks…"
+            is P1Revealed         -> if (isP2) "Opponent revealed — your turn to reveal" else "Your picks revealed"
+            is P2Revealing        -> if (isP2) "Revealing your picks…" else "Opponent revealing…"
+            is SdRoundOpen        -> "Sudden death round $round"
+            is P1SdCommitting     -> if (isP2) "Opponent committing SD round $round…" else "Committing SD round $round…"
+            is P1SdCommitted      -> if (isP2) "Opponent committed SD — your turn (round $round)" else "Your SD pick committed (round $round)"
+            is P2SdCommitting     -> if (isP2) "Committing SD round $round…" else "Opponent committing SD round $round…"
+            is BothSdCommitted    -> "Both committed (SD round $round)"
+            is P1SdRevealing      -> if (isP2) "Opponent revealing SD round $round…" else "Revealing SD round $round…"
+            is P1SdRevealed       -> if (isP2) "Opponent revealed SD — your turn (round $round)" else "Your SD pick revealed (round $round)"
+            is P2SdRevealing      -> if (isP2) "Revealing SD round $round…" else "Opponent revealing SD round $round…"
+            is Resolved           -> "Match complete!"
+            is Failed             -> "Failed: ${error.message ?: error.javaClass.simpleName}"
+        }
     }
 }

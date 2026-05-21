@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +65,14 @@ fun ResumeScreen(
     matches: List<MatchStore.Match>,
     onBack: () -> Unit,
     onMatchSelected: (MatchStore.Match) -> Unit,
+    /**
+     * Invoked when the user taps the trailing X on a row. Callers
+     * should confirm with the user before [MatchStore.delete] — this
+     * is destructive (the local witness key is wiped, so any further
+     * action on the match address from this device will fail with
+     * "Not a player in this match").
+     */
+    onAbandon: (MatchStore.Match) -> Unit = {},
 ) {
     Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A0A)) {
         Column(
@@ -114,7 +124,11 @@ fun ResumeScreen(
                 // many concurrent PvP games) and verticalScroll keeps
                 // the implementation simpler.
                 matches.forEach { match ->
-                    MatchRow(match = match, onClick = { onMatchSelected(match) })
+                    MatchRow(
+                        match = match,
+                        onClick = { onMatchSelected(match) },
+                        onAbandon = { onAbandon(match) },
+                    )
                 }
             }
         }
@@ -131,6 +145,7 @@ fun ResumeScreen(
 private fun MatchRow(
     match: MatchStore.Match,
     onClick: () -> Unit,
+    onAbandon: () -> Unit,
 ) {
     Box(
         modifier = Modifier
@@ -139,6 +154,8 @@ private fun MatchRow(
                 color = Color.White.copy(alpha = 0.06f),
                 shape = RoundedCornerShape(12.dp),
             )
+            // Note: the abandon X is a child Box with its own clickable;
+            // it doesn't propagate to this outer onClick. Tap → resume.
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 16.dp),
     ) {
@@ -193,6 +210,29 @@ private fun MatchRow(
 
             Spacer(modifier = Modifier.width(8.dp))
 
+            // Trailing abandon button. Fires [onAbandon] up the tree;
+            // the activity confirms via dialog before deleting from
+            // MatchStore. Small "✕" target so a fat-finger tap on the
+            // row doesn't accidentally trigger abandon.
+            Box(
+                modifier = Modifier
+                    .background(
+                        color = Color.White.copy(alpha = 0.06f),
+                        shape = RoundedCornerShape(6.dp),
+                    )
+                    .clickable(onClick = onAbandon)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    "✕",
+                    color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Light,
+                )
+            }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
             Text(
                 "›",
                 color = Color.White.copy(alpha = 0.4f),
@@ -215,6 +255,40 @@ private fun MatchRow(
  * `internal` so [ResumeScreenTest] can pin the format strings without
  * hand-rolling the seconds-to-label math.
  */
+/**
+ * Confirm-before-deleting dialog for the abandon-match flow. The
+ * local secret key for the match is wiped from [MatchStore] — the
+ * chain contract is untouched, but this device can no longer commit /
+ * reveal on it.
+ */
+@Composable
+fun AbandonMatchDialog(
+    match: MatchStore.Match,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = {
+            Text("Abandon match?")
+        },
+        text = {
+            Text(
+                "This wipes your local key for match ${match.address.shortAddress()} " +
+                    "(role: ${match.role.name}). The contract on chain stays put, but " +
+                    "this device can no longer commit or reveal on it. " +
+                    "Use only when you're sure the match is stuck or you no longer want to play.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("ABANDON") }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("CANCEL") }
+        },
+    )
+}
+
 internal fun deadlineLabel(deadlineSeconds: Long): String {
     val nowSeconds = System.currentTimeMillis() / 1000
     val deltaSeconds = deadlineSeconds - nowSeconds

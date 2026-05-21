@@ -14,8 +14,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -101,6 +106,14 @@ open class MatchManager(
     private var pollerJob: Job? = null
 
     /**
+     * Reference count for [awaitContractState] callers. The poller
+     * stays alive while any wait is outstanding and tears down only
+     * when the last wait finishes — refcounting is TOCTOU-safe against
+     * concurrent waits where a presence check would race.
+     */
+    private val pollerRefCount = AtomicInteger(0)
+
+    /**
      * Single reused SecureRandom — instantiating per call may re-seed from
      * /dev/urandom and burn entropy / CPU on the hot path.
      */
@@ -151,6 +164,63 @@ open class MatchManager(
 
     // Optional SD pairings captured during the match, for the replay UI.
     private val sdRoundsForReplay = mutableListOf<SdRoundData>()
+
+    /**
+     * One-shot notification published by [tryResumeActiveMatch] when
+     * the persisted match's chain state is [PHASE_COMPLETE]. The
+     * activity reads + clears it on bootstrap to render a friendly
+     * "your previous match finished" banner instead of silently
+     * deleting the store entry.
+     *
+     * `null` means no notification pending. The activity should call
+     * [consumePriorMatchFinished] (don't read directly) so the
+     * one-shot is cleared after delivery.
+     */
+    private var priorMatchFinished: PriorMatchFinished? = null
+
+    /**
+     * Serializes [deployMatch] + [joinAsP2] calls so two concurrent
+     * invocations (e.g. a double-tapped CREATE / JOIN button) can't
+     * race through [resetForNewAction] and clobber each other's
+     * freshly-generated [p1SecretKey] / [p2SecretKey] — a regenerated
+     * key on a deploy that lands on chain anyway permanently locks
+     * the user out of the match (commit fails with "Not a player").
+     *
+     * Held for the full duration of deploy/join including the chain
+     * round-trip. Inflight callers wait their turn; the second one
+     * sees state already advanced past SdkReady and either no-ops
+     * (idempotent path) or correctly rejects.
+     */
+    private val deployJoinMutex = Mutex()
+
+    /**
+     * Atomically reads + clears [priorMatchFinished]. One-shot — the
+     * caller is responsible for rendering the notification; we don't
+     * want stale data showing twice across configuration changes.
+     */
+    fun consumePriorMatchFinished(): PriorMatchFinished? {
+        val pending = priorMatchFinished
+        priorMatchFinished = null
+        return pending
+    }
+
+    /**
+     * The local device's role in the current match — set when:
+     *  - [deployMatch] succeeds → [Player.P1]
+     *  - [joinAsP2] succeeds → [Player.P2]
+     *  - [tryResumeActiveMatch] rehydrates → reads from
+     *    [MatchStore.Match.role]
+     *
+     * Used by [setState] to drive role-aware [MatchState.labelFor] and
+     * [hudModeFor] so the HUD reads correctly for both sides (P1's
+     * "Your picks committed" reads as P2's "Opponent committed — your
+     * turn to pick"). Cleared by [resetForNewAction].
+     *
+     * `null` means PvAI / no match yet — the labels and HUD modes
+     * fall back to the P1-perspective default, which is also what
+     * the PvAI human (always P1) wants.
+     */
+    private var localRole: Player? = null
 
     /** Last completed match's data, used by [KicksActivity] for the replay payload. */
     var lastResult: MatchResult? = null
@@ -216,15 +286,57 @@ open class MatchManager(
      * match doesn't follow the user across launches.
      */
     suspend fun tryResumeActiveMatch(): String? = withContext(Dispatchers.IO) {
-        // Pick the first match in the store as the "active" one. With
-        // multi-match storage this is a heuristic — the Resume UI (Commit
-        // 3) lets the user pick explicitly. For now first-found is fine
-        // because Kicks only writes one match at a time in this commit.
-        val match = store.loadAll().firstOrNull() ?: return@withContext null
+        // Multi-match: arbitrary first-found would bounce the user
+        // into a match they didn't intend. Return null and let the
+        // activity surface the Resume picker. Single-match path is
+        // unchanged.
+        val all = store.loadAll()
+        val match = when (all.size) {
+            0 -> return@withContext null
+            1 -> all.single()
+            else -> {
+                Log.i(TAG, "tryResumeActiveMatch: store has ${all.size} matches — deferring to Resume UI")
+                return@withContext null
+            }
+        }
         require(state.value is MatchState.SdkReady) {
             "tryResumeActiveMatch must be called from SdkReady — got ${state.value}"
         }
-        Log.i(TAG, "Resuming from store — address=${match.address.take(16)}…")
+        resumeMatchInternal(match)
+    }
+
+    /**
+     * Resume a SPECIFIC match by address. Used by the Resume picker
+     * after the user explicitly chooses which match to engage with —
+     * also drives the state machine forward so the next CHECK STATUS
+     * tap doesn't no-op against `state.value = SdkReady`.
+     *
+     * Returns the address on successful resume (state machine
+     * advances), `null` when the match is no longer in the store or
+     * already COMPLETE on chain.
+     */
+    suspend fun resumeSpecificMatch(address: String): String? = withContext(Dispatchers.IO) {
+        val match = store.load(address) ?: run {
+            Log.w(TAG, "resumeSpecificMatch: no store record for $address")
+            return@withContext null
+        }
+        // Reset any in-flight in-memory state from a different match.
+        // This is critical when the user navigates Menu → Resume →
+        // pick match B while in-memory still holds match A (e.g. from
+        // the auto-resume that fell through earlier). resetForNewAction
+        // is a no-op when state is already SdkReady.
+        resetForNewAction()
+        resumeMatchInternal(match)
+    }
+
+    /**
+     * Shared per-match resume logic for both [tryResumeActiveMatch]
+     * (auto, single-match boot) and [resumeSpecificMatch] (manual,
+     * Resume picker). Rehydrates witnesses, reads chain, maps to
+     * [MatchState], and sets state.
+     */
+    private suspend fun resumeMatchInternal(match: MatchStore.Match): String? {
+        Log.i(TAG, "Resuming from store — address=${match.address.take(16)}… role=${match.role}")
 
         // Rehydrate the in-memory state machine from the persisted match.
         // Same key must hash into the deployed commitment for any reveal
@@ -235,45 +347,99 @@ open class MatchManager(
         currentAddress = match.address
         rehydrateLocalIdentity(match)
 
-        val chainSnap = StatePoller(requireSdk.config, match.address).readOnce()
+        val chainSnap = readResumeSnapshot(match.address)
         if (chainSnap == null) {
             Log.w(TAG, "Resume: indexer returned no snapshot — assuming Deployed and letting user retry")
             setState(MatchState.Deployed(match.address))
-            return@withContext match.address
+            return match.address
         }
         if (chainSnap.phase == PHASE_COMPLETE) {
-            Log.i(TAG, "Resume: match already COMPLETE on chain — deleting store entry, no resume")
+            Log.i(
+                TAG,
+                "Resume: match COMPLETE on chain (${chainSnap.p1Score}-${chainSnap.p2Score}) — deleting store entry + queueing user notification",
+            )
+            priorMatchFinished = PriorMatchFinished(
+                address = match.address,
+                role = match.role,
+                p1Score = chainSnap.p1Score,
+                p2Score = chainSnap.p2Score,
+                winner = chainSnap.winner.copyOf(),
+                isDraw = chainSnap.isDraw,
+            )
             store.delete(match.address)
             currentAddress = null
-            return@withContext null
+            return null
         }
 
-        // Map the on-chain phase + flags to a MatchState. Bias toward
-        // the state where the local player still has work to do — if
-        // we're not sure, prefer the earlier state so the UI lets the
-        // user re-submit rather than wait on something already done.
-        val target = when (chainSnap.phase) {
-            PHASE_WAITING -> MatchState.Deployed(match.address)
-            PHASE_COMMITTING -> if (chainSnap.p1Committed) {
-                MatchState.P1Committed(match.address)
-            } else {
-                MatchState.Joined(match.address)
-            }
-            PHASE_REVEALING -> if (chainSnap.p1Revealed) {
-                MatchState.P1Revealed(match.address)
-            } else {
-                MatchState.BothCommitted(match.address)
-            }
-            else -> {
-                // SD phases not yet wired for resume. Bail out gracefully so
-                // the user can manually re-engage via the menu, rather than
-                // trapping the state machine in a half-restored SD round.
-                Log.w(TAG, "Resume: phase=${chainSnap.phase} not yet supported — staying on SdkReady")
-                return@withContext null
-            }
+        // Populate regulation picks from chain so [buildMatchResult]
+        // can fire if the match resolves later in this session.
+        if (chainSnap.p1Revealed || chainSnap.phase >= PHASE_SD_COMMITTING) {
+            p1Shoots = chainSnap.p1Shoots.copyOf()
+            p1Keeps = chainSnap.p1Keeps.copyOf()
         }
+        if (chainSnap.p2Revealed || chainSnap.phase >= PHASE_SD_COMMITTING) {
+            p2Shoots = chainSnap.p2Shoots.copyOf()
+            p2Keeps = chainSnap.p2Keeps.copyOf()
+        }
+
+        // Map the on-chain phase + flags to a MatchState.
+        val target = chainPhaseToState(match.address, chainSnap)
+            ?: run {
+                Log.w(TAG, "Resume: phase=${chainSnap.phase} not supported — staying on SdkReady")
+                return null
+            }
         setState(target)
-        match.address
+        return match.address
+    }
+
+    /**
+     * Pure mapping from a chain snapshot to a [MatchState] for [address].
+     * Returns `null` for unsupported phases (today: anything outside
+     * the WAITING / regulation-commit-or-reveal / SD-commit-or-reveal
+     * progression — i.e. [PHASE_COMPLETE] is handled separately by
+     * callers and any other value means schema drift).
+     *
+     * Used by [tryResumeActiveMatch] and by [joinAsP2]'s rejoiner
+     * path. Centralised so a chain phase the contract supports but
+     * the state machine doesn't is one edit, not two.
+     *
+     * Biases toward the earlier state when commit/reveal flags don't
+     * uniquely identify the substep — the UI then lets the user
+     * re-submit rather than wait on something already done.
+     */
+    private fun chainPhaseToState(
+        address: String,
+        chainSnap: ContractStateSnapshot,
+    ): MatchState? = when (chainSnap.phase) {
+        PHASE_WAITING -> MatchState.Deployed(address)
+        PHASE_COMMITTING -> if (chainSnap.p1Committed) {
+            MatchState.P1Committed(address)
+        } else {
+            MatchState.Joined(address)
+        }
+        PHASE_REVEALING -> if (chainSnap.p1Revealed) {
+            MatchState.P1Revealed(address)
+        } else {
+            MatchState.BothCommitted(address)
+        }
+        // SD commit phase — each round resets both flags, so flag
+        // pattern alone tells us where in this round we are.
+        PHASE_SD_COMMITTING -> when {
+            chainSnap.p1Committed && chainSnap.p2Committed ->
+                MatchState.BothSdCommitted(address, chainSnap.sdRound)
+            chainSnap.p1Committed ->
+                MatchState.P1SdCommitted(address, chainSnap.sdRound)
+            else ->
+                MatchState.SdRoundOpen(address, chainSnap.sdRound)
+        }
+        // SD reveal phase — flags persist until the second reveal
+        // triggers an atomic reset.
+        PHASE_SD_REVEALING -> if (chainSnap.p1Revealed) {
+            MatchState.P1SdRevealed(address, chainSnap.sdRound)
+        } else {
+            MatchState.BothSdCommitted(address, chainSnap.sdRound)
+        }
+        else -> null
     }
 
     /**
@@ -306,6 +472,11 @@ open class MatchManager(
         p1SdKeep = 0
         p1SdNonce = null
         currentAddress = null
+        // Clear the role too — the next deploy / join / resume will
+        // set it to the right value. Leaving a stale role would make
+        // the HUD render previous-match phrasing during the gap
+        // between resetForNewAction and the next setState.
+        localRole = null
         // Clear the HUD overlay state too — stale replay / banner from a
         // prior match must not survive into a new one. Without this,
         // the user can briefly see the previous match's "FINAL 3-2"
@@ -340,6 +511,9 @@ open class MatchManager(
      * stored commitment).
      */
     private fun rehydrateLocalIdentity(match: MatchStore.Match) {
+        // Persist the role so subsequent setState calls publish a
+        // role-aware HUD label.
+        localRole = match.role
         when (match.role) {
             Player.P1 -> {
                 p1SecretKey = match.secretKey.copyOf()
@@ -394,15 +568,23 @@ open class MatchManager(
         store.save(block(existing))
     }
 
-    /** P1 deploys a fresh contract. Transitions [SdkReady] → [Deployed]. */
-    suspend fun deployMatch(): String {
+    /**
+     * P1 deploys a fresh contract. Transitions [SdkReady] → [Deployed].
+     *
+     * Mutex-serialised with [joinAsP2] so a double-tap on CREATE / JOIN
+     * can't race two concurrent invocations through [resetForNewAction]
+     * and produce a key-vs-chain desync (see [deployJoinMutex] KDoc).
+     */
+    suspend fun deployMatch(): String = deployJoinMutex.withLock {
         resetForNewAction()
-        return transitionFrom<MatchState.SdkReady, String>(
+        transitionFrom<MatchState.SdkReady, String>(
             inProgress = { MatchState.Deploying },
             onSuccess = { _, address -> MatchState.Deployed(address) },
         ) {
             val address = executeDeploy(p1SecretKey)
             Log.i(TAG, "Match at: $address")
+            // Pin local role so setState publishes role-aware HUD text.
+            localRole = Player.P1
             // Persist before the indexer-settle delay below so a SIGKILL in
             // that window doesn't strand the user without the local secret
             // key that hashes into the on-chain participant set.
@@ -488,11 +670,10 @@ open class MatchManager(
      * P2 (real opponent) joins an existing deployed match by [address].
      * Transitions [SdkReady] → [JoiningAsP2(address)] → [Joined(address)].
      *
-     * Mirror of [aiJoin] but for the join-side device — the address comes
-     * from outside (deep link / QR scan / paste) instead of from a local
-     * [deployMatch] call. The retry loop is the same indexer-readiness
-     * pattern (`"not found"` substring match): the create-side's deploy
-     * has to land + be ingested before this call succeeds.
+     * The address comes from outside (deep link / QR scan / paste).
+     * The retry loop covers the indexer-readiness window — the
+     * create-side's deploy has to be ingested before this call
+     * succeeds.
      *
      * **Idempotent only when [isResume] is true.** If the contract has
      * already advanced past the WAITING phase (e.g. this device joined
@@ -522,21 +703,83 @@ open class MatchManager(
     suspend fun joinAsP2(
         address: String,
         isResume: Boolean = false,
-    ) {
-        // Resume case: we're rejoining a match we already saved. Skip
-        // the reset so the existing store record + in-memory witnesses
-        // survive. Otherwise this is a fresh join action and we drop
-        // any prior in-flight match's in-memory state (preserved in
-        // store for the Resume UI).
-        if (!isResume) resetForNewAction()
+    ) = deployJoinMutex.withLock {
+        val current = state.value
+
+        // Idempotent shortcut: the state machine is already past the
+        // join for THIS exact address — typically because
+        // [tryResumeActiveMatch] (on app launch) routed us straight
+        // into the persisted match, and the user then re-tapped Join
+        // via the deep link or the JoinMatchScreen. The store record
+        // + on-chain state already prove we joined; another chain
+        // call would just round-trip a "WAITING phase" error.
+        //
+        // Failed states fall through so a previous failure can be
+        // retried.
+        if (isResume && current.address == address && current !is MatchState.Failed) {
+            Log.i(TAG, "joinAsP2: state already at ${current::class.simpleName} for $address — idempotent no-op")
+            return@withLock
+        }
+
+        // Switching to a different match (or a fresh join). Always
+        // reset — this covers two cases that the old `if (!isResume)`
+        // guard mishandled:
+        //   1. Fresh join from SdkReady (reset is a no-op).
+        //   2. Resume of THIS match while state is on a DIFFERENT
+        //      match (e.g. tryResumeActiveMatch already restored a P1
+        //      deploy and the user now joins their P2 match). The
+        //      reset drops the unrelated in-memory state; the prior
+        //      match is preserved in [store] and can be re-resumed
+        //      later via the Resume UI.
+        resetForNewAction()
         transitionFrom<MatchState.SdkReady, Unit>(
             inProgress = { MatchState.JoiningAsP2(address) },
             onSuccess = { _, _ -> MatchState.Joined(address) },
         ) {
+            // Pre-flight chain check — read the contract phase BEFORE
+            // attempting the join tx. Saves a wasted tx + lets us
+            // surface a precise reason (e.g. "match is over, P1 3 – 4
+            // P2") instead of the generic "match in progress" copy.
+            val preflightSnap = try {
+                readResumeSnapshot(address)
+            } catch (snapEx: Exception) {
+                Log.w(TAG, "joinAsP2: preflight snapshot failed (${snapEx.message}) — falling through to chain attempt")
+                null
+            }
+            if (preflightSnap != null) {
+                when {
+                    preflightSnap.phase == PHASE_COMPLETE -> {
+                        // Match is over. Wipe any stale store entry so
+                        // future resume attempts don't get confused.
+                        store.delete(address)
+                        throw MatchAlreadyResolvedException(
+                            address = address,
+                            p1Score = preflightSnap.p1Score,
+                            p2Score = preflightSnap.p2Score,
+                            winner = preflightSnap.winner.copyOf(),
+                        )
+                    }
+                    preflightSnap.phase != PHASE_WAITING && !isResume -> {
+                        // Match has progressed past WAITING and we
+                        // don't claim to be the original P2. Refuse
+                        // with the typed exception — the UI renders
+                        // a "match in progress" message and stays on
+                        // the Join screen.
+                        throw MatchAlreadyJoinedException(address)
+                    }
+                    // PHASE_WAITING: safe to attempt the join below.
+                    // Or `isResume=true` past WAITING — fall through to
+                    // the existing chain-attempt + catch-and-rejoin
+                    // path so the rejoiner logic stays intact.
+                }
+            }
+
             val deadlineSecs = System.currentTimeMillis() / 1000 + COMMIT_DEADLINE_DURATION_SECS
             val deadline = BigInteger.valueOf(deadlineSecs)
             try {
                 executeJoinMatch(p2SecretKey, address, deadline)
+                // Pin local role so setState publishes role-aware HUD text.
+                localRole = Player.P2
                 // Persist after the chain accepts our join — without
                 // this, a kill before the next save loses the session
                 // and a relaunch can't tell we're the rightful P2.
@@ -561,35 +804,46 @@ open class MatchManager(
                     if (isResume) {
                         // Legitimate rejoiner — MatchStore confirmed
                         // this device holds the P2 session for this
-                        // address. The contract correctly refuses the
-                        // resubmit, but we treat that as a no-op and
-                        // advance to Joined so the user lands back on
-                        // MatchReady → choice phase.
-                        //
-                        // Rehydrate the persisted record so subsequent
-                        // commit/reveal calls hash the original P2 key
-                        // (not a freshly random one) and find their
-                        // witnesses in [updateCurrentMatch].
+                        // address. Rehydrate witnesses + read the
+                        // actual chain phase via [chainPhaseToState] so
+                        // the state machine lands on the right step
+                        // (not unconditionally Joined, which would ask
+                        // for regulation picks on an SD-phase match).
                         val persisted = store.load(address)
-                        if (persisted != null) {
-                            currentAddress = address
-                            rehydrateLocalIdentity(persisted)
-                        } else {
-                            // Caller said isResume but the store no
-                            // longer has this address (e.g. user wiped
-                            // app data between sessions). Surface as
-                            // MatchAlreadyJoined — without the key we
-                            // can't actually resume.
-                            Log.w(
-                                TAG,
-                                "joinAsP2: isResume=true but store has no record for $address — treating as wrong-actor",
-                            )
-                            throw MatchAlreadyJoinedException(address)
+                            ?: run {
+                                // Caller said isResume but the store no
+                                // longer has this address (e.g. user wiped
+                                // app data between sessions). Surface as
+                                // MatchAlreadyJoined — without the key we
+                                // can't actually resume.
+                                Log.w(
+                                    TAG,
+                                    "joinAsP2: isResume=true but store has no record for $address — treating as wrong-actor",
+                                )
+                                throw MatchAlreadyJoinedException(address)
+                            }
+                        currentAddress = address
+                        rehydrateLocalIdentity(persisted)
+                        // Read chain phase to override transitionFrom's
+                        // default Joined target. The outer transitionFrom
+                        // will still call setState(Joined) on success,
+                        // but we'll immediately set the correct target
+                        // afterwards via [resumedRejoinerTarget].
+                        val chainSnap = try {
+                            readResumeSnapshot(address)
+                        } catch (snapEx: Exception) {
+                            Log.w(TAG, "joinAsP2 rejoiner: chain snapshot failed (${snapEx.message}) — falling back to Joined")
+                            null
                         }
+                        val mapped = chainSnap?.let { chainPhaseToState(address, it) }
+                        // Stash the mapped target — transitionFrom's
+                        // onSuccess fires MatchState.Joined first; we
+                        // override right after via a corrective setState.
+                        resumedRejoinerTarget = mapped
                         Log.i(
                             TAG,
-                            "joinAsP2: contract already past WAITING and caller marked " +
-                                "this as a resume — advancing to Joined without resubmitting",
+                            "joinAsP2: rejoiner — chain phase=${chainSnap?.phase} → " +
+                                "resume target=${mapped?.let { it::class.simpleName } ?: "Joined (fallback)"}",
                         )
                     } else {
                         // Stranger with the deep link — surface a typed
@@ -602,7 +856,26 @@ open class MatchManager(
                 }
             }
         }
+
+        // transitionFrom's onSuccess just fired MatchState.Joined.
+        // If the rejoiner path stashed a different chain-derived
+        // target (e.g. SdRoundOpen because the chain is already in
+        // SD), correct the state to that target now.
+        resumedRejoinerTarget?.let { actual ->
+            Log.i(TAG, "joinAsP2 rejoiner: overriding state to actual chain target ${actual::class.simpleName}")
+            setState(actual)
+        }
+        resumedRejoinerTarget = null
     }
+
+    /**
+     * Stashed by [joinAsP2]'s rejoiner-recovery path so the post-
+     * `transitionFrom` block can correct the state to the actual
+     * chain phase (rather than the default [MatchState.Joined] that
+     * `onSuccess` always fires). One-shot — cleared after the
+     * corrective setState.
+     */
+    private var resumedRejoinerTarget: MatchState? = null
 
     /**
      * P1 (create-side) waits for the opponent's [joinAsP2] transaction to
@@ -622,12 +895,61 @@ open class MatchManager(
     suspend fun awaitOpponentJoin(
         timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
     ) {
-        val current = state.value
-        require(current is MatchState.Deployed) {
-            "awaitOpponentJoin: expected Deployed, got ${current::class.simpleName}"
+        when (val current = state.value) {
+            is MatchState.Deployed -> {
+                awaitContractState(timeoutMs) { it.matchJoined }
+                setState(MatchState.Joined(current.address))
+            }
+            // Already past the join — the opponent must have joined
+            // (otherwise we'd still be on Deployed). Most common path:
+            // [tryResumeActiveMatch] read chain phase=COMMITTING on
+            // launch and routed us into Joined / P1Committed / … . The
+            // user then taps CHECK STATUS, which reaches here; treat
+            // it as an idempotent confirmation, not an error.
+            is MatchState.Joined,
+            is MatchState.P1Committing, is MatchState.P1Committed,
+            is MatchState.P2Committing, is MatchState.BothCommitted,
+            is MatchState.P1Revealing, is MatchState.P1Revealed,
+            is MatchState.P2Revealing,
+            is MatchState.SdRoundOpen,
+            is MatchState.P1SdCommitting, is MatchState.P1SdCommitted,
+            is MatchState.P2SdCommitting, is MatchState.BothSdCommitted,
+            is MatchState.P1SdRevealing, is MatchState.P1SdRevealed,
+            is MatchState.P2SdRevealing,
+            is MatchState.Resolved -> {
+                Log.i(
+                    TAG,
+                    "awaitOpponentJoin: state already at ${current::class.simpleName} — opponent has joined, no-op",
+                )
+            }
+            // States where there's no match to wait on (or it's
+            // unrecoverable without a reset). The CHECK STATUS button
+            // shouldn't be reachable from these, but defend the
+            // contract anyway.
+            is MatchState.Idle,
+            is MatchState.InitializingSdk,
+            is MatchState.SdkReady -> {
+                // No active match — caller (CHECK STATUS button) gets
+                // a typed signal so the UI renders "no match" instead
+                // of the misleading "still waiting" text.
+                throw NoActiveMatchException(
+                    "awaitOpponentJoin: no active match — state is ${current::class.simpleName}",
+                )
+            }
+            is MatchState.Deploying,
+            is MatchState.JoiningAsP2,
+            is MatchState.Failed -> {
+                // Match is in-flight (deploy/join in progress) or
+                // the prior attempt failed. Both legitimately happen
+                // when the user spams CHECK STATUS during a slow
+                // first deploy. No-op + log so the activity loops
+                // back and tries again on the next tap.
+                Log.i(
+                    TAG,
+                    "awaitOpponentJoin: state ${current::class.simpleName} — match still settling, no-op",
+                )
+            }
         }
-        awaitContractState(timeoutMs) { it.matchJoined }
-        setState(MatchState.Joined(current.address))
     }
 
     /** P1 commits their regulation picks. Transitions [Joined] → [P1Committed]. */
@@ -723,28 +1045,30 @@ open class MatchManager(
         requireSdk.wallet.refresh()
         revealRegulation(p2SecretKey, prev.address, p2s, p2k, p2n)
 
-        // Did regulation decide it, or did we draw into SD?
-        val snap = StatePoller(requireSdk.config, prev.address).readOnce()
-        val phase = snap?.phase ?: -1
-        // Diagnostic — mirror of waitForP2Revealed's log on the P2 side
-        // (or PvAI side). Same goal: prove what the contract has stored
-        // for both players' picks after both reveals landed.
-        if (snap != null) {
-            Log.i(
-                TAG,
-                "regulation reveal landed (P2-side / PvAI): " +
-                    "p1Shoots=${snap.p1Shoots.toList()} p1Keeps=${snap.p1Keeps.toList()} " +
-                    "p2Shoots=${snap.p2Shoots.toList()} p2Keeps=${snap.p2Keeps.toList()} " +
-                    "score=${snap.p1Score}-${snap.p2Score} phase=${snap.phase}",
-            )
-            // Mirror of the P1-side replay publish — same data contract
-            // so the overlay renders identically on both devices and
-            // PvAI.
-            publishRegulationReplay(snap)
-        } else {
-            Log.w(TAG, "regulation reveal landed (P2-side / PvAI): readOnce returned null")
-        }
-        if (phase == PHASE_COMPLETE) {
+        // Wait for the chain to actually reflect P2's reveal before
+        // reading the snapshot — an immediate readOnce() can hit a
+        // pre-reveal indexer view (p2Revealed=false, zero picks) and
+        // make publishReplay render the wrong score.
+        // [secondRegulationRevealLanded] is the atomic-reset-aware
+        // predicate the P1-side wait uses, covering both decisive
+        // and draw paths.
+        val snap = awaitContractState(
+            DEFAULT_OPPONENT_WAIT_MS,
+            ::secondRegulationRevealLanded,
+        )
+        Log.i(
+            TAG,
+            "regulation reveal landed (P2-side / PvAI): " +
+                "p1Shoots=${snap.p1Shoots.toList()} p1Keeps=${snap.p1Keeps.toList()} " +
+                "p2Shoots=${snap.p2Shoots.toList()} p2Keeps=${snap.p2Keeps.toList()} " +
+                "score=${snap.p1Score}-${snap.p2Score} phase=${snap.phase} sdRound=${snap.sdRound}",
+        )
+        // On the draw path the chain resets reveal flags atomically
+        // when advancing to SD — but p1Shoots/p2Shoots persist for the
+        // replay (contract invariant pinned by test "second-reveal
+        // atomicity (app-poll predicate invariants)").
+        publishRegulationReplay(snap)
+        if (snap.phase == PHASE_COMPLETE) {
             buildMatchResult(prev.address).also { lastResult = it }
         } else {
             null   // SD round 1 is now open; orchestrator drives the SD loop
@@ -834,6 +1158,16 @@ open class MatchManager(
             p2SdShoot = shoot
             p2SdKeep  = keep
             p2SdNonce = nonce
+            // Persist before reveal — a process kill mid-SD loses the
+            // nonce otherwise, and the commitment can't be re-opened.
+            updateCurrentMatch { it.copy(
+                sd = MatchStore.SdWitnesses(
+                    round = prev.round,
+                    shoot = shoot,
+                    keep = keep,
+                    nonce = nonce.copyOf(),
+                ),
+            ) }
         }
 
     /** P1 reveals SD pick. BothSdCommitted → P1SdRevealed. */
@@ -876,13 +1210,30 @@ open class MatchManager(
             )
             sdRoundsForReplay += sdData
 
-            val snap = StatePoller(requireSdk.config, prev.address).readOnce()
+            // Wait for the chain to actually reflect this SD round's
+            // reveal before reading the snapshot, otherwise the
+            // indexer's pre-reveal state could leak into the replay.
+            // [secondSdRevealLanded] handles the atomic-reset path
+            // when the round stalemates and sdRound bumps.
+            val snap = awaitContractState(DEFAULT_OPPONENT_WAIT_MS) { s ->
+                secondSdRevealLanded(s, prev.round)
+            }
+            // Belt-and-suspenders: a resume that landed in mid-SD
+            // never ran [waitForP1Revealed] (which normally captures
+            // p1Shoots/p1Keeps on the P2 side), so [buildMatchResult]
+            // would throw on PHASE_COMPLETE. The chain persists the
+            // regulation arrays through to match end; populate from
+            // [snap] now if memory is still missing them.
+            if (p1Shoots == null) p1Shoots = snap.p1Shoots.copyOf()
+            if (p1Keeps == null) p1Keeps = snap.p1Keeps.copyOf()
+            if (p2Shoots == null) p2Shoots = snap.p2Shoots.copyOf()
+            if (p2Keeps == null) p2Keeps = snap.p2Keeps.copyOf()
             // Publish the per-round replay BEFORE returning, mirroring
             // the regulation pattern. The activity's `gatherSdPicksFromUi`
             // (or its terminal "show winner" path on decisive SD)
             // awaits dismissal before proceeding.
-            if (snap != null) publishSdRoundReplay(sdData, snap)
-            if (snap?.phase == PHASE_COMPLETE) {
+            publishSdRoundReplay(sdData, snap)
+            if (snap.phase == PHASE_COMPLETE) {
                 buildMatchResult(prev.address).also { lastResult = it }
             } else {
                 null
@@ -958,14 +1309,19 @@ open class MatchManager(
         val address = state.value.address
             ?: error("awaitContractState called before deploy — no address")
 
-        val startedHere = pollerJob == null
-        if (startedHere) startStatePoller(address)
+        // Refcount the poller across concurrent awaitContractState
+        // callers. A presence check is TOCTOU-racy — two concurrent
+        // waits would both start (and the first's finally would
+        // cancel the second's poller). Refcount keeps the poller
+        // alive for as long as any wait is using it.
+        val before = pollerRefCount.getAndIncrement()
+        if (before == 0) startStatePoller(address)
         return try {
             withTimeout(timeoutMs) {
                 contractState.filterNotNull().first(predicate)
             }
         } finally {
-            if (startedHere) {
+            if (pollerRefCount.decrementAndGet() == 0) {
                 pollerJob?.cancel()
                 pollerJob = null
             }
@@ -995,8 +1351,14 @@ open class MatchManager(
         timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
     ) {
         val current = state.value
+        // Resume can land here past P1's commit; skip if chain
+        // already advanced.
+        if (current.protocolRank >= PhaseRank.P1_COMMITTED) {
+            Log.i(TAG, "waitForP1Committed: state already ${current::class.simpleName} — no-op")
+            return
+        }
         require(current is MatchState.Joined) {
-            "waitForP1Committed: expected Joined, got ${current::class.simpleName}"
+            "waitForP1Committed: expected Joined or later, got ${current::class.simpleName}"
         }
         awaitContractState(timeoutMs) { it.p1Committed }
         setState(MatchState.P1Committed(current.address))
@@ -1014,12 +1376,26 @@ open class MatchManager(
         timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS,
     ) {
         val current = state.value
-        require(current is MatchState.BothCommitted) {
-            "waitForP1Revealed: expected BothCommitted, got ${current::class.simpleName}"
+        // Idempotent: chain already advanced past P1's reveal.
+        if (current.protocolRank >= PhaseRank.P1_REVEALED) {
+            Log.i(TAG, "waitForP1Revealed: state already ${current::class.simpleName} — no-op")
+            return
         }
-        val snap = awaitContractState(timeoutMs) { it.p1Revealed }
+        require(current is MatchState.BothCommitted) {
+            "waitForP1Revealed: expected BothCommitted or later, got ${current::class.simpleName}"
+        }
+        // On a regulation draw the contract atomically clears
+        // p1Revealed and bumps sdRound in the same tx — `p1Revealed`
+        // alone never fires. Accept any of the three signals: direct
+        // `p1Revealed`, `phase==COMPLETE` (decisive after both reveals),
+        // or `sdRound >= 1` (drew → SD opened).
+        val snap = awaitContractState(timeoutMs) {
+            it.p1Revealed || it.sdRound >= 1 || it.phase == PHASE_COMPLETE
+        }
         // Capture P1's revealed regulation picks from chain — P2 doesn't
-        // have them locally and needs them for the replay payload.
+        // have them locally and needs them for the replay payload. On
+        // the draw path the contract has already reset p1Revealed
+        // but p1Shoots/p1Keeps persist past the reset.
         p1Shoots = snap.p1Shoots.copyOf()
         p1Keeps  = snap.p1Keeps.copyOf()
         setState(MatchState.P1Revealed(current.address))
@@ -1038,11 +1414,21 @@ open class MatchManager(
     /** P2-side: wait for P1's SD commit to land. SdRoundOpen → P1SdCommitted. */
     suspend fun waitForP1SdCommitted(timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS) {
         val current = state.value
-        require(current is MatchState.SdRoundOpen) {
-            "waitForP1SdCommitted: expected SdRoundOpen, got ${current::class.simpleName}"
+        val round = current.sdRound
+            ?: throw IllegalArgumentException(
+                "waitForP1SdCommitted: not in SD, state=${current::class.simpleName}",
+            )
+        // Idempotent: chain already advanced past P1's SD commit for
+        // this round.
+        if (current.protocolRank >= PhaseRank.sdP1CommittedAt(round)) {
+            Log.i(TAG, "waitForP1SdCommitted: state already ${current::class.simpleName} — no-op")
+            return
         }
-        awaitContractState(timeoutMs) { it.p1Committed && it.sdRound == current.round }
-        setState(MatchState.P1SdCommitted(current.address, current.round))
+        require(current is MatchState.SdRoundOpen) {
+            "waitForP1SdCommitted: expected SdRoundOpen or later, got ${current::class.simpleName}"
+        }
+        awaitContractState(timeoutMs) { it.p1Committed && it.sdRound == round }
+        setState(MatchState.P1SdCommitted(current.address, round))
     }
 
     /** P1-side: wait for P2's SD commit to land. P1SdCommitted → BothSdCommitted. */
@@ -1062,15 +1448,25 @@ open class MatchManager(
      */
     suspend fun waitForP1SdRevealed(timeoutMs: Long = DEFAULT_OPPONENT_WAIT_MS) {
         val current = state.value
+        val round = current.sdRound
+            ?: throw IllegalArgumentException(
+                "waitForP1SdRevealed: not in SD, state=${current::class.simpleName}",
+            )
+        // Idempotent: chain already advanced past P1's SD reveal for
+        // this round.
+        if (current.protocolRank >= PhaseRank.sdP1RevealedAt(round)) {
+            Log.i(TAG, "waitForP1SdRevealed: state already ${current::class.simpleName} — no-op")
+            return
+        }
         require(current is MatchState.BothSdCommitted) {
-            "waitForP1SdRevealed: expected BothSdCommitted, got ${current::class.simpleName}"
+            "waitForP1SdRevealed: expected BothSdCommitted or later, got ${current::class.simpleName}"
         }
         val snap = awaitContractState(timeoutMs) {
-            it.p1Revealed && it.sdRound == current.round
+            it.p1Revealed && it.sdRound == round
         }
         p1SdShoot = snap.p1SdShoot
         p1SdKeep  = snap.p1SdKeep
-        setState(MatchState.P1SdRevealed(current.address, current.round))
+        setState(MatchState.P1SdRevealed(current.address, round))
     }
 
     /**
@@ -1096,6 +1492,14 @@ open class MatchManager(
         // covered by contract test "stalemate revealSuddenDeath: …".
         p2SdShoot = snap.p2SdShoot
         p2SdKeep  = snap.p2SdKeep
+        // Defensive populate of regulation arrays from chain so
+        // [buildMatchResult] can fire from a mid-SD resume (where
+        // neither [waitForP1Revealed] nor [waitForP2Revealed] ran in
+        // this session).
+        if (p1Shoots == null) p1Shoots = snap.p1Shoots.copyOf()
+        if (p1Keeps == null) p1Keeps = snap.p1Keeps.copyOf()
+        if (p2Shoots == null) p2Shoots = snap.p2Shoots.copyOf()
+        if (p2Keeps == null) p2Keeps = snap.p2Keeps.copyOf()
         val sdData = SdRoundData(
             round = prev.round,
             p1Shoot = p1SdShoot, p1Keep = p1SdKeep,
@@ -1222,53 +1626,227 @@ open class MatchManager(
         keeps: IntArray,
         getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
     ): MatchResult {
-        submitP1Picks(shoots, keeps)
-        waitForP2Committed()
-        revealP1()
-        var result: MatchResult? = waitForP2Revealed()
+        // State-aware step walk — works whether the caller is starting
+        // fresh from [MatchState.Joined] OR has resumed into a later
+        // state (chain already shows P1's commit / reveal). Each `if`
+        // re-reads `state.value` so we naturally fall through to
+        // later steps as we advance.
+        unwrapFailedState("playAsP1")
+        if (state.value is MatchState.Joined) submitP1Picks(shoots, keeps)
+        if (state.value is MatchState.P1Committed) waitForP2Committed()
+        if (state.value is MatchState.BothCommitted) revealP1()
+        var result: MatchResult? =
+            if (state.value is MatchState.P1Revealed) waitForP2Revealed() else null
+
         // SD loop — picks come from [getSdPicks] (UI for real players,
         // random by default for tests / smoke runs).
         while (result == null) {
             val round = currentSdRoundOrError()
-            val (pShoot, pKeep) = getSdPicks(round)
-            submitP1SdPick(pShoot, pKeep)
-            waitForP2SdCommitted()
-            revealP1Sd()
-            result = waitForP2SdRevealed()
+            if (state.value is MatchState.SdRoundOpen) {
+                val (pShoot, pKeep) = getSdPicks(round)
+                submitP1SdPick(pShoot, pKeep)
+            }
+            if (state.value is MatchState.P1SdCommitted) waitForP2SdCommitted()
+            if (state.value is MatchState.BothSdCommitted) revealP1Sd()
+            if (state.value is MatchState.P1SdRevealed) {
+                result = waitForP2SdRevealed()
+            } else {
+                throw IllegalStateException(
+                    "playAsP1 SD loop stalled at ${state.value::class.simpleName} for round $round",
+                )
+            }
         }
         return result
     }
 
     /**
-     * P2 (join-side) gameplay orchestrator. Mirror of [playAsP1]:
-     * waits for P1 to commit, submits our commit, waits for P1 to
-     * reveal (capturing P1's choices from the chain snapshot), then
-     * reveals our own. The contract auto-resolves on the second reveal
-     * and [revealP2] returns the [MatchResult].
+     * P2 (join-side) gameplay orchestrator. Waits for P1 to commit,
+     * submits our commit, waits for P1 to reveal (capturing P1's
+     * choices from the chain snapshot), then reveals our own. The
+     * contract auto-resolves on the second reveal and [revealP2]
+     * returns the [MatchResult].
      */
     suspend fun playAsP2(
         shoots: IntArray,
         keeps: IntArray,
         getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
     ): MatchResult {
-        waitForP1Committed()
-        submitP2Picks(shoots, keeps)
-        waitForP1Revealed()
-        var result: MatchResult? = revealP2()
-        // SD loop — gather P2's picks via [getSdPicks] (UI on real
-        // devices, random by default). We can pre-gather the picks at
-        // the top of each round while P1 commits; the contract doesn't
-        // care about commit order, only that both pairs land before
-        // either reveals.
+        // State-aware step walk — see [playAsP1] for rationale.
+        // Handles both fresh joins (state == Joined) and resumed
+        // mid-match flows (state == P1Committed and beyond).
+        unwrapFailedState("playAsP2")
+        if (state.value is MatchState.Joined) waitForP1Committed()
+        if (state.value is MatchState.P1Committed) submitP2Picks(shoots, keeps)
+        if (state.value is MatchState.BothCommitted) waitForP1Revealed()
+        var result: MatchResult? =
+            if (state.value is MatchState.P1Revealed) revealP2() else null
+
+        // SD loop — pre-launch the picker so it's visible while we
+        // wait on P1's SD commit. The contract doesn't care about
+        // commit order (only that both land before either reveals),
+        // so we collect this device's pick concurrently. A serial
+        // wait-then-prompt would leave the user staring at an empty
+        // field until P1's tx lands.
+        coroutineScope {
+            while (result == null) {
+                val round = currentSdRoundOrError()
+                val pickedAsync = if (state.value is MatchState.SdRoundOpen) {
+                    async { getSdPicks(round) }
+                } else null
+                if (state.value is MatchState.SdRoundOpen) waitForP1SdCommitted()
+                if (state.value is MatchState.P1SdCommitted) {
+                    val (pShoot, pKeep) = pickedAsync?.await() ?: getSdPicks(round)
+                    submitP2SdPick(pShoot, pKeep)
+                } else {
+                    pickedAsync?.cancel()
+                }
+                if (state.value is MatchState.BothSdCommitted) waitForP1SdRevealed()
+                if (state.value is MatchState.P1SdRevealed) {
+                    result = revealP2Sd()
+                } else {
+                    throw IllegalStateException(
+                        "playAsP2 SD loop stalled at ${state.value::class.simpleName} for round $round",
+                    )
+                }
+            }
+        }
+        return result!!
+    }
+
+    /**
+     * Resume the P1-side orchestrator from whatever state the resume
+     * landed in. Used when the user re-enters a match that's already
+     * past regulation-commit time — picks are on chain, witnesses are
+     * rehydrated from [MatchStore] (see [rehydrateLocalIdentity]), so
+     * there's nothing for Unity to ask for in the regulation phase.
+     *
+     * Each step is gated on the current [state] so this is safe to call
+     * from anywhere between [MatchState.P1Committed] and the final
+     * [MatchState.Resolved]. Sudden-death rounds delegate to
+     * [getSdPicks] (the same callback the live orchestrator uses) when
+     * a fresh pick is needed; if the saved state is mid-SD-after-pick
+     * (e.g. [MatchState.P1SdCommitted]), the SD pick is already on
+     * chain and we skip straight to the wait/reveal steps.
+     *
+     * @throws IllegalArgumentException if state is [MatchState.Joined]
+     *   (no commit yet — caller must use [playAsP1] with picks) or any
+     *   state without an address.
+     */
+    suspend fun resumePlayAsP1(
+        getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
+    ): MatchResult {
+        // Failed-state recovery — most common cause: prior resume
+        // timed out on `waitForP2Committed` because the opponent
+        // hadn't committed yet. Unwrap to the previous state and
+        // try again from there (the orchestrator's wait/reveal steps
+        // are themselves idempotent — they'll either advance or hit
+        // a new timeout).
+        unwrapFailedState("resumePlayAsP1")
+        // Soft preconditions: throw typed exceptions instead of
+        // hard `require`. This lets the activity branch the user to
+        // the right entry point (e.g. `playAsP1` when picks are
+        // still needed) without faulting on a sealed-state mismatch.
+        val current = state.value
+        if (current.address == null) {
+            throw NoActiveMatchException("resumePlayAsP1: no active match — state is ${current::class.simpleName}")
+        }
+        if (current.protocolRank < PhaseRank.P1_COMMITTED) {
+            throw NeedFreshPicksException(
+                "resumePlayAsP1: state==${current::class.simpleName} is pre-commit; call playAsP1(shoots, keeps) with fresh picks",
+            )
+        }
+        Log.i(TAG, "resumePlayAsP1: starting from ${current::class.simpleName}")
+
+        // Regulation phase — skip whatever's already done. Each `if`
+        // tests the CURRENT state.value (re-read after each step) so
+        // we naturally fall through to later steps as we go.
+        if (state.value is MatchState.P1Committed) waitForP2Committed()
+        if (state.value is MatchState.BothCommitted) revealP1()
+        var result: MatchResult? =
+            if (state.value is MatchState.P1Revealed) waitForP2Revealed() else null
+
+        // SD loop — same shape as the regulation block, repeated per
+        // round. We re-read state.value each iteration because each SD
+        // round can re-enter at a different step.
         while (result == null) {
             val round = currentSdRoundOrError()
-            val (pShoot, pKeep) = getSdPicks(round)
-            waitForP1SdCommitted()
-            submitP2SdPick(pShoot, pKeep)
-            waitForP1SdRevealed()
-            result = revealP2Sd()
+            if (state.value is MatchState.SdRoundOpen) {
+                val (pShoot, pKeep) = getSdPicks(round)
+                submitP1SdPick(pShoot, pKeep)
+            }
+            if (state.value is MatchState.P1SdCommitted) waitForP2SdCommitted()
+            if (state.value is MatchState.BothSdCommitted) revealP1Sd()
+            if (state.value is MatchState.P1SdRevealed) {
+                result = waitForP2SdRevealed()
+            } else {
+                throw IllegalStateException(
+                    "resumePlayAsP1 SD loop stalled at ${state.value::class.simpleName} for round $round",
+                )
+            }
         }
         return result
+    }
+
+    /**
+     * Resume the P2-side orchestrator from a post-commit state. Mirror
+     * of [resumePlayAsP1]; same constraints — except P2 commits LATER
+     * in the protocol, so the no-go states are wider: anything before
+     * [MatchState.BothCommitted] means P2 hasn't committed yet and the
+     * caller must use [playAsP2] with fresh picks from Unity.
+     *
+     * @throws IllegalArgumentException if state is at or before
+     *   [MatchState.P1Committed] (P2's commit still pending — needs
+     *   fresh picks) or has no address.
+     */
+    suspend fun resumePlayAsP2(
+        getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
+    ): MatchResult {
+        unwrapFailedState("resumePlayAsP2")
+        val current = state.value
+        if (current.address == null) {
+            throw NoActiveMatchException("resumePlayAsP2: no active match — state is ${current::class.simpleName}")
+        }
+        // Soft precondition: P2 needs picks if chain shows their
+        // commit hasn't landed yet. Typed exception lets the activity
+        // route to `launchUnityChoicePhase` cleanly.
+        if (current.protocolRank < PhaseRank.BOTH_COMMITTED) {
+            throw NeedFreshPicksException(
+                "resumePlayAsP2: state==${current::class.simpleName} is pre-P2-commit; call playAsP2(shoots, keeps) with fresh picks",
+            )
+        }
+        Log.i(TAG, "resumePlayAsP2: starting from ${current::class.simpleName}")
+
+        // Regulation phase.
+        if (state.value is MatchState.BothCommitted) waitForP1Revealed()
+        var result: MatchResult? =
+            if (state.value is MatchState.P1Revealed) revealP2() else null
+
+        // SD loop — pre-launch P2's picker concurrently with the
+        // wait-for-P1-commit. See [playAsP2]'s loop for rationale.
+        coroutineScope {
+            while (result == null) {
+                val round = currentSdRoundOrError()
+                val pickedAsync = if (state.value is MatchState.SdRoundOpen) {
+                    async { getSdPicks(round) }
+                } else null
+                if (state.value is MatchState.SdRoundOpen) waitForP1SdCommitted()
+                if (state.value is MatchState.P1SdCommitted) {
+                    val (pShoot, pKeep) = pickedAsync?.await() ?: getSdPicks(round)
+                    submitP2SdPick(pShoot, pKeep)
+                } else {
+                    pickedAsync?.cancel()
+                }
+                if (state.value is MatchState.BothSdCommitted) waitForP1SdRevealed()
+                if (state.value is MatchState.P1SdRevealed) {
+                    result = revealP2Sd()
+                } else {
+                    throw IllegalStateException(
+                        "resumePlayAsP2 SD loop stalled at ${state.value::class.simpleName} for round $round",
+                    )
+                }
+            }
+        }
+        return result!!
     }
 
     /**
@@ -1394,16 +1972,45 @@ open class MatchManager(
      * stay valid and the user may want to retry whatever step blew up
      * (network blip on a reveal, etc.).
      */
+    /**
+     * If the state machine is parked on [MatchState.Failed], reset it
+     * to the [MatchState.Failed.previous] value so the orchestrator
+     * can advance from where it left off. Common case: a prior
+     * [resumePlayAsP1] / [resumePlayAsP2] hit the 5-minute opponent
+     * timeout on [waitForP2Committed], state went Failed; the user
+     * taps CONTINUE again, the orchestrator's wait calls would
+     * precondition-fail because they `require()` their named
+     * predecessor state, not Failed.
+     *
+     * Logs which state we're unwrapping back to so logcat shows the
+     * retry was deliberate, not a silent re-run.
+     */
+    private fun unwrapFailedState(caller: String) {
+        val current = state.value
+        if (current is MatchState.Failed) {
+            Log.i(
+                TAG,
+                "$caller: unwrapping Failed → ${current.previous::class.simpleName} (prior error: ${current.error.message})",
+            )
+            setState(current.previous)
+        }
+    }
+
     private fun setState(newState: MatchState) {
         val prev = _state.value
         _state.value = newState
-        // Log both the class (for grep / cheap pattern matching) and the
-        // human label (so the log doubles as a script of what the user sees).
-        Log.i(TAG, "state: ${prev::class.simpleName} → ${newState::class.simpleName}  «${newState.label}»")
+        // Log uses the role-aware label so logcat reads as what the
+        // user actually saw on screen — same string the HUD publishes.
+        val displayedLabel = newState.labelFor(localRole)
+        Log.i(TAG, "state: ${prev::class.simpleName} → ${newState::class.simpleName}  «$displayedLabel»  role=$localRole")
         // Mirror to the HUD overlay. The Compose layer over Unity
         // subscribes to MatchHud.state to keep the in-game status
         // banner alive during long blockchain waits.
-        MatchHud.publishPrimary(label = newState.label, mode = hudModeFor(newState))
+        MatchHud.publishPrimary(
+            label = displayedLabel,
+            mode = hudModeFor(newState, localRole),
+            role = localRole,
+        )
         if (newState is MatchState.Resolved) {
             currentAddress?.let { store.delete(it) }
             currentAddress = null
@@ -1422,11 +2029,54 @@ open class MatchManager(
      */
     internal open fun startStatePoller(address: String) {
         pollerJob?.cancel()
-        val poller = StatePoller(requireSdk.config, address)
+        val poller = StatePoller(pollingContract(address))
         pollerJob = managerScope.launch {
             poller.snapshots().collect { _contractState.value = it }
         }
     }
+
+    /**
+     * Cache of read-only contract handles keyed by deployed address.
+     *
+     * One [MidnightContract] per address — they hold a lazy
+     * [com.midnight.kuira.core.compact.LedgerEvaluator] whose
+     * pre-loaded asset strings (polyfills + runtime) get reused
+     * across every poll for that contract. Rebuilding per poll
+     * would re-read the contract JS asset from disk and re-allocate
+     * the evaluator, defeating that cache.
+     *
+     * Lifetime: lives for the [managerScope]'s lifetime. There's no
+     * eviction — a single MatchManager session only sees one or two
+     * distinct addresses (the current match, plus any rematch).
+     */
+    private val pollingContracts = mutableMapOf<String, MidnightContract>()
+
+    /**
+     * Build (or fetch the cached) read-only [MidnightContract] for
+     * the given address — used by [StatePoller] to call
+     * `contract.ledger()` losslessly. No witnesses and no
+     * `coinPublicKey` are needed for ledger reads; circuit calls
+     * use a separate handle built by [createContractHandle].
+     */
+    internal open fun pollingContract(address: String): MidnightContract =
+        pollingContracts.getOrPut(address) {
+            MidnightContract.create(requireSdk.config) {
+                contractJs = context.assets.open("runtime/penalty-contract.js")
+                this.address = address
+            }
+        }
+
+    /**
+     * Test seam — one-shot chain snapshot read used by
+     * [tryResumeActiveMatch] to decide the resume target state.
+     *
+     * Production wraps the cached polling contract in a [StatePoller]
+     * and calls `readOnce()`. Tests override this with an in-memory
+     * stub so the resume path can be exercised end-to-end without a
+     * live indexer.
+     */
+    internal open suspend fun readResumeSnapshot(address: String): ContractStateSnapshot? =
+        StatePoller(pollingContract(address)).readOnce()
 
     /**
      * Test seam — drive a snapshot into the StateFlow that
@@ -1754,6 +2404,8 @@ open class MatchManager(
         private const val PHASE_WAITING = 0
         private const val PHASE_COMMITTING = 1
         private const val PHASE_REVEALING = 2
+        private const val PHASE_SD_COMMITTING = 3
+        private const val PHASE_SD_REVEALING = 4
         private const val PHASE_COMPLETE = 5
 
         // 24 hours — humans pause for meals, sleep, time-zone-offset
@@ -1898,6 +2550,72 @@ data class MatchResult(
 class MatchAlreadyJoinedException(val address: String) :
     Exception("Match $address is already past the WAITING phase — a P2 has already joined.")
 
+/**
+ * Thrown by [MatchManager.joinAsP2] when the user attempts to join a
+ * match whose chain phase is [PHASE_COMPLETE]. Distinct from
+ * [MatchAlreadyJoinedException] (which means "match is mid-play with
+ * another player") so the UI can render the right copy:
+ *   - "Match in progress" → opponent already in, you can't join
+ *   - "Match finished"    → game over, here's the score
+ *
+ * Carries the final score + winner so the UI can show the result
+ * without a separate chain query.
+ */
+class MatchAlreadyResolvedException(
+    val address: String,
+    val p1Score: Int,
+    val p2Score: Int,
+    val winner: ByteArray,
+) : Exception(
+    "Match $address has already finished — P1 $p1Score - $p2Score P2",
+)
+
+/**
+ * Thrown when an entry point (e.g. CHECK STATUS, resume orchestrator)
+ * runs while [MatchManager] has no active match — typically Idle /
+ * SdkReady / InitializingSdk. Lets callers distinguish "nothing to
+ * check" from "waiting on a slow chain operation".
+ */
+class NoActiveMatchException(message: String) : Exception(message)
+
+/**
+ * Thrown by [MatchManager.resumePlayAsP1] / [MatchManager.resumePlayAsP2]
+ * when state hasn't advanced past the role's commit yet — picks are
+ * still required from Unity. The activity catches this and routes to
+ * [KicksActivity.launchUnityChoicePhase] instead of the resume path.
+ */
+class NeedFreshPicksException(message: String) : Exception(message)
+
+/**
+ * Result of [MatchManager.tryResumeActiveMatch] when the persisted
+ * match's chain phase is [PHASE_COMPLETE]. Carries enough info for
+ * the activity to render a "your previous match finished" banner
+ * including the local user's perspective (win / loss / draw) without
+ * a separate chain query.
+ */
+data class PriorMatchFinished(
+    val address: String,
+    val role: Player,
+    val p1Score: Int,
+    val p2Score: Int,
+    val winner: ByteArray,
+    val isDraw: Boolean,
+) {
+    /**
+     * Win/loss/draw from the LOCAL user's perspective — flips the
+     * comparison based on [role]. Lets the UI pick the right copy
+     * without re-deriving who-was-who.
+     */
+    val outcome: Outcome = when {
+        isDraw -> Outcome.Draw
+        role == Player.P1 && p1Score > p2Score -> Outcome.Win
+        role == Player.P2 && p2Score > p1Score -> Outcome.Win
+        else -> Outcome.Loss
+    }
+
+    enum class Outcome { Win, Loss, Draw }
+}
+
 // ── HUD mapping helpers ─────────────────────────────────────────────────
 //
 // Presentation policy for [MatchHud] — kept at file scope (not member of
@@ -1916,44 +2634,76 @@ class MatchAlreadyJoinedException(val address: String) :
  *    after a new SD round opens (which is waiting on the user to pick)
  *    → IDLE so the banner hides and the choice UI gets full focus.
  */
-internal fun hudModeFor(state: MatchState): MatchHud.Mode = when (state) {
-    // Pre-match — banner hidden so the menu / picker is uncluttered.
-    is MatchState.Idle,
-    is MatchState.InitializingSdk,
-    is MatchState.SdkReady -> MatchHud.Mode.IDLE
+/**
+ * P1-perspective default. Use [hudModeFor]`(state, role)` for the
+ * role-aware version that flips PICKING / TX_IN_FLIGHT /
+ * WAITING_FOR_OPPONENT for P2. Kept as the default because callers
+ * outside the activity (e.g. tests) often don't know the role.
+ */
+internal fun hudModeFor(state: MatchState): MatchHud.Mode = hudModeFor(state, role = null)
 
-    // User is interacting with Unity (regulation or SD picker open).
-    // The banner shows context like "Sudden death round 3" so the user
-    // knows which round they're picking for. Critical for SD where the
-    // picker UI is identical across rounds — without the label the
-    // game reads as a restart loop.
-    is MatchState.Joined,           // regulation picker open in Unity
-    is MatchState.SdRoundOpen ->    // SD picker open in Unity
-        MatchHud.Mode.PICKING
+/**
+ * Role-aware mode mapping — flips the P1-named states for P2 so the
+ * banner color + sub-line text track who's actually expected to act.
+ *
+ * The P1-perspective mapping is correct for PvAI (where the human is
+ * always P1). For PvP, the same protocol state means opposite things
+ * to each player: when state is [MatchState.P1Committed], P1 is
+ * `WAITING_FOR_OPPONENT` and P2 is `PICKING` (their turn to commit).
+ */
+internal fun hudModeFor(state: MatchState, role: Player?): MatchHud.Mode {
+    val isP2 = role == Player.P2
+    return when (state) {
+        // Pre-match — banner hidden so the menu / picker is uncluttered.
+        is MatchState.Idle,
+        is MatchState.InitializingSdk,
+        is MatchState.SdkReady -> MatchHud.Mode.IDLE
 
-    // Local tx in flight.
-    is MatchState.Deploying,
-    is MatchState.JoiningAsP2,
-    is MatchState.P1Committing,
-    is MatchState.P1Revealing,
-    is MatchState.P1SdCommitting,
-    is MatchState.P1SdRevealing -> MatchHud.Mode.TX_IN_FLIGHT
+        // Local-pick states. From P1's view, "their turn to pick" =
+        // [Joined] / [SdRoundOpen]. From P2's view, P2's turn-to-pick
+        // additionally includes [P1Committed] (P1 done, P2 owes a
+        // commit) and [P1SdCommitted] (P1 SD done, P2 owes a SD pick).
+        is MatchState.Joined,
+        is MatchState.SdRoundOpen -> MatchHud.Mode.PICKING
 
-    // Local tx landed, blocked on the opponent.
-    is MatchState.Deployed,        // waiting for P2 to join
-    is MatchState.P1Committed,
-    is MatchState.P2Committing,
-    is MatchState.BothCommitted,
-    is MatchState.P1Revealed,
-    is MatchState.P2Revealing,
-    is MatchState.P1SdCommitted,
-    is MatchState.P2SdCommitting,
-    is MatchState.BothSdCommitted,
-    is MatchState.P1SdRevealed,
-    is MatchState.P2SdRevealing -> MatchHud.Mode.WAITING_FOR_OPPONENT
+        // Tx-in-flight: whichever side is actively submitting.
+        is MatchState.Deploying -> MatchHud.Mode.TX_IN_FLIGHT
+        is MatchState.JoiningAsP2 ->
+            if (isP2) MatchHud.Mode.TX_IN_FLIGHT else MatchHud.Mode.WAITING_FOR_OPPONENT
+        is MatchState.P1Committing,
+        is MatchState.P1Revealing,
+        is MatchState.P1SdCommitting,
+        is MatchState.P1SdRevealing ->
+            if (isP2) MatchHud.Mode.WAITING_FOR_OPPONENT else MatchHud.Mode.TX_IN_FLIGHT
+        is MatchState.P2Committing,
+        is MatchState.P2Revealing,
+        is MatchState.P2SdCommitting,
+        is MatchState.P2SdRevealing ->
+            if (isP2) MatchHud.Mode.TX_IN_FLIGHT else MatchHud.Mode.WAITING_FOR_OPPONENT
 
-    is MatchState.Resolved -> MatchHud.Mode.DONE
-    is MatchState.Failed -> MatchHud.Mode.ERROR
+        // The bug case — for P2, [P1Committed] is "your turn to commit".
+        // Same idea for [P1SdCommitted] in the SD loop.
+        is MatchState.P1Committed ->
+            if (isP2) MatchHud.Mode.PICKING else MatchHud.Mode.WAITING_FOR_OPPONENT
+        is MatchState.P1SdCommitted ->
+            if (isP2) MatchHud.Mode.PICKING else MatchHud.Mode.WAITING_FOR_OPPONENT
+
+        // Both-committed and post-reveal are symmetric — both sides
+        // are technically "blocked on next tx," whoever's role it is
+        // to drive it.
+        is MatchState.Deployed,
+        is MatchState.BothCommitted,
+        is MatchState.BothSdCommitted -> MatchHud.Mode.WAITING_FOR_OPPONENT
+
+        // P1Revealed: P1 done revealing → waiting on P2's reveal.
+        // From P2's view, P2 is up next.
+        is MatchState.P1Revealed,
+        is MatchState.P1SdRevealed ->
+            if (isP2) MatchHud.Mode.TX_IN_FLIGHT else MatchHud.Mode.WAITING_FOR_OPPONENT
+
+        is MatchState.Resolved -> MatchHud.Mode.DONE
+        is MatchState.Failed -> MatchHud.Mode.ERROR
+    }
 }
 
 /**

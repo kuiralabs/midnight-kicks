@@ -71,6 +71,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun MatchReplayOverlay() {
     val replay by MatchHud.replay.collectAsState()
+    val hud by MatchHud.state.collectAsState()
     val show = replay
     AnimatedVisibility(
         visible = show != null,
@@ -78,13 +79,13 @@ fun MatchReplayOverlay() {
         exit = fadeOut(animationSpec = tween(durationMillis = 200)),
     ) {
         if (show != null) {
-            ReplayBody(hudReplay = show)
+            ReplayBody(hudReplay = show, localRole = hud.role)
         }
     }
 }
 
 @Composable
-private fun ReplayBody(hudReplay: MatchHud.HudReplay) {
+private fun ReplayBody(hudReplay: MatchHud.HudReplay, localRole: Player?) {
     val replay = hudReplay.show
     // How many rows have animated in so far. Driven by a LaunchedEffect
     // that ticks every ROW_REVEAL_INTERVAL_MS. Keyed on the publish
@@ -145,7 +146,7 @@ private fun ReplayBody(hudReplay: MatchHud.HudReplay) {
         ) {
             Header(replay.kind, replay.sdRoundNumber)
             Spacer(modifier = Modifier.height(8.dp))
-            Scoreboard(p1Score = runningP1, p2Score = runningP2)
+            Scoreboard(p1Score = runningP1, p2Score = runningP2, localRole = localRole)
             Spacer(modifier = Modifier.height(12.dp))
             // Round rows. Each animates in via AnimatedVisibility based
             // on whether its index has been reached by revealedRows.
@@ -195,18 +196,23 @@ private fun Header(kind: MatchHud.ReplayKind, sdRoundNumber: Int?) {
 }
 
 @Composable
-private fun Scoreboard(p1Score: Int, p2Score: Int) {
+private fun Scoreboard(p1Score: Int, p2Score: Int, localRole: Player?) {
+    // Render the user's column with the "YOU / X" prefix so they can
+    // tell at a glance which side they are. [localRole] = null in PvAI.
+    val isP2 = localRole == Player.P2
+    val p1Label = if (isP2) "P1" else "YOU / P1"
+    val p2Label = if (isP2) "YOU / P2" else "P2"
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        ScoreCell(label = "YOU / P1", score = p1Score, accent = Color(0xFF64B5F6))
+        ScoreCell(label = p1Label, score = p1Score, accent = Color(0xFF64B5F6))
         Text(
             text = "—",
             color = Color.White.copy(alpha = 0.3f),
             fontSize = 24.sp,
         )
-        ScoreCell(label = "P2", score = p2Score, accent = Color(0xFFE57373))
+        ScoreCell(label = p2Label, score = p2Score, accent = Color(0xFFE57373))
     }
 }
 

@@ -73,6 +73,12 @@ object MatchHud {
         val secondary: String? = null,
         val mode: Mode = Mode.IDLE,
         val sessionEpochMs: Long = 0L,
+        /**
+         * The local device's role in the current match (P1 / P2 / null
+         * for PvAI). The overlay reads this to render scoreboard
+         * labels from the user's own perspective.
+         */
+        val role: Player? = null,
     )
 
     /**
@@ -130,7 +136,7 @@ object MatchHud {
      * [Mode] is policy, not data — kept there so this file stays
      * presentation-agnostic.
      */
-    fun publishPrimary(label: String, mode: Mode) {
+    fun publishPrimary(label: String, mode: Mode, role: Player? = _state.value.role) {
         val prev = _state.value
         _state.value = prev.copy(
             primary = label,
@@ -144,6 +150,9 @@ object MatchHud {
             // process restarts (the StateFlow doesn't survive, but the
             // overlay re-keys correctly when MatchManager republishes).
             sessionEpochMs = System.currentTimeMillis(),
+            // Propagate the manager's localRole so the scoreboard
+            // overlay can render from the user's perspective.
+            role = role,
         )
     }
 
