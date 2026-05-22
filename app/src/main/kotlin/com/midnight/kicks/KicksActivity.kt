@@ -30,7 +30,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import com.midnight.kuira.dapp.PanelBar
+import com.midnight.kuira.core.identity.backup.SigilRequiredException
 import com.midnight.kuira.core.network.MidnightNetwork
+import com.midnight.kuira.sdk.walletseed.WalletSeedSource
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CompletableDeferred
@@ -87,6 +89,18 @@ class KicksActivity : FragmentActivity() {
      * panel discovers via Optional injection for cloud backup).
      */
     @Inject lateinit var store: MatchStore
+
+    /**
+     * Canonical wallet seed bootstrap, shared across every Kuira dApp.
+     * KicksActivity calls [WalletSeedSource.ensureSeedReady] in
+     * [ensureSdkReady] to get the BIP-39 seed handed to
+     * [MidnightSdk.Builder] — same passkey, same seed, same biometric
+     * cadence as the wallet panel + BBoard. Throws
+     * [SigilRequiredException] when the user hasn't forged a passkey
+     * yet; we translate that to a "forge your sigil first" status
+     * message instead of the generic "Error: …" path.
+     */
+    @Inject lateinit var walletSeedSource: WalletSeedSource
     /**
      * Role this device is playing for the current Unity choice phase.
      * `null` → PvAI (legacy practice mode). Drives the dispatch in
@@ -491,20 +505,35 @@ class KicksActivity : FragmentActivity() {
         lifecycleScope.launch {
             try {
                 if (matchManager == null) {
-                    val manager = MatchManager(
-                        context = applicationContext,
-                        network = MidnightNetwork.UNDEPLOYED,
-                        seed = TEST_SEED,
-                        // Pass the Hilt-singleton MatchStore so both
-                        // KicksActivity and MatchManager share one
-                        // instance — the same one MatchStoreBackupProvider
-                        // reads from for cloud backup. Without this,
-                        // MatchManager would construct its own
-                        // EncryptedSharedPreferences handle and a save
-                        // here wouldn't be visible to the Activity-side
-                        // read (or to the backup pipeline).
-                        store = store,
-                    )
+                    // Derive the wallet seed via the shared
+                    // WalletSeedSource — first launch may show one
+                    // biometric prompt (PRF derivation), subsequent
+                    // launches hit the SeedVault cache. Throws
+                    // SigilRequiredException if the user hasn't forged
+                    // a passkey yet, which the catch below translates
+                    // into a "forge your sigil first" prompt.
+                    val seed = walletSeedSource.ensureSeedReady(this@KicksActivity)
+                    val manager = try {
+                        MatchManager(
+                            context = applicationContext,
+                            network = MidnightNetwork.UNDEPLOYED,
+                            seed = seed,
+                            // Pass the Hilt-singleton MatchStore so both
+                            // KicksActivity and MatchManager share one
+                            // instance — the same one MatchStoreBackupProvider
+                            // reads from for cloud backup. Without this,
+                            // MatchManager would construct its own
+                            // EncryptedSharedPreferences handle and a save
+                            // here wouldn't be visible to the Activity-side
+                            // read (or to the backup pipeline).
+                            store = store,
+                        )
+                    } finally {
+                        // MatchManager.copyOf's the seed in its constructor;
+                        // wipe our local view so seed material doesn't
+                        // sit in this Activity's heap.
+                        seed.fill(0)
+                    }
                     // Bind statusMessage to the SDK's published state — this
                     // is the canonical way to surface progress in a Kuira dApp.
                     // One StateFlow drives every label the user sees.
@@ -572,6 +601,13 @@ class KicksActivity : FragmentActivity() {
                     matchManager = manager
                 }
                 onReady()
+            } catch (e: SigilRequiredException) {
+                // The wallet seed derives from the user's passkey; until
+                // a sigil is forged we can't bootstrap. Surface an
+                // actionable hint instead of a generic error — the sigil
+                // panel (top of screen) is the user's next stop.
+                Log.i(TAG, "SDK init gated on sigil — prompting forge")
+                statusMessage.value = "Forge your sigil first (tap the sigil chip up top)."
             } catch (e: Exception) {
                 Log.e(TAG, "SDK init failed", e)
                 statusMessage.value = "Error: ${e.message}"
@@ -1145,15 +1181,6 @@ fun KicksApp(
         }
     }
 }
-
-/** Test seed — same as BBoard's alice wallet. */
-private val TEST_SEED = hexToBytes(
-    "7dc468f62278cd0c14b6674f31531a90b64599d657d3c7ab2adb63395d647f7a" +
-    "505de6428fcf8b0d208873f4d5e2a1340c14688067477542f53c48dfea817da4"
-)
-
-private fun hexToBytes(hex: String): ByteArray =
-    ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
 
 @Composable
 private fun MenuButton(text: String, onClick: () -> Unit) {
