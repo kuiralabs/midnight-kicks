@@ -38,7 +38,7 @@ fun MatchReadyScreen(
     onBack: () -> Unit,
     onContinue: () -> Unit,
 ) {
-    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A0A)) {
+    Surface(modifier = Modifier.fillMaxSize(), color = KicksColors.Background) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -52,7 +52,7 @@ fun MatchReadyScreen(
 
             Text(
                 "✓",
-                color = Color(0xFF8CFF7B),
+                color = KicksColors.SuccessBright,
                 fontSize = 64.sp,
                 fontWeight = FontWeight.W200,
             )

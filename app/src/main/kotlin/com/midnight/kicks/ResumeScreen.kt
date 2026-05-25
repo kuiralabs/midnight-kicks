@@ -74,7 +74,7 @@ fun ResumeScreen(
      */
     onAbandon: (MatchStore.Match) -> Unit = {},
 ) {
-    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A0A)) {
+    Surface(modifier = Modifier.fillMaxSize(), color = KicksColors.Background) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -169,8 +169,8 @@ private fun MatchRow(
                 modifier = Modifier
                     .background(
                         color = when (match.role) {
-                            Player.P1 -> Color(0xFF4FB7FF).copy(alpha = 0.18f)
-                            Player.P2 -> Color(0xFF8CFF7B).copy(alpha = 0.18f)
+                            Player.P1 -> KicksColors.AccentBright.copy(alpha = 0.18f)
+                            Player.P2 -> KicksColors.SuccessBright.copy(alpha = 0.18f)
                         },
                         shape = RoundedCornerShape(6.dp),
                     )

@@ -135,7 +135,7 @@ private fun ReplayBody(hudReplay: MatchHud.HudReplay, localRole: Player?) {
             // event without doing anything. The Continue button's own
             // Modifier.clickable wins over this in its own bounds.
             .pointerInput(Unit) { detectTapGestures {} }
-            .background(Color(0xE6050505))   // ~90% opaque
+            .background(KicksColors.OverlayScrim)   // ~90% opaque
             .statusBarsPadding()
             .padding(20.dp),
     ) {
@@ -182,7 +182,7 @@ private fun Header(kind: MatchHud.ReplayKind, sdRoundNumber: Int?) {
     }
     Text(
         text = title,
-        color = Color(0xFFFFB74D),
+        color = KicksColors.Pending,
         fontSize = 20.sp,
         fontWeight = FontWeight.Bold,
         letterSpacing = 4.sp,
@@ -206,7 +206,7 @@ private fun Scoreboard(p1Score: Int, p2Score: Int, localRole: Player?) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        ScoreCell(label = p1Label, score = p1Score, accent = Color(0xFF64B5F6))
+        ScoreCell(label = p1Label, score = p1Score, accent = KicksColors.Accent)
         Text(
             text = "—",
             color = Color.White.copy(alpha = 0.3f),
@@ -276,7 +276,7 @@ private fun RoundRow(round: RoundResult) {
         Box(
             modifier = Modifier
                 .background(
-                    color = if (isGoal) Color(0xFF2E7D32) else Color(0xFF4E342E),
+                    color = if (isGoal) KicksColors.Goal else KicksColors.Save,
                     shape = RoundedCornerShape(50),
                 )
                 .padding(horizontal = 12.dp, vertical = 4.dp),
@@ -316,7 +316,7 @@ private fun ContinueButton(
             .fillMaxWidth()
             .clickable { MatchHud.dismissReplay() }
             .background(
-                color = Color(0xFFFFB74D),
+                color = KicksColors.Pending,
                 shape = RoundedCornerShape(12.dp),
             )
             .padding(vertical = 14.dp),
@@ -324,7 +324,7 @@ private fun ContinueButton(
     ) {
         Text(
             text = nextCopy,
-            color = Color(0xFF222222),
+            color = KicksColors.SurfaceMuted,
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.5.sp,

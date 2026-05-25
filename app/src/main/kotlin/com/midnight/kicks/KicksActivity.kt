@@ -1156,7 +1156,7 @@ fun KicksApp(
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = Color(0xFF0A0A0A),
+        color = KicksColors.Background,
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             PanelBar(network = MidnightNetwork.UNDEPLOYED)
@@ -1211,7 +1211,7 @@ fun KicksApp(
                     if (lastChoices != null) {
                         Text(
                             lastChoices,
-                            color = Color(0xFF64B5F6),
+                            color = KicksColors.Accent,
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Medium,
                             letterSpacing = 4.sp,

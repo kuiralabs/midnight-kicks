@@ -50,7 +50,7 @@ fun JoinMatchScreen(
 ) {
     var address by remember { mutableStateOf(prefilledAddress.orEmpty()) }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A0A)) {
+    Surface(modifier = Modifier.fillMaxSize(), color = KicksColors.Background) {
         Column(
             modifier = Modifier
                 .fillMaxSize()

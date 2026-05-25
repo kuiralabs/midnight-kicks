@@ -61,7 +61,7 @@ fun CreateMatchScreen(
     // accident while the user is fiddling with the QR / copy.
     var confirmingCancel by remember { mutableStateOf(false) }
 
-    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A0A)) {
+    Surface(modifier = Modifier.fillMaxSize(), color = KicksColors.Background) {
         Column(
             modifier = Modifier
                 .fillMaxSize()

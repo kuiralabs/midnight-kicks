@@ -116,7 +116,7 @@ private fun HudBanner(
             .statusBarsPadding()
             .padding(horizontal = 12.dp, vertical = 8.dp)
             .background(
-                color = Color(0xCC0A0A0A),     // 80% opaque near-black
+                color = KicksColors.BannerScrim,     // 80% opaque near-black
                 shape = RoundedCornerShape(12.dp),
             )
             .padding(12.dp),
@@ -197,10 +197,10 @@ private fun ModeIndicator(mode: MatchHud.Mode, accent: Color) {
 
 /** Accent color per mode — drives both the pulse dot and the sub-line. */
 private fun accentColorFor(mode: MatchHud.Mode): Color = when (mode) {
-    MatchHud.Mode.PICKING -> Color(0xFFB2DFDB)                   // teal — "your turn"
-    MatchHud.Mode.TX_IN_FLIGHT -> Color(0xFF64B5F6)              // light blue
-    MatchHud.Mode.WAITING_FOR_OPPONENT -> Color(0xFFFFB74D)      // amber
-    MatchHud.Mode.DONE -> Color(0xFF81C784)                      // green
+    MatchHud.Mode.PICKING -> KicksColors.Picking                   // teal — "your turn"
+    MatchHud.Mode.TX_IN_FLIGHT -> KicksColors.Accent              // light blue
+    MatchHud.Mode.WAITING_FOR_OPPONENT -> KicksColors.Pending      // amber
+    MatchHud.Mode.DONE -> KicksColors.Success                      // green
     MatchHud.Mode.ERROR -> KicksColors.Danger                    // red
     MatchHud.Mode.IDLE -> Color.Transparent
 }
