@@ -127,7 +127,12 @@ Separate repo: `midnight-kicks/` (app/ + unity/ + contract/). Consumes Kuira SDK
   - [ ] **On-chain leaderboard (registry contract) — deferred to v1.1 (post-beta).** Approach decided 2026-05-24 (registry contract; verify-via-`external-contract` trust model so a client can't record a win that didn't happen). The game is fully playable without it, so it's punted past open beta. Build notes in the Leaderboard section.
 - [ ] **Phase 5 — Polish + release**
   - [ ] APK size audit (< 100MB), proof latency tuning
-  - [ ] Error handling, timeout UX, disconnect recovery — resume + idempotent transitions (Phase 4 hardening) already cover app-kill/resume; the gaps left are mid-tx error surfaces and the commit-timeout forfeit UX
+  - [ ] Error handling, timeout UX, disconnect recovery
+    - [x] Legible HUD failure copy — `KicksErrorCopy` maps `MatchState.Failed` throwables to plain-language lines (network/indexer, deadline, dust, funds, contract-rejected) instead of raw exceptions; raw stays in logs.
+    - [x] Creator cancel-and-refund — `MatchManager.cancelMatch()` + a two-tap-confirm "Cancel match" on `CreateMatchScreen` (contract `cancelMatch`, valid in WAITING; no deadline gate). The no-opponent-joined escape hatch.
+    - [x] App-kill / resume recovery — covered by Phase 4's resume-aware + idempotent transitions.
+    - [ ] **In-match forfeit claim — deferred.** `MatchManager.claimForfeit()` (contract `claimTimeout`) is wired but has no UI: the 24h commit deadline makes an in-match "claim pot" impractical (claimTimeout can't fire for 24h). Needs a shorter beta deadline + a surface to live on before it's worth building.
+    - [ ] Mid-tx error surfaces beyond the HUD line (per-stage failure detail).
   - [ ] **Adopt `MidnightSdkProvider`** — `MatchManager` still builds its own `MidnightSdk` via `initSdkInternal`; switching to the shared provider gives single-sync (no duplicate indexer/zswap/dust) and inherits the session auto-lock seam (wishlist #14) for free
   - [ ] **Unity in a separate process** (`android:process=":unity"`) — eliminates the shared-main-thread ANR seen when Unity's onDestroy takes >10s on emulator. Requires re-plumbing `UnityBridge` across processes (AIDL/IPC) since static-field passing breaks. Current workaround: `RequestPause` kills the process to bypass Unity teardown.
   - [ ] **Pause button polish** — replace `GUI.Button("II")` with a Canvas-based pause icon + proper styling.
