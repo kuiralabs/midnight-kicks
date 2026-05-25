@@ -133,10 +133,17 @@ class KicksActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Register for Unity bridge messages
+        // Register for Unity bridge messages. Post-split these arrive relayed
+        // from :unity via MatchBridge → mainInbox → UnityBridge.onMessageFromUnity,
+        // so the orchestration here is unchanged.
         UnityBridge.onMessageFromUnity = { json ->
             runOnUiThread { handleUnityMessage(json) }
         }
+
+        // main → :unity HUD relay: MatchManager publishes HudState here; ship
+        // each change to the :unity overlays. The :unity activity applies it
+        // via MatchHud.applyRemote (see KicksMatchActivity / MatchBridge).
+        MatchHud.relayHook = { json -> MatchBridge.publishHud(json) }
 
         // Surface RESUME MATCH if a previous session is on disk. Independent
         // from any deep-link handling: even a cold launch with no intent
@@ -547,6 +554,7 @@ class KicksActivity : FragmentActivity() {
 
     override fun onDestroy() {
         UnityBridge.onMessageFromUnity = null
+        MatchHud.relayHook = null
         // MatchManager owns the SDK + the StatePoller + secret keys —
         // closing it releases native FFI resources, the indexer websocket,
         // and wipes key material. The lifecycleScope cancels its own
@@ -851,6 +859,10 @@ class KicksActivity : FragmentActivity() {
      * the status line so they know what state they're in.
      */
     private fun handleMatchPaused() {
+        // :unity sent this right before killing itself (GameController), so its
+        // inbox is about to become a dead Messenger — drop our reference now
+        // rather than waiting for the next relay to hit RemoteException.
+        MatchBridge.onUnityGone()
         statusMessage.value = "Paused — tap CREATE MATCH to start a new match"
     }
 

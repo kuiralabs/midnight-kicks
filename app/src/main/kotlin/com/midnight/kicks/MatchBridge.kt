@@ -38,15 +38,31 @@ object MatchBridge {
     const val TAG = "MatchBridge"
 
     // message.what codes (shared by both ends)
-    const val MSG_REGISTER = 1    // :unity → main: msg.replyTo carries :unity's inbox
-    const val MSG_TO_UNITY = 2    // main → :unity: KEY_JSON → UnitySendMessage
-    const val MSG_PUBLISH_HUD = 3 // main → :unity: KEY_JSON = serialized HUD snapshot
-    const val MSG_FROM_UNITY = 4  // :unity → main: KEY_JSON from Unity
+    const val MSG_REGISTER = 1       // :unity → main: msg.replyTo carries :unity's inbox
+    const val MSG_TO_UNITY = 2       // main → :unity: KEY_JSON → UnitySendMessage
+    const val MSG_PUBLISH_HUD = 3    // main → :unity: KEY_JSON = HUD event (MatchHud.applyRemote)
+    const val MSG_FROM_UNITY = 4     // :unity → main: KEY_JSON from Unity
+    const val MSG_HUD_FROM_UNITY = 5 // :unity → main: HUD event (e.g. dismissReplay)
 
     const val KEY_JSON = "json"
 
     /** :unity's inbox, learned on [MSG_REGISTER]; null when no match process is bound. */
     @Volatile private var unityInbox: Messenger? = null
+
+    /**
+     * Unity-bound messages ([MSG_TO_UNITY]) sent before `:unity` finished
+     * binding. The first `choicePhase` is fired off a fixed boot delay in
+     * [KicksActivity]; with Unity now in its **own process** that cold-start is
+     * slower and variable, so the message can beat the bind. Buffering here +
+     * flushing on [MSG_REGISTER] makes delivery race-free regardless of the
+     * delay. Only the boot window buffers (1–2 messages); bounded so a `:unity`
+     * that never binds can't grow it without limit.
+     *
+     * HUD snapshots ([MSG_PUBLISH_HUD]) are NOT buffered — they're state, not
+     * events, and [MatchHud.resendCurrent] re-pushes the latest on register.
+     */
+    private val pendingToUnity = ArrayDeque<String>()
+    private const val MAX_PENDING_TO_UNITY = 16
 
     /**
      * Main's inbox — receives [MSG_REGISTER] + [MSG_FROM_UNITY] from `:unity`.
@@ -59,12 +75,25 @@ object MatchBridge {
                     MSG_REGISTER -> {
                         unityInbox = msg.replyTo
                         Log.i(TAG, "main: :unity registered its inbox")
+                        // Order matters: inbox is set, so now drain anything
+                        // that fired during cold-start (the first choicePhase),
+                        // then push the current HUD snapshot so a freshly-bound
+                        // overlay isn't blank.
+                        flushPendingToUnity()
+                        MatchHud.resendCurrent()
                     }
                     MSG_FROM_UNITY -> {
                         val json = msg.data?.getString(KEY_JSON) ?: return
                         // Same callback the in-process UnityBridge fed; the
                         // orchestration (KicksActivity) is unchanged downstream.
                         UnityBridge.onMessageFromUnity?.invoke(json)
+                    }
+                    MSG_HUD_FROM_UNITY -> {
+                        val json = msg.data?.getString(KEY_JSON) ?: return
+                        // :unity-originated HUD event (the overlay's Continue
+                        // tap → dismissReplay). Apply locally so the
+                        // orchestrator awaiting `replay == null` wakes.
+                        MatchHud.applyRemote(json)
                     }
                     else -> super.handleMessage(msg)
                 }
@@ -73,15 +102,37 @@ object MatchBridge {
     }
 
     /** main → `:unity`: deliver JSON for Unity's `UnitySendMessage`. */
-    fun sendToUnity(json: String) = relay(MSG_TO_UNITY, json)
+    fun sendToUnity(json: String) {
+        if (unityInbox == null) {
+            // Cold-start window: buffer, flush on register (see [pendingToUnity]).
+            synchronized(pendingToUnity) {
+                pendingToUnity.addLast(json)
+                while (pendingToUnity.size > MAX_PENDING_TO_UNITY) pendingToUnity.removeFirst()
+                Log.i(TAG, ":unity not bound — buffered (pending=${pendingToUnity.size})")
+            }
+            return
+        }
+        relay(MSG_TO_UNITY, json)
+    }
 
     /** main → `:unity`: a serialized [MatchHud] snapshot for the overlays. */
     fun publishHud(serializedSnapshot: String) = relay(MSG_PUBLISH_HUD, serializedSnapshot)
 
+    /** Drain [pendingToUnity] in FIFO order once `:unity` has registered. */
+    private fun flushPendingToUnity() {
+        val pending = synchronized(pendingToUnity) {
+            val drained = pendingToUnity.toList()
+            pendingToUnity.clear()
+            drained
+        }
+        if (pending.isNotEmpty()) Log.i(TAG, "flushing ${pending.size} buffered → :unity")
+        pending.forEach { relay(MSG_TO_UNITY, it) }
+    }
+
     private fun relay(what: Int, json: String) {
         val target = unityInbox ?: run {
-            // Pre-bind (or after :unity died) we drop — the orchestrator
-            // re-sends on the next phase, and the overlay re-reads HUD on bind.
+            // Pre-bind (or after :unity died) we drop — sendToUnity buffers
+            // separately; HUD is re-pushed by resendCurrent on bind.
             Log.w(TAG, ":unity not bound — dropping what=$what")
             return
         }
@@ -98,6 +149,9 @@ object MatchBridge {
     /** Called when the `:unity` process goes away (match exit / kill). */
     fun onUnityGone() {
         unityInbox = null
+        // Drop any buffered messages — they belong to the match that just
+        // ended and must not flush into the next `:unity` that binds.
+        synchronized(pendingToUnity) { pendingToUnity.clear() }
     }
 }
 

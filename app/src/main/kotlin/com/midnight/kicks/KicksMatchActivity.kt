@@ -1,6 +1,17 @@
 package com.midnight.kicks
 
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.os.Bundle
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.Message
+import android.os.Messenger
+import android.os.RemoteException
+import android.util.Log
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.foundation.layout.Box
@@ -16,33 +27,126 @@ import com.unity3d.player.UnityPlayerGameActivity
  * status banner ([MatchHudOverlay]) stays visible during the long
  * blockchain waits.
  *
+ * **Runs in its own `:unity` process** (`android:process=":unity"` in the
+ * manifest). That's the Approach A fix for the exit ANR: Unity's `onDestroy`
+ * blocks its host's main thread for 10s+, but here that thread belongs to
+ * `:unity`, not main — so the menu ([KicksActivity], main process) stays
+ * responsive, and killing `:unity` on exit tears Unity down instantly without
+ * touching main. See `docs/PLAN.md`.
+ *
+ * **The bridge spans the process boundary now.** The orchestration
+ * ([MatchManager], the SDK, the [MatchHud] publisher) lives in main; this
+ * activity + the Compose overlays live in `:unity`. This activity binds to
+ * [MatchBridgeService] (main process), hands main its inbox via
+ * [MatchBridge.MSG_REGISTER], and relays:
+ *   - main → `:unity`: `MSG_TO_UNITY` → [UnityBridge.deliverToUnityPlayer];
+ *     `MSG_PUBLISH_HUD` → [MatchHud.applyRemote] (overlays re-render).
+ *   - `:unity` → main: Unity callbacks → `MSG_FROM_UNITY`; HUD events (the
+ *     replay Continue tap → `dismissReplay`) → `MSG_HUD_FROM_UNITY`.
+ *
  * **Why subclass instead of embed-as-fragment:** Unity 6's
- * [com.unity3d.player.UnityPlayerGameActivity] extends
- * `GameActivity` (from `com.google.androidgamesdk`) which manages the
- * native window + GameActivity bridge thread. Subclassing keeps that
- * machinery untouched. Embedding Unity inside our own Activity would
- * mean fighting the Unity team's lifecycle assumptions for no
- * benefit — the overlay only needs to sit visually above the Unity
- * surface, not share a Compose tree with it.
+ * [com.unity3d.player.UnityPlayerGameActivity] extends `GameActivity` which
+ * manages the native window + GameActivity bridge thread. Subclassing keeps
+ * that machinery untouched; the overlay only needs to sit visually above the
+ * Unity surface, not share a Compose tree with it.
  *
- * **How the overlay attaches:** `UnityPlayerGameActivity.onCreate` sets
- * the content view to a FrameLayout containing Unity's SurfaceView (via
- * `GameActivity.contentViewId`). We `addContentView` a transparent
- * `ComposeView` *after* `super.onCreate(...)`, which adds it as a
- * sibling of the Unity surface — same FrameLayout, but rendered above
- * it in z-order because it's added last.
- *
- * The ComposeView itself observes [MatchHud.state] via the overlay
- * Composable; no per-Activity wiring is needed. [MatchManager] is the
- * sole publisher.
+ * **How the overlay attaches:** we `addContentView` a transparent
+ * [ComposeView] *after* `super.onCreate(...)`, which adds it as a sibling of
+ * Unity's surface — same FrameLayout, rendered above it because it's added
+ * last.
  *
  * Manifest declares this activity with the same theme + flags as Unity's
  * default activity — see `app/src/main/AndroidManifest.xml`.
  */
 class KicksMatchActivity : UnityPlayerGameActivity() {
 
+    private companion object {
+        const val TAG = "KicksMatchActivity"
+    }
+
+    /** main's inbox, obtained on bind; null until [conn] connects / after disconnect. */
+    private var toMain: Messenger? = null
+
+    /**
+     * `:unity`'s own inbox. Handles messages main pushes to us. Lives on
+     * `:unity`'s main looper, so [MatchHud.applyRemote] mutates state on the
+     * same thread the overlays collect on, and [UnityBridge.deliverToUnityPlayer]
+     * hands off on the UI thread.
+     */
+    private val unityInbox = Messenger(object : Handler(Looper.getMainLooper()) {
+        override fun handleMessage(msg: Message) {
+            when (msg.what) {
+                MatchBridge.MSG_TO_UNITY -> {
+                    val json = msg.data?.getString(MatchBridge.KEY_JSON) ?: return
+                    UnityBridge.deliverToUnityPlayer(json)
+                }
+                MatchBridge.MSG_PUBLISH_HUD -> {
+                    val json = msg.data?.getString(MatchBridge.KEY_JSON) ?: return
+                    MatchHud.applyRemote(json)
+                }
+                else -> super.handleMessage(msg)
+            }
+        }
+    })
+
+    private val conn = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder) {
+            val main = Messenger(binder).also { toMain = it }
+            Log.i(TAG, ":unity bound to main; registering inbox")
+
+            // Hand main our inbox (carried as replyTo, per MatchBridge).
+            try {
+                main.send(Message.obtain(null, MatchBridge.MSG_REGISTER).apply {
+                    replyTo = unityInbox
+                })
+            } catch (e: RemoteException) {
+                Log.w(TAG, "register failed: ${e.message}")
+                toMain = null
+                return
+            }
+
+            // `:unity` → main relays. Unity (running here) calls
+            // UnityBridge.receiveFromUnity → onMessageFromUnity; we forward to
+            // main's orchestration. The replay overlay's Continue tap calls
+            // MatchHud.dismissReplay → relayHook; we forward that too.
+            UnityBridge.onMessageFromUnity = { json -> sendToMain(MatchBridge.MSG_FROM_UNITY, json) }
+            MatchHud.relayHook = { json -> sendToMain(MatchBridge.MSG_HUD_FROM_UNITY, json) }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            // main process died/restarted. Drop the reference; BIND_AUTO_CREATE
+            // reconnects and re-registers when it returns.
+            Log.w(TAG, ":unity lost main connection")
+            toMain = null
+        }
+    }
+
+    private fun sendToMain(what: Int, json: String) {
+        val target = toMain ?: run {
+            Log.w(TAG, "main not bound — dropping what=$what")
+            return
+        }
+        try {
+            target.send(Message.obtain(null, what).apply {
+                data = Bundle().apply { putString(MatchBridge.KEY_JSON, json) }
+            })
+        } catch (e: RemoteException) {
+            Log.w(TAG, "main inbox dead (${e.message}) — clearing")
+            toMain = null
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Bind to the main-process bridge so the Kotlin↔Unity messages + HUD
+        // snapshots flow across the process boundary. BIND_AUTO_CREATE keeps
+        // main's service alive for the duration of the match.
+        bindService(
+            Intent(this, MatchBridgeService::class.java),
+            conn,
+            Context.BIND_AUTO_CREATE,
+        )
 
         // Compose view that renders MatchHudOverlay. ViewCompositionStrategy
         // `DisposeOnViewTreeLifecycleDestroyed` ties the composition to
@@ -89,5 +193,18 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
         addContentView(composeView, params)
+    }
+
+    override fun onDestroy() {
+        // Clear the `:unity`-side relays so a stale lambda can't fire after
+        // teardown, then unbind. NOTE: the normal exit path is
+        // GameController killing this process outright (instant teardown,
+        // dodges Unity's slow onDestroy) — in that case this never runs and
+        // the OS reclaims everything; main detects the dead inbox via
+        // handleMatchPaused → MatchBridge.onUnityGone.
+        UnityBridge.onMessageFromUnity = null
+        MatchHud.relayHook = null
+        runCatching { unbindService(conn) }
+        super.onDestroy()
     }
 }
