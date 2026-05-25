@@ -198,7 +198,10 @@ sealed class MatchState {
             is P1SdRevealed       -> if (isP2) "Opponent revealed SD — your turn (round $round)" else "Your SD pick revealed (round $round)"
             is P2SdRevealing      -> if (isP2) "Revealing SD round $round…" else "Opponent revealing SD round $round…"
             is Resolved           -> "Match complete!"
-            is Failed             -> "Failed: ${error.message ?: error.javaClass.simpleName}"
+            // Plain-language copy, not the raw exception — see toMatchErrorMessage.
+            // The HUD's ERROR mode already supplies the red "something's wrong"
+            // visual, so the text just needs to say what + how to recover.
+            is Failed             -> error.toMatchErrorMessage()
         }
     }
 }
