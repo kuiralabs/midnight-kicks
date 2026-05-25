@@ -10,6 +10,7 @@ import com.midnight.kuira.core.compact.WitnessResult
 import com.midnight.kuira.core.compact.proving.ProvingKeyManager
 import com.midnight.kuira.core.network.MidnightNetwork
 import com.midnight.kuira.sdk.MidnightSdk
+import com.midnight.kuira.sdk.walletruntime.MidnightSdkProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -63,7 +64,7 @@ import java.security.SecureRandom
 open class MatchManager(
     private val context: Context,
     private val network: MidnightNetwork,
-    seed: ByteArray,
+    seed: ByteArray? = null,
     /**
      * Multi-match encrypted store. Survives `kill -9` between commit
      * and reveal so the user's stake doesn't get stranded behind a
@@ -73,10 +74,19 @@ open class MatchManager(
      * threat model + lifetime contract.
      */
     private val store: MatchStore = MatchStore(context),
+    /**
+     * Shared SDK owner. When non-null (production), MatchManager is a
+     * *follower*: [initSdkInternal] takes the SDK the config authority
+     * (KicksActivity / the wallet panel) already built via the provider —
+     * one SDK, one chain sync for the whole app. When null (standalone /
+     * non-panel hosts), MatchManager builds its own SDK from [seed].
+     */
+    private val sdkProvider: MidnightSdkProvider? = null,
 ) {
     // Take the seed by value into a local-only field so we can wipe it from
-    // both the caller's reference and our own at close() time.
-    private var seed: ByteArray? = seed.copyOf()
+    // both the caller's reference and our own at close() time. Null when a
+    // shared [sdkProvider] supplies the SDK (the provider owns the seed).
+    private var seed: ByteArray? = seed?.copyOf()
 
     private val _state = MutableStateFlow<MatchState>(MatchState.Idle)
     /** Observable state for UI / BlockStore / StatePoller. */
@@ -250,18 +260,27 @@ open class MatchManager(
      * stand-up of mockk-final-class machinery.
      */
     internal open suspend fun initSdkInternal() {
-        installProvingKeys()
-        val builtSdk = MidnightSdk.Builder(context)
-            .network(network)
-            .seed(requireNotNull(seed) { "seed already wiped" })
-            .build()
-        sdk = builtSdk
-        Log.i(TAG, "SDK initialized, wallet: ${builtSdk.walletAddress}")
-        Log.i(TAG, "Wallet keys installed: ${builtSdk.provingKeyManager.hasWalletKeys()}")
-
-        // Seed has been copied into the SDK by build(); wipe our local copy.
-        seed?.fill(0)
-        seed = null
+        val provider = sdkProvider
+        if (provider != null) {
+            // Follower path: the config authority (KicksActivity) already built
+            // the one shared SDK via the provider, so we just take it. The
+            // provider owns wallet proving-key readiness; we only need our own
+            // contract circuit keys. No seed here — the provider sourced it.
+            installContractCircuitKeys()
+            sdk = provider.awaitSdk()
+        } else {
+            // Standalone path: build our own SDK from the supplied seed. Used by
+            // non-panel hosts; tests override this method entirely.
+            installProvingKeys()
+            sdk = MidnightSdk.Builder(context)
+                .network(network)
+                .seed(requireNotNull(seed) { "seed required when no sdkProvider" })
+                .build()
+            seed?.fill(0)
+            seed = null
+        }
+        Log.i(TAG, "SDK ready, wallet: ${sdk?.walletAddress}")
+        Log.i(TAG, "Wallet keys installed: ${sdk?.provingKeyManager?.hasWalletKeys()}")
     }
 
     /**
@@ -1866,7 +1885,10 @@ open class MatchManager(
     fun close() {
         managerScope.cancel()  // stops StatePoller and any in-flight observers
         pollerJob = null
-        sdk?.close()
+        // Only close the SDK if we built it (standalone). When it came from the
+        // shared MidnightSdkProvider, the provider owns its lifecycle — closing
+        // it here would tear down the wallet panel's SDK out from under it.
+        if (sdkProvider == null) sdk?.close()
         sdk = null
         p1SecretKey.fill(0)
         p2SecretKey.fill(0)

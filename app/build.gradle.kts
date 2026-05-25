@@ -132,10 +132,14 @@ dependencies {
     // single line below — no AAR copy, no transitive bookkeeping.
     implementation("com.midnight.kuira:dapp-ui:0.1.0-SNAPSHOT")
     implementation("com.midnight.kuira:midnight-sdk:0.1.0-SNAPSHOT")
-    // Single source of truth for the wallet's BIP-39 seed across the
-    // Kuira ecosystem. KicksActivity @Injects this and calls
-    // ensureSeedReady before constructing MatchManager so the seed
-    // Kicks signs with matches the one the wallet panel + BBoard see.
+    // Owns the one shared MidnightSdk + canonical WalletConfig. KicksActivity
+    // is the config authority (it calls ensureSdk with the activity), MatchManager
+    // is a follower (awaitSdk) — so Kicks runs a single SDK / single chain sync
+    // instead of the panel + MatchManager each building their own.
+    implementation("com.midnight.kuira:wallet-runtime:0.1.0-SNAPSHOT")
+    // Still declared directly so Hilt resolves MidnightSdkProvider's
+    // WalletSeedSource constructor param at Kicks's compile time (AAR
+    // implementation deps are runtime-scoped for consumers).
     implementation("com.midnight.kuira:wallet-seed:0.1.0-SNAPSHOT")
     // SDK uses `implementation(project(":core:*"))` so those types aren't
     // exposed to its consumers transitively. Kicks references compact types

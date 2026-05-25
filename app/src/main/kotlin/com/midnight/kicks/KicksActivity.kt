@@ -32,7 +32,9 @@ import androidx.lifecycle.lifecycleScope
 import com.midnight.kuira.dapp.PanelBar
 import com.midnight.kuira.core.identity.backup.SigilRequiredException
 import com.midnight.kuira.core.network.MidnightNetwork
-import com.midnight.kuira.sdk.walletseed.WalletSeedSource
+import com.midnight.kuira.core.identity.sigil.SigilStateStore
+import com.midnight.kuira.sdk.walletruntime.MidnightSdkProvider
+import com.midnight.kuira.sdk.walletruntime.WalletConfig
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CompletableDeferred
@@ -91,16 +93,19 @@ class KicksActivity : FragmentActivity() {
     @Inject lateinit var store: MatchStore
 
     /**
-     * Canonical wallet seed bootstrap, shared across every Kuira dApp.
-     * KicksActivity calls [WalletSeedSource.ensureSeedReady] in
-     * [ensureSdkReady] to get the BIP-39 seed handed to
-     * [MidnightSdk.Builder] — same passkey, same seed, same biometric
-     * cadence as the wallet panel + BBoard. Throws
-     * [SigilRequiredException] when the user hasn't forged a passkey
-     * yet; we translate that to a "forge your sigil first" status
-     * message instead of the generic "Error: …" path.
+     * Owner of the one shared [MidnightSdk]. KicksActivity is the config
+     * authority: [ensureSdkReady] calls [MidnightSdkProvider.ensureSdk] (same
+     * UNDEPLOYED config as the wallet panel, so the provider dedups to a single
+     * SDK / single chain sync), which triggers the seed bootstrap + biometric
+     * and throws [SigilRequiredException] when the user hasn't forged a passkey
+     * yet — translated to "forge your sigil first" instead of a generic error.
+     * MatchManager then *follows* the SDK this built.
      */
-    @Inject lateinit var walletSeedSource: WalletSeedSource
+    @Inject lateinit var sdkProvider: MidnightSdkProvider
+
+    /** Used to gate create/join on a forged sigil — without one, the wallet
+     *  bootstrap can't run and the flow would otherwise hang on a spinner. */
+    @Inject lateinit var sigilStateStore: SigilStateStore
     /**
      * Role this device is playing for the current Unity choice phase.
      * `null` → PvAI (legacy practice mode). Drives the dispatch in
@@ -252,7 +257,22 @@ class KicksActivity : FragmentActivity() {
      * they tap CHECK STATUS to one-shot poll the chain and advance to
      * [KicksScreen.MatchReady] if the opponent has joined.
      */
+    /**
+     * Gate: a funds-bearing flow can't start without a forged sigil (the
+     * wallet seed derives from the passkey). Returns true + sets a status hint
+     * if no sigil — callers must bail BEFORE switching to a loading screen, or
+     * the screen would spin forever once [ensureSdkReady] gates on the sigil.
+     */
+    private fun sigilMissing(): Boolean {
+        if (sigilStateStore.snapshot() == null) {
+            statusMessage.value = "Forge your sigil first (tap the sigil chip up top)."
+            return true
+        }
+        return false
+    }
+
     private fun startCreateMatch() {
+        if (sigilMissing()) return
         screen.value = KicksScreen.Creating(address = null)
         creatingStatus.value = null
         ensureSdkReady {
@@ -467,6 +487,7 @@ class KicksActivity : FragmentActivity() {
         val saved = store.load(address)
         val isResume = saved?.role == Player.P2
         Log.i(TAG, "Join requested for address: $address  isResume=$isResume")
+        if (sigilMissing()) return
         screen.value = KicksScreen.Joining(prefilledAddress = address, inFlight = true)
         ensureSdkReady {
             lifecycleScope.launch {
@@ -532,35 +553,28 @@ class KicksActivity : FragmentActivity() {
         lifecycleScope.launch {
             try {
                 if (matchManager == null) {
-                    // Derive the wallet seed via the shared
-                    // WalletSeedSource — first launch may show one
-                    // biometric prompt (PRF derivation), subsequent
-                    // launches hit the SeedVault cache. Throws
-                    // SigilRequiredException if the user hasn't forged
-                    // a passkey yet, which the catch below translates
-                    // into a "forge your sigil first" prompt.
-                    val seed = walletSeedSource.ensureSeedReady(this@KicksActivity)
-                    val manager = try {
-                        MatchManager(
-                            context = applicationContext,
-                            network = MidnightNetwork.UNDEPLOYED,
-                            seed = seed,
-                            // Pass the Hilt-singleton MatchStore so both
-                            // KicksActivity and MatchManager share one
-                            // instance — the same one MatchStoreBackupProvider
-                            // reads from for cloud backup. Without this,
-                            // MatchManager would construct its own
-                            // EncryptedSharedPreferences handle and a save
-                            // here wouldn't be visible to the Activity-side
-                            // read (or to the backup pipeline).
-                            store = store,
-                        )
-                    } finally {
-                        // MatchManager.copyOf's the seed in its constructor;
-                        // wipe our local view so seed material doesn't
-                        // sit in this Activity's heap.
-                        seed.fill(0)
-                    }
+                    // Build (or reuse) the one shared SDK via the provider.
+                    // First launch shows one biometric prompt (PRF derivation),
+                    // later launches hit the SeedVault cache. Same UNDEPLOYED
+                    // config as the wallet panel, so the provider dedups to a
+                    // single SDK. Throws SigilRequiredException if the user
+                    // hasn't forged a passkey yet — the catch below translates
+                    // that into a "forge your sigil first" prompt.
+                    sdkProvider.ensureSdk(
+                        this@KicksActivity,
+                        WalletConfig(network = MidnightNetwork.UNDEPLOYED),
+                    )
+                    val manager = MatchManager(
+                        context = applicationContext,
+                        network = MidnightNetwork.UNDEPLOYED,
+                        // Follower: takes the SDK the provider just built —
+                        // no second SDK, no second chain sync.
+                        sdkProvider = sdkProvider,
+                        // Shared Hilt-singleton MatchStore so KicksActivity,
+                        // MatchManager, and MatchStoreBackupProvider all read
+                        // one instance (cloud backup sees the same data).
+                        store = store,
+                    )
                     // Bind statusMessage to the SDK's published state — this
                     // is the canonical way to surface progress in a Kuira dApp.
                     // One StateFlow drives every label the user sees.
@@ -635,9 +649,15 @@ class KicksActivity : FragmentActivity() {
                 // panel (top of screen) is the user's next stop.
                 Log.i(TAG, "SDK init gated on sigil — prompting forge")
                 statusMessage.value = "Forge your sigil first (tap the sigil chip up top)."
+                // Don't strand the caller on a loading screen (the
+                // "Deploying…" / "Joining…" spinner) — that spinner never
+                // resolves because the onReady block above never ran. Drop
+                // back to the menu where the hint is visible.
+                if (screen.value !is KicksScreen.Menu) screen.value = KicksScreen.Menu
             } catch (e: Exception) {
                 Log.e(TAG, "SDK init failed", e)
                 statusMessage.value = "Error: ${e.message}"
+                if (screen.value !is KicksScreen.Menu) screen.value = KicksScreen.Menu
             }
         }
     }
