@@ -4,7 +4,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -18,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
@@ -97,8 +96,17 @@ private fun ReplayBody(hudReplay: MatchHud.HudReplay, localRole: Player?) {
     // to "all revealed".
     var revealedRows by remember(hudReplay.publishedAtMs) { mutableIntStateOf(0) }
     LaunchedEffect(hudReplay.publishedAtMs) {
-        // Brief delay before the first row so the user has time to
-        // read the header. Then reveal one row at a time.
+        // Kick off the 3D cinematic the instant the replay appears — the kicks
+        // are the main event, played live under this thin HUD (not gated behind
+        // a scoreboard + Continue any more). Then climb the running score
+        // roughly in step with them, one tick per round.
+        val winner = when {
+            replay.p1Score > replay.p2Score -> "P1"
+            replay.p2Score > replay.p1Score -> "P2"
+            else -> null
+        }
+        UnityBridge.playReplayCinematic(replay.rounds, replay.p1Score, replay.p2Score, winner)
+
         delay(INITIAL_PAUSE_MS)
         while (revealedRows < replay.rounds.size) {
             revealedRows += 1
@@ -127,15 +135,20 @@ private fun ReplayBody(hudReplay: MatchHud.HudReplay, localRole: Player?) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            // Absorb every touch while the replay is showing — without
-            // this, taps OUTSIDE the Continue button (i.e. the dimmed
-            // backdrop) fall through to Unity's surface below and can
-            // accidentally trigger Unity input the user can't see.
-            // `detectTapGestures {}` with an empty body consumes the
-            // event without doing anything. The Continue button's own
-            // Modifier.clickable wins over this in its own bounds.
+            // Absorb touches so they don't fall through to Unity while the
+            // replay plays; the Continue button's own clickable wins in its
+            // bounds.
             .pointerInput(Unit) { detectTapGestures {} }
-            .background(KicksColors.OverlayScrim)   // ~90% opaque
+            // Thin HUD: dark only at the very top + bottom for text legibility;
+            // the centre stays clear so the 3D kick cinematic is the star.
+            .background(
+                Brush.verticalGradient(
+                    0f to KicksColors.Background.copy(alpha = 0.82f),
+                    0.26f to Color.Transparent,
+                    0.74f to Color.Transparent,
+                    1f to KicksColors.Background.copy(alpha = 0.88f),
+                ),
+            )
             .statusBarsPadding()
             .padding(20.dp),
     ) {
@@ -146,21 +159,9 @@ private fun ReplayBody(hudReplay: MatchHud.HudReplay, localRole: Player?) {
         ) {
             Header(replay.kind, replay.sdRoundNumber)
             Spacer(modifier = Modifier.height(8.dp))
+            // Running score climbs as the kicks land (one tick per round).
             Scoreboard(p1Score = runningP1, p2Score = runningP2, localRole = localRole)
-            Spacer(modifier = Modifier.height(12.dp))
-            // Round rows. Each animates in via AnimatedVisibility based
-            // on whether its index has been reached by revealedRows.
-            replay.rounds.forEachIndexed { idx, round ->
-                AnimatedVisibility(
-                    visible = idx < revealedRows,
-                    enter = slideInVertically(
-                        initialOffsetY = { it / 2 },
-                        animationSpec = tween(durationMillis = 250),
-                    ) + fadeIn(animationSpec = tween(durationMillis = 250)),
-                ) {
-                    RoundRow(round = round)
-                }
-            }
+            // Centre left clear — the 3D kicks play there, under the HUD.
             Spacer(modifier = Modifier.weight(1f))
             if (allRevealed) {
                 ContinueButton(
@@ -236,63 +237,6 @@ private fun ScoreCell(label: String, score: Int, accent: Color) {
 }
 
 @Composable
-private fun RoundRow(round: RoundResult) {
-    val isGoal = round.result == "goal"
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                color = Color.White.copy(alpha = 0.04f),
-                shape = RoundedCornerShape(8.dp),
-            )
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // Round number
-        Text(
-            text = "${round.round}",
-            color = Color.White.copy(alpha = 0.4f),
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.width(24.dp),
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        // Shooter chip
-        Text(
-            text = "${round.shooter} ${dirArrow(round.shootDir)}",
-            color = Color.White,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.weight(1f),
-        )
-        // Keeper move
-        Text(
-            text = "vs ${dirArrow(round.keepDir)}",
-            color = Color.White.copy(alpha = 0.6f),
-            fontSize = 13.sp,
-            modifier = Modifier.weight(1f),
-        )
-        // Outcome pill
-        Box(
-            modifier = Modifier
-                .background(
-                    color = if (isGoal) KicksColors.Goal else KicksColors.Save,
-                    shape = RoundedCornerShape(50),
-                )
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-        ) {
-            Text(
-                text = if (isGoal) "GOAL" else "SAVE",
-                color = Color.White,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.sp,
-            )
-        }
-    }
-}
-
-@Composable
 private fun ContinueButton(
     finalP1Score: Int,
     finalP2Score: Int,
@@ -332,15 +276,6 @@ private fun ContinueButton(
         )
     }
 }
-
-/** L/C/R direction code → arrow glyph for compact row display. */
-private fun dirArrow(d: Int): String = when (d) {
-    0 -> "←"   // LEFT
-    1 -> "↑"   // CENTER
-    2 -> "→"   // RIGHT
-    else -> "?"
-}
-
 /** Pause before the first row reveals — lets the user read the header. */
 private const val INITIAL_PAUSE_MS: Long = 600L
 

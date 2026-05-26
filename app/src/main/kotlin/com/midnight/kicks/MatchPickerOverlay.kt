@@ -91,18 +91,31 @@ private fun PickerContent(show: MatchHud.PickerShow) {
     // Per-round collection state; keyed on `show` so a fresh choice phase
     // (new PickerShow instance) resets the picks + index.
     val picks = remember(show) { IntArray(total) { -1 } }
-    var index by remember(show) { mutableIntStateOf(0) }
+    var step by remember(show) { mutableIntStateOf(0) }
+
+    // Grouped presentation: all SHOOT picks first, then all KEEP — the player
+    // stays in one mindset instead of flip-flopping shoot/keep each round.
+    // Picks are stored at their CANONICAL round index (order[step]), so the
+    // contract bucketing downstream is unchanged — only the on-screen order
+    // differs. Stable sort keeps each group's rounds in their natural order.
+    val order = remember(show) {
+        show.roles.indices.sortedBy { if (show.roles[it] == "shoot") 0 else 1 }
+    }
+    val shootCount = remember(show) { show.roles.count { it == "shoot" } }
 
     // All picks in → submit through the legacy choicesLocked path + close.
-    LaunchedEffect(show, index) {
-        if (index >= total && total > 0) {
+    LaunchedEffect(show, step) {
+        if (step >= total && total > 0) {
             UnityBridge.submitLocalPicks(picks.copyOf())
             MatchHud.dismissPicker()
         }
     }
 
-    val safeIndex = index.coerceIn(0, (total - 1).coerceAtLeast(0))
-    val isShoot = show.roles.getOrElse(safeIndex) { "shoot" } == "shoot"
+    val safeStep = step.coerceIn(0, (total - 1).coerceAtLeast(0))
+    val isShoot = show.roles.getOrElse(order.getOrElse(safeStep) { 0 }) { "shoot" } == "shoot"
+    // Position within the current group, e.g. "3 of 5" — shoots come first.
+    val groupTotal = if (isShoot) shootCount else total - shootCount
+    val groupPos = if (isShoot) safeStep + 1 else safeStep - shootCount + 1
     val accent by animateColorAsState(
         if (isShoot) KicksColors.SuccessBright else KicksColors.Pending,
         tween(220),
@@ -110,9 +123,9 @@ private fun PickerContent(show: MatchHud.PickerShow) {
     )
 
     val onPick: (Int) -> Unit = { dir ->
-        if (index < total) {
-            picks[index] = dir
-            index++
+        if (step < total) {
+            picks[order[step]] = dir
+            step++
         }
     }
 
@@ -142,7 +155,7 @@ private fun PickerContent(show: MatchHud.PickerShow) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
-            // ── Top: round title + progress pips ──
+            // ── Top: round title + group progress + pips ──
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = show.title.uppercase(),
@@ -151,13 +164,21 @@ private fun PickerContent(show: MatchHud.PickerShow) {
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 2.sp,
                 )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = "${if (isShoot) "SHOOTING" else "KEEPING"} · $groupPos of $groupTotal",
+                    color = accent,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp,
+                )
                 Spacer(Modifier.height(12.dp))
-                ProgressPips(total = total, done = index, accent = accent)
+                ProgressPips(total = total, done = step, accent = accent)
             }
 
-            // ── Centre: role banner, crossfading on each pick ──
-            Crossfade(targetState = safeIndex, label = "role") { i ->
-                val shoot = show.roles.getOrElse(i) { "shoot" } == "shoot"
+            // ── Centre: role banner, crossfading only on the shoot↔keep switch
+            // (stays put within a group so the player isn't visually nagged). ──
+            Crossfade(targetState = isShoot, label = "role") { shoot ->
                 RoleBanner(isShoot = shoot)
             }
 

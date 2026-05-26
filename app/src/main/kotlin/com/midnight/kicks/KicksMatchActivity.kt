@@ -176,6 +176,10 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
                 // When the replay isn't showing, the Box has nothing
                 // to draw beyond the HUD itself.
                 Box(modifier = Modifier.fillMaxSize()) {
+                    // Full-screen wait "stage" (covers Unity's idle label +
+                    // masks the commit/reveal wait). Bottom of the stack — the
+                    // phase overlays below are mutually exclusive with it.
+                    MatchStageOverlay()
                     MatchReplayOverlay()
                     MatchHudOverlay()
                     // Picker on top — when a choice phase is open it's a focused

@@ -26,8 +26,14 @@ object UnityBridge {
     // overlay [MatchPickerOverlay], driven by [MatchHud.showPicker]. Unity owns
     // the 3D scene + the replay cinematic below.
 
-    /** Tell Unity to play the regulation replay. */
-    fun sendReplay(rounds: List<RoundResult>, p1Score: Int, p2Score: Int, winner: String?) {
+    /**
+     * Play the 3D kick cinematic for [rounds] — the main event of the replay.
+     * Called by [MatchReplayOverlay] (which runs in `:unity`) the instant the
+     * replay appears, so the kicks are shown immediately rather than gated
+     * behind a text scoreboard + Continue. Uses [deliverToUnityPlayer] (the
+     * `:unity`-local hand-off) since the caller is already in `:unity`.
+     */
+    fun playReplayCinematic(rounds: List<RoundResult>, p1Score: Int, p2Score: Int, winner: String?) {
         val json = JSONObject().apply {
             put("type", "replay")
             put("rounds", roundsToJson(rounds))
@@ -37,7 +43,7 @@ object UnityBridge {
             })
             put("winner", winner ?: JSONObject.NULL)
         }
-        relayToUnity(json.toString())
+        deliverToUnityPlayer(json.toString())
     }
 
     /** Tell Unity to show a status message (waiting, proving, etc.). */

@@ -1023,10 +1023,14 @@ class KicksActivity : FragmentActivity() {
         }
 
         Log.i(TAG, "Match result: P1=$p1Score P2=$p2Score winner=$winner role=$currentRole")
-        statusMessage.value = when (currentRole) {
-            null -> "You $p1Score - $p2Score AI"
-            Player.P1 -> "You $p1Score - $p2Score opponent"
-            Player.P2 -> "Opponent $p1Score - $p2Score You"
+        // Win-text flourish from THIS device's perspective (P2's "mine" is the
+        // chain's p2Score). Moved here from handleReplayComplete — see below.
+        val (mine, theirs) = if (currentRole == Player.P2) p2Score to p1Score else p1Score to p2Score
+        val themName = if (currentRole == null) "AI" else "OPPONENT"
+        statusMessage.value = when {
+            mine > theirs -> "YOU WIN!  $mine – $theirs"
+            theirs > mine -> "$themName WINS  $mine – $theirs"
+            else -> "DRAW  $mine – $theirs"
         }
 
         // Opponent's regulation shoots — whichever side this device is,
@@ -1046,12 +1050,17 @@ class KicksActivity : FragmentActivity() {
             hasActiveSession.value = store.loadAll().isNotEmpty()
         }
 
-        UnityBridge.sendReplay(
-            rounds = result.toRoundResults(),
-            p1Score = p1Score,
-            p2Score = p2Score,
-            winner = winner,
-        )
+        // The 3D kick cinematic is no longer fired here (it used to play
+        // dead-last). MatchReplayOverlay plays it the moment the replay appears
+        // — the kicks are the main event, not a post-script. This block now
+        // just gates the winner UI on that replay being seen.
+
+        // Release the role at the true end of the match. This moved out of
+        // handleReplayComplete: the cinematic now completes *during* the replay
+        // (firing replayComplete per round), so clearing there would null the
+        // role before this handler reads it on a decisive match → PvP results
+        // mislabelled as PvAI. Cleared here, after the role has been used.
+        currentRole = null
     }
 
     /**
@@ -1128,28 +1137,12 @@ class KicksActivity : FragmentActivity() {
     }
 
     private fun handleReplayComplete() {
-        Log.i(TAG, "Replay finished (role=$currentRole)")
-        val result = matchManager?.lastResult ?: return
-        val (p1, p2) = result.scores()
-        // "You" depends on which side this device was on. For PvP-as-P2
-        // the chain scoreboard's p1Score is the opponent's, so flip
-        // the WIN/LOSE perspective. PvAI keeps the original P1-centric
-        // text (the human is always P1 there).
-        val (mine, theirs) = when (currentRole) {
-            Player.P2 -> p2 to p1
-            else -> p1 to p2
-        }
-        val opponentLabel = if (currentRole == null) "AI" else "OPPONENT"
-        val winText = when {
-            mine > theirs -> "YOU WIN!"
-            theirs > mine -> "$opponentLabel WINS"
-            else -> "DRAW"
-        }
-        statusMessage.value = "$winText  ($mine - $theirs)"
-        // Done with this match — release the role so the next Unity
-        // launch (e.g. PRACTICE) doesn't accidentally route through
-        // the PvP orchestrators.
-        currentRole = null
+        // The 3D cinematic finished one replay (regulation, an SD round, or the
+        // final). Since the kicks now play per-replay (see MatchReplayOverlay),
+        // this fires multiple times per match and is NOT a reliable "match
+        // over" signal — the winner UI + role release live in handleMatchResult
+        // (gated on the final replay's dismissal). Nothing to do here but log.
+        Log.i(TAG, "Replay cinematic finished (role=$currentRole)")
     }
 
     /**

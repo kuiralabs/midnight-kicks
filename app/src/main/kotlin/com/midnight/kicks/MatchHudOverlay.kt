@@ -68,7 +68,13 @@ import kotlinx.coroutines.delay
 @Composable
 fun MatchHudOverlay() {
     val state by MatchHud.state.collectAsState()
-    val visible = state.mode != MatchHud.Mode.IDLE && state.primary != null
+    // The two long-wait modes are owned by the full-screen MatchStageOverlay
+    // (centred, animated, covers Unity's idle label) — suppress the top banner
+    // for them so the status isn't shown twice. The banner still handles the
+    // brief PICKING / DONE / ERROR beats.
+    val handledByStage = state.mode == MatchHud.Mode.TX_IN_FLIGHT ||
+        state.mode == MatchHud.Mode.WAITING_FOR_OPPONENT
+    val visible = state.mode != MatchHud.Mode.IDLE && state.primary != null && !handledByStage
 
     // sessionEpochMs bumps on every primary-state change. Resetting
     // the timer on that key gives the user "00:01… 00:02…" starting
