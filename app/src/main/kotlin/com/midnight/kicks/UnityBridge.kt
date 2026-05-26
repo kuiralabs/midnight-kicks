@@ -52,7 +52,7 @@ object UnityBridge {
             put("round", round)
             put("roles", JSONArray().apply { roles.forEach { put(it) } })
         }
-        sendToUnity("OnMessage", json.toString())
+        relayToUnity(json.toString())
     }
 
     /** Tell Unity to play the regulation replay. */
@@ -66,7 +66,7 @@ object UnityBridge {
             })
             put("winner", winner ?: JSONObject.NULL)
         }
-        sendToUnity("OnMessage", json.toString())
+        relayToUnity(json.toString())
     }
 
     /** Tell Unity to show a status message (waiting, proving, etc.). */
@@ -75,7 +75,7 @@ object UnityBridge {
             put("type", "status")
             put("message", message)
         }
-        sendToUnity("OnMessage", json.toString())
+        relayToUnity(json.toString())
     }
 
     // ── Unity → Kotlin ──
@@ -93,15 +93,35 @@ object UnityBridge {
 
     // ── Internal ──
 
-    private fun sendToUnity(method: String, json: String) {
-        Log.d(TAG, "→ Unity: $json")
+    /**
+     * main → `:unity`: relay the Unity-bound JSON across the process boundary
+     * via [MatchBridge]. Orchestration (MatchManager, the SDK) lives in main,
+     * but Unity's player lives in `:unity`, so we can't call UnitySendMessage
+     * here — the `:unity` relay does that on receipt (see [deliverToUnityPlayer]).
+     *
+     * This object is a per-process `object`; these `send*` entry points are only
+     * ever called from main, so this always relays outward.
+     */
+    private fun relayToUnity(json: String) {
+        Log.d(TAG, "→ (relay) Unity: $json")
+        MatchBridge.sendToUnity(json)
+    }
+
+    /**
+     * `:unity`-side: hand the relayed JSON to the running Unity player. Called
+     * ONLY by the `:unity` relay (KicksMatchActivity) on a `MSG_TO_UNITY` —
+     * never from main, where UnityPlayer isn't loaded. The Unity-side method is
+     * always `OnMessage`; the `type` field inside the JSON does the routing.
+     */
+    fun deliverToUnityPlayer(json: String) {
+        Log.d(TAG, "→ Unity (player): $json")
         try {
             // UnitySendMessage is available when Unity player is running
             val unityPlayerClass = Class.forName("com.unity3d.player.UnityPlayer")
             val sendMethod = unityPlayerClass.getMethod(
                 "UnitySendMessage", String::class.java, String::class.java, String::class.java
             )
-            sendMethod.invoke(null, GAME_OBJECT, method, json)
+            sendMethod.invoke(null, GAME_OBJECT, "OnMessage", json)
         } catch (e: Exception) {
             Log.w(TAG, "Unity not available: ${e.message}")
         }

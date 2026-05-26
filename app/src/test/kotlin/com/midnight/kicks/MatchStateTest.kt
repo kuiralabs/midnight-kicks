@@ -1,6 +1,7 @@
 package com.midnight.kicks
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -127,16 +128,27 @@ class MatchStateTest {
     }
 
     @Test
-    fun `Failed label includes the underlying error message`() {
+    fun `Failed label maps a recognised error to recovery copy, not the raw exception`() {
+        // Part A (legible failure copy): a beta player must never read a raw
+        // exception. An indexer/sync-flavoured failure maps to recovery guidance,
+        // and the verbatim throwable text is NOT surfaced — it stays in logs.
         val failed = MatchState.Failed(MatchState.Joined(address), Exception("indexer down"))
-        assertTrue("Label should contain 'indexer down': ${failed.label}", failed.label.contains("indexer down"))
+        assertEquals(
+            "Still syncing with the network. Give it a moment, then RESUME MATCH from the menu.",
+            failed.label,
+        )
+        assertFalse("must not leak the raw message: ${failed.label}", failed.label.contains("indexer down"))
     }
 
     @Test
-    fun `Failed label falls back to class name when error message is null`() {
+    fun `Failed label uses a safe generic line for unrecognised errors`() {
+        // Bare Exception (null message) → no internals leaked (not even the
+        // class name); just calm copy plus the real recovery path.
         val failed = MatchState.Failed(MatchState.Joined(address), Exception())
-        // Bare Exception has null message → label uses simple class name.
-        assertNotNull(failed.label)
-        assertTrue("Label should mention exception class: ${failed.label}", failed.label.contains("Exception"))
+        assertEquals(
+            "Something went wrong. Exit and tap RESUME MATCH to try again.",
+            failed.label,
+        )
+        assertFalse("must not mention the exception class: ${failed.label}", failed.label.contains("Exception"))
     }
 }

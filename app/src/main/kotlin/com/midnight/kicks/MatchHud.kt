@@ -3,6 +3,8 @@ package com.midnight.kicks
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Process-wide HUD state for the in-match Compose overlay.
@@ -127,6 +129,37 @@ object MatchHud {
     private val _replay = MutableStateFlow<HudReplay?>(null)
     val replay: StateFlow<HudReplay?> = _replay.asStateFlow()
 
+    // ── Cross-process relay (Approach A — see docs/PLAN.md) ──────────────
+    //
+    // Post-split, the publisher (MatchManager) runs in **main** and the
+    // overlays render in **:unity** — two processes, two separate instances
+    // of this `object`. The relay keeps them mirrored:
+    //   - main → :unity:  publishPrimary / publishSecondary / publishReplay /
+    //                     reset (MatchManager drives state; overlays render it)
+    //   - :unity → main:  dismissReplay (the overlay's Continue tap; wakes the
+    //                     orchestrator awaiting `replay.first { it == null }`)
+    //
+    // Loop-avoidance: locally-originated changes update state AND relay; an
+    // [applyRemote] from the other side updates state with relay = false.
+
+    private const val EV = "event"
+    private const val EV_PRIMARY = "primary"
+    private const val EV_SECONDARY = "secondary"
+    private const val EV_REPLAY = "replay"
+    private const val EV_DISMISS = "dismissReplay"
+    private const val EV_RESET = "reset"
+
+    /**
+     * How a local HUD change reaches the other process. Each process sets it:
+     *  - main → `{ MatchBridge.publishHud(it) }`
+     *  - `:unity` → `{ /* MSG_HUD_FROM_UNITY to main */ }`
+     *
+     * Null before the bridge is wired (single-process, or pre-bind): no relay,
+     * but local state still updates so an in-process overlay keeps working.
+     */
+    @Volatile
+    var relayHook: ((String) -> Unit)? = null
+
     /**
      * Replace the primary label + mode, leaving secondary in place and
      * rotating the session epoch so the elapsed-time counter restarts.
@@ -137,23 +170,10 @@ object MatchHud {
      * presentation-agnostic.
      */
     fun publishPrimary(label: String, mode: Mode, role: Player? = _state.value.role) {
-        val prev = _state.value
-        _state.value = prev.copy(
-            primary = label,
-            // Reset the sub-line — it's tied to a specific circuit
-            // call's stages, so a state transition implicitly ends
-            // whatever tx-in-flight detail was being shown.
-            secondary = null,
-            mode = mode,
-            // Bump the epoch so the overlay's elapsed counter restarts.
-            // Using currentTimeMillis() keeps it monotonic even across
-            // process restarts (the StateFlow doesn't survive, but the
-            // overlay re-keys correctly when MatchManager republishes).
-            sessionEpochMs = System.currentTimeMillis(),
-            // Propagate the manager's localRole so the scoreboard
-            // overlay can render from the user's perspective.
-            role = role,
-        )
+        // currentTimeMillis() keeps the epoch monotonic across processes
+        // (same device clock both sides); relayed so :unity's elapsed counter
+        // anchors to when main actually started the wait, not bind time.
+        setPrimary(label, mode, role, System.currentTimeMillis(), relay = true)
     }
 
     /**
@@ -161,10 +181,7 @@ object MatchHud {
      * when the circuit call completes / fails, so the overlay drops the
      * sub-line and falls back to whatever the primary mode dictates.
      */
-    fun publishSecondary(text: String?) {
-        val prev = _state.value
-        _state.value = prev.copy(secondary = text)
-    }
+    fun publishSecondary(text: String?) = setSecondary(text, relay = true)
 
     /**
      * Surface a full-screen replay above Unity. Called by [MatchManager]
@@ -172,23 +189,17 @@ object MatchHud {
      * has both reveals). The overlay renders the rounds row-by-row and
      * waits for the user to tap Continue.
      */
-    fun publishReplay(show: ReplayShow) {
-        _replay.value = HudReplay(
-            show = show,
-            publishedAtMs = System.currentTimeMillis(),
-        )
-    }
+    fun publishReplay(show: ReplayShow) = setReplay(show, System.currentTimeMillis(), relay = true)
 
     /**
      * User tapped Continue on the replay. Clearing [_replay] is the
      * dismissal signal: any orchestrator step awaiting
      * `MatchHud.replay.first { it == null }` wakes up on the next
      * StateFlow emission. No separate event channel needed — the
-     * absence of a replay IS the dismissed state.
+     * absence of a replay IS the dismissed state. Post-split the tap
+     * happens in `:unity`, so this also relays back to main.
      */
-    fun dismissReplay() {
-        _replay.value = null
-    }
+    fun dismissReplay() = clearReplay(relay = true)
 
     /**
      * Wipe everything — call when leaving the match screen entirely
@@ -196,8 +207,142 @@ object MatchHud {
      * resolved-match dialog) so a stale label doesn't briefly flash on
      * the next match before MatchManager has time to publish.
      */
-    fun reset() {
+    fun reset() = doReset(relay = true)
+
+    /**
+     * Re-emit the current snapshot through [relayHook]. Called on main when
+     * `:unity` (re)binds, so an overlay that came up after main already
+     * published isn't blank. Idempotent — reuses the existing epoch, so it
+     * doesn't restart the elapsed-time counter.
+     */
+    fun resendCurrent() {
+        val s = _state.value
+        if (s.primary != null) {
+            setPrimary(s.primary, s.mode, s.role, s.sessionEpochMs, relay = true)
+            if (s.secondary != null) setSecondary(s.secondary, relay = true)
+        }
+        _replay.value?.let { setReplay(it.show, it.publishedAtMs, relay = true) }
+    }
+
+    /**
+     * Apply a HUD event relayed from the other process. Updates local state
+     * **without** re-relaying (relay = false), so main↔`:unity` mirroring
+     * can't loop. Called by each side's bridge inbox handler.
+     */
+    fun applyRemote(json: String) {
+        val o = JSONObject(json)
+        when (o.getString(EV)) {
+            EV_PRIMARY -> setPrimary(
+                label = o.getString("primary"),
+                mode = Mode.valueOf(o.getString("mode")),
+                role = if (o.isNull("role")) null else Player.valueOf(o.getString("role")),
+                epoch = o.getLong("epoch"),
+                relay = false,
+            )
+            EV_SECONDARY -> setSecondary(
+                text = if (o.isNull("secondary")) null else o.getString("secondary"),
+                relay = false,
+            )
+            EV_REPLAY -> setReplay(
+                show = showFromJson(o.getJSONObject("show")),
+                publishedAtMs = o.getLong("epoch"),
+                relay = false,
+            )
+            EV_DISMISS -> clearReplay(relay = false)
+            EV_RESET -> doReset(relay = false)
+        }
+    }
+
+    // ── Internal mutators (the relay flag is the only behavioural diff) ──
+
+    private fun setPrimary(label: String, mode: Mode, role: Player?, epoch: Long, relay: Boolean) {
+        _state.value = _state.value.copy(
+            primary = label,
+            // A state transition implicitly ends whatever tx-in-flight detail
+            // was being shown, so drop the sub-line.
+            secondary = null,
+            mode = mode,
+            sessionEpochMs = epoch,
+            role = role,
+        )
+        if (relay) relayHook?.invoke(
+            JSONObject().apply {
+                put(EV, EV_PRIMARY)
+                put("primary", label)
+                put("mode", mode.name)
+                put("epoch", epoch)
+                put("role", role?.name ?: JSONObject.NULL)
+            }.toString()
+        )
+    }
+
+    private fun setSecondary(text: String?, relay: Boolean) {
+        _state.value = _state.value.copy(secondary = text)
+        if (relay) relayHook?.invoke(
+            JSONObject().apply {
+                put(EV, EV_SECONDARY)
+                put("secondary", text ?: JSONObject.NULL)
+            }.toString()
+        )
+    }
+
+    private fun setReplay(show: ReplayShow, publishedAtMs: Long, relay: Boolean) {
+        _replay.value = HudReplay(show = show, publishedAtMs = publishedAtMs)
+        if (relay) relayHook?.invoke(
+            JSONObject().apply {
+                put(EV, EV_REPLAY)
+                put("epoch", publishedAtMs)
+                put("show", showToJson(show))
+            }.toString()
+        )
+    }
+
+    private fun clearReplay(relay: Boolean) {
+        _replay.value = null
+        if (relay) relayHook?.invoke(JSONObject().apply { put(EV, EV_DISMISS) }.toString())
+    }
+
+    private fun doReset(relay: Boolean) {
         _state.value = HudState()
         _replay.value = null
+        if (relay) relayHook?.invoke(JSONObject().apply { put(EV, EV_RESET) }.toString())
     }
+
+    // ── ReplayShow (de)serialization for the relay ──
+
+    private fun showToJson(s: ReplayShow): JSONObject = JSONObject().apply {
+        put("rounds", JSONArray().apply { s.rounds.forEach { put(roundToJson(it)) } })
+        put("p1", s.p1Score)
+        put("p2", s.p2Score)
+        put("kind", s.kind.name)
+        put("sdRound", s.sdRoundNumber ?: JSONObject.NULL)
+    }
+
+    private fun showFromJson(o: JSONObject): ReplayShow {
+        val arr = o.getJSONArray("rounds")
+        val rounds = (0 until arr.length()).map { roundFromJson(arr.getJSONObject(it)) }
+        return ReplayShow(
+            rounds = rounds,
+            p1Score = o.getInt("p1"),
+            p2Score = o.getInt("p2"),
+            kind = ReplayKind.valueOf(o.getString("kind")),
+            sdRoundNumber = if (o.isNull("sdRound")) null else o.getInt("sdRound"),
+        )
+    }
+
+    private fun roundToJson(r: RoundResult): JSONObject = JSONObject().apply {
+        put("round", r.round)
+        put("shooter", r.shooter)
+        put("shootDir", r.shootDir)
+        put("keepDir", r.keepDir)
+        put("result", r.result)
+    }
+
+    private fun roundFromJson(o: JSONObject): RoundResult = RoundResult(
+        round = o.getInt("round"),
+        shooter = o.getString("shooter"),
+        shootDir = o.getInt("shootDir"),
+        keepDir = o.getInt("keepDir"),
+        result = o.getString("result"),
+    )
 }
