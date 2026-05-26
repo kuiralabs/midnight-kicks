@@ -114,6 +114,23 @@ object MatchHud {
         val publishedAtMs: Long,
     )
 
+    /**
+     * Drives the in-match direction picker rendered above Unity by
+     * [MatchPickerOverlay]. Non-null = picker showing. Published by main when a
+     * choice phase opens (replacing the old `UnityBridge.sendChoicePhase` that
+     * drew Unity's IMGUI picker); the overlay collects the picks locally and
+     * sends them back via the existing `choicesLocked` path, then [dismissPicker]
+     * clears it.
+     *
+     * `roles` is the per-pick role from THIS device's perspective ("shoot" /
+     * "keep"); its size IS the number of picks to collect. `title` frames the
+     * round ("Regulation" / "Sudden death — round 3").
+     */
+    data class PickerShow(
+        val roles: List<String>,
+        val title: String,
+    )
+
     private val _state = MutableStateFlow(HudState())
     val state: StateFlow<HudState> = _state.asStateFlow()
 
@@ -128,6 +145,10 @@ object MatchHud {
      */
     private val _replay = MutableStateFlow<HudReplay?>(null)
     val replay: StateFlow<HudReplay?> = _replay.asStateFlow()
+
+    /** Active direction picker, or null. Read by [MatchPickerOverlay]. */
+    private val _picker = MutableStateFlow<PickerShow?>(null)
+    val picker: StateFlow<PickerShow?> = _picker.asStateFlow()
 
     // ── Cross-process relay (Approach A — see docs/PLAN.md) ──────────────
     //
@@ -148,6 +169,8 @@ object MatchHud {
     private const val EV_REPLAY = "replay"
     private const val EV_DISMISS = "dismissReplay"
     private const val EV_RESET = "reset"
+    private const val EV_PICKER = "picker"
+    private const val EV_PICKER_DISMISS = "dismissPicker"
 
     /**
      * How a local HUD change reaches the other process. Each process sets it:
@@ -202,6 +225,21 @@ object MatchHud {
     fun dismissReplay() = clearReplay(relay = true)
 
     /**
+     * Open the direction picker. Called by [KicksActivity] when a choice phase
+     * starts (regulation or sudden death) — main publishes, the `:unity` overlay
+     * renders + collects the picks.
+     */
+    fun showPicker(roles: List<String>, title: String) =
+        setPicker(PickerShow(roles, title), relay = true)
+
+    /**
+     * Close the picker. Fired by the overlay once all picks are locked (it has
+     * already sent `choicesLocked` back), and relayed so main clears its copy
+     * too — mirror of [dismissReplay].
+     */
+    fun dismissPicker() = clearPicker(relay = true)
+
+    /**
      * Wipe everything — call when leaving the match screen entirely
      * (e.g. KicksActivity.onDestroy or after the user dismisses the
      * resolved-match dialog) so a stale label doesn't briefly flash on
@@ -222,6 +260,7 @@ object MatchHud {
             if (s.secondary != null) setSecondary(s.secondary, relay = true)
         }
         _replay.value?.let { setReplay(it.show, it.publishedAtMs, relay = true) }
+        _picker.value?.let { setPicker(it, relay = true) }
     }
 
     /**
@@ -250,6 +289,8 @@ object MatchHud {
             )
             EV_DISMISS -> clearReplay(relay = false)
             EV_RESET -> doReset(relay = false)
+            EV_PICKER -> setPicker(pickerFromJson(o.getJSONObject("show")), relay = false)
+            EV_PICKER_DISMISS -> clearPicker(relay = false)
         }
     }
 
@@ -302,9 +343,25 @@ object MatchHud {
         if (relay) relayHook?.invoke(JSONObject().apply { put(EV, EV_DISMISS) }.toString())
     }
 
+    private fun setPicker(show: PickerShow, relay: Boolean) {
+        _picker.value = show
+        if (relay) relayHook?.invoke(
+            JSONObject().apply {
+                put(EV, EV_PICKER)
+                put("show", pickerToJson(show))
+            }.toString()
+        )
+    }
+
+    private fun clearPicker(relay: Boolean) {
+        _picker.value = null
+        if (relay) relayHook?.invoke(JSONObject().apply { put(EV, EV_PICKER_DISMISS) }.toString())
+    }
+
     private fun doReset(relay: Boolean) {
         _state.value = HudState()
         _replay.value = null
+        _picker.value = null
         if (relay) relayHook?.invoke(JSONObject().apply { put(EV, EV_RESET) }.toString())
     }
 
@@ -345,4 +402,19 @@ object MatchHud {
         keepDir = o.getInt("keepDir"),
         result = o.getString("result"),
     )
+
+    // ── PickerShow (de)serialization for the relay ──
+
+    private fun pickerToJson(s: PickerShow): JSONObject = JSONObject().apply {
+        put("roles", JSONArray().apply { s.roles.forEach { put(it) } })
+        put("title", s.title)
+    }
+
+    private fun pickerFromJson(o: JSONObject): PickerShow {
+        val arr = o.getJSONArray("roles")
+        return PickerShow(
+            roles = (0 until arr.length()).map { arr.getString(it) },
+            title = o.getString("title"),
+        )
+    }
 }

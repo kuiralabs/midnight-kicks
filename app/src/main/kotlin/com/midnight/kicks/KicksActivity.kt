@@ -117,10 +117,10 @@ class KicksActivity : FragmentActivity() {
     private var currentRole: Player? = null
 
     /**
-     * Role array last sent to Unity via [UnityBridge.sendChoicePhase].
+     * Role array last published to the picker via [MatchHud.showPicker].
      * Cached here so [handleChoicesLocked] can bucket the returned picks
-     * back into shoots vs keeps using the same per-index role labels Unity
-     * displayed. Cleared after each match.
+     * back into shoots vs keeps using the same per-index role labels the
+     * picker displayed. Cleared after each match.
      */
     private var currentChoiceRoles: List<String> = emptyList()
 
@@ -722,7 +722,10 @@ class KicksActivity : FragmentActivity() {
                 // pick "YOU SHOOT" / "YOU KEEP".
                 val roles = rolesForCurrentDevice()
                 currentChoiceRoles = roles
-                UnityBridge.sendChoicePhase(round = "regulation", roles = roles)
+                // Drive the Compose picker overlay (MatchPickerOverlay) instead
+                // of Unity's old IMGUI picker — main publishes, :unity renders +
+                // collects, picks return via the same choicesLocked path.
+                MatchHud.showPicker(roles = roles, title = "Regulation")
             }
         }
     }
@@ -838,7 +841,7 @@ class KicksActivity : FragmentActivity() {
         currentChoiceRoles = roles
         runOnUiThread {
             statusMessage.value = "Sudden death — round $round"
-            UnityBridge.sendChoicePhase(round = "suddenDeath", roles = roles)
+            MatchHud.showPicker(roles = roles, title = "Sudden death — round $round")
         }
         return try {
             deferred.await()
@@ -1077,11 +1080,11 @@ class KicksActivity : FragmentActivity() {
                 // returned picks. Same value the live path computes.
                 currentChoiceRoles = rolesForCurrentDevice()
 
-                // Wait for Unity's IL2CPP/GameController to initialize
-                // before the orchestrator fires UnityBridge messages —
-                // otherwise the first sendChoicePhase races Unity's
-                // boot and gets dropped, leaving the orchestrator
-                // hanging on a picker Unity never shows.
+                // Let Unity's IL2CPP/GameController boot the 3D scene before
+                // the picker overlay appears, so the user sees the pitch behind
+                // it rather than a black surface. The picker itself is race-safe
+                // regardless (MatchHud.showPicker is re-pushed to :unity on bind
+                // via resendCurrent), so this delay is purely cosmetic now.
                 // [launchUnityChoicePhase] pays the same cost for the
                 // fresh-match path.
                 delay(UNITY_BOOT_DELAY_MS)

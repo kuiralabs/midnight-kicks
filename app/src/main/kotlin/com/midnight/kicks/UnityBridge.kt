@@ -21,39 +21,10 @@ object UnityBridge {
     var onMessageFromUnity: ((String) -> Unit)? = null
 
     // ── Kotlin → Unity ──
-
-    /**
-     * Tell Unity to start the choice phase.
-     *
-     * @param round "regulation" (10 picks: 5 shoots + 5 keeps interleaved)
-     *   or "suddenDeath" (2 picks: 1 shoot + 1 keep).
-     * @param roles per-round role from THIS device's perspective. Each entry
-     *   is "shoot" or "keep". The length defines how many picks Unity will
-     *   ask for, so Kotlin and Unity agree on the count.
-     *
-     *   For V3 regulation:
-     *     - P1 / PvAI: `[shoot,keep,shoot,keep,shoot,keep,shoot,keep,shoot,keep]`
-     *       (P1 shoots the odd rounds 1,3,5,7,9)
-     *     - P2:        `[keep,shoot,keep,shoot,keep,shoot,keep,shoot,keep,shoot]`
-     *       (P2 shoots the even rounds 2,4,6,8,10)
-     *
-     *   For SD (single-pairing per round, same shape both sides):
-     *     - Both:      `[shoot, keep]`
-     *
-     *   Unity labels each pick with `YOU SHOOT` / `YOU KEEP` off this array,
-     *   so the player strategises per role. Kotlin uses the same array to
-     *   bucket returned picks into shoots[5] + keeps[5] (regulation) or a
-     *   single `{shoot, keep}` pair (SD).
-     */
-    fun sendChoicePhase(round: String, roles: List<String>) {
-        require(roles.isNotEmpty()) { "roles must not be empty" }
-        val json = JSONObject().apply {
-            put("type", "choicePhase")
-            put("round", round)
-            put("roles", JSONArray().apply { roles.forEach { put(it) } })
-        }
-        relayToUnity(json.toString())
-    }
+    //
+    // The choice phase no longer goes to Unity: the picker is the Compose
+    // overlay [MatchPickerOverlay], driven by [MatchHud.showPicker]. Unity owns
+    // the 3D scene + the replay cinematic below.
 
     /** Tell Unity to play the regulation replay. */
     fun sendReplay(rounds: List<RoundResult>, p1Score: Int, p2Score: Int, winner: String?) {
@@ -89,6 +60,21 @@ object UnityBridge {
     fun receiveFromUnity(jsonString: String) {
         Log.d(TAG, "← Unity: $jsonString")
         onMessageFromUnity?.invoke(jsonString)
+    }
+
+    /**
+     * The Compose picker ([MatchPickerOverlay]) submitting its locked picks —
+     * the post-IMGUI replacement for Unity's `choicesLocked`. Feeds the SAME
+     * [onMessageFromUnity] callback Unity's picker did, so downstream
+     * orchestration ([KicksActivity.handleChoicesLocked]) is unchanged — it
+     * can't tell the picks came from Compose rather than the Unity player.
+     */
+    fun submitLocalPicks(choices: IntArray) {
+        val json = JSONObject().apply {
+            put("type", "choicesLocked")
+            put("choices", JSONArray().apply { choices.forEach { put(it) } })
+        }
+        receiveFromUnity(json.toString())
     }
 
     // ── Internal ──

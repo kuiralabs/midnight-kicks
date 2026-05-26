@@ -162,6 +162,31 @@ class MatchHudRelayTest {
     }
 
     @Test
+    fun `picker roundTrips_rolesAndTitle`() {
+        MatchHud.showPicker(roles = listOf("shoot", "keep", "shoot"), title = "Regulation")
+        val expected = MatchHud.picker.value
+        assertNotNull(expected)
+
+        MatchHud.applyRemote(relayed())
+
+        assertEquals(expected, MatchHud.picker.value)
+    }
+
+    @Test
+    fun `dismissPicker roundTrips_toNull`() {
+        MatchHud.showPicker(roles = listOf("shoot", "keep"), title = "Sudden death — round 2")
+        assertNotNull(MatchHud.picker.value)
+
+        // The overlay closes the picker once all picks are locked (in :unity);
+        // it relays back to main.
+        MatchHud.dismissPicker()
+
+        MatchHud.applyRemote(relayed())
+
+        assertNull("picker clears across the boundary", MatchHud.picker.value)
+    }
+
+    @Test
     fun reset_roundTrips_clearingBothFlows() {
         MatchHud.publishPrimary("Resolved — you win", MatchHud.Mode.DONE, Player.P1)
 

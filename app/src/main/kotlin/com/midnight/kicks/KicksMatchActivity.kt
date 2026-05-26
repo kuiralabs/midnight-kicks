@@ -178,6 +178,9 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
                 Box(modifier = Modifier.fillMaxSize()) {
                     MatchReplayOverlay()
                     MatchHudOverlay()
+                    // Picker on top — when a choice phase is open it's a focused
+                    // modal over the dimmed pitch; otherwise it draws nothing.
+                    MatchPickerOverlay()
                 }
             }
         }
