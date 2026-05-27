@@ -208,6 +208,45 @@ file that powers a "past matches" screen.
 
 ---
 
+## 9. Candidate storage backends (watchlist)
+
+The Drive tiers above are pencilled in as **Google Drive `appDataFolder`** — the
+pragmatic default, but it rides the Google account, which is the platform-custody
+weakness in §6.1.5. Decentralized, client-encrypted storage is the
+self-custody-aligned alternative for **Tier 1.5 (registry) + Tier 2 (archive)** —
+it keys data to the *user's* identity (ideally sigil-derived), not a Google
+account. It is **archive-only**: decentralized fetch latency disqualifies it from
+the active-recovery fast path, which stays on Block Store (the forfeit-deadline
+SLA, §6.2.2).
+
+| Candidate | Note |
+|-----------|------|
+| Google Drive `appDataFolder` | default; rides Google account (platform-custody); fast, free-to-user, mutable, Android-native |
+| **dStorage (`dstorage.pro`)** — *watching* | "privacy-first data layer for dApps", SDK-based, decentralized family. Self-custody fit is strong; specifics unknown — verify the criteria below before adopting. |
+| IPFS+IPNS / Filecoin / Arweave / Crust | the general decentralized neighborhood, as fallbacks/benchmarks |
+
+**Adoption criteria (must all clear before swapping a tier onto a decentralized
+backend):**
+
+1. **Mutability** — the registry needs in-place updates. Content-addressed
+   (IPFS) is immutable → requires a mutable pointer (IPNS / contract pointer /
+   the service's named-object abstraction). *Make-or-break for the registry.*
+2. **Payment model** — does a write cost tokens/gas? User-pays = friction +
+   funds requirement; needs a sponsored relay or batched writes.
+3. **Android / Kotlin SDK or clean REST** — we're Android-native; a
+   JS/browser-only SDK doesn't fit.
+4. **Sigil-derivable identity** — can the storage namespace/keypair derive from
+   the sigil (one identity, no separate account)? The ideal fit.
+5. **Permanence / retention** — persists indefinitely vs re-pin/expire
+   (Arweave pay-once · Filecoin deal-renewal · bare-IPFS ephemeral).
+6. **Opaque-blob client encryption** — we encrypt with a sigil-derived key
+   regardless; backend must take ciphertext with no server-side key custody.
+7. **Latency** — confirms archive-only positioning (never active recovery).
+
+`dstorage.pro` is **on watch**, not adopted — the SPA + public docs don't yet
+answer 1–7. Re-evaluate when their SDK/docs expose mutability, payment, and an
+Android-usable surface.
+
 ## See also
 
 - `PLAN.md` wishlist **#4** (active recovery — done), **#30** (this tier),
