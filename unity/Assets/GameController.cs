@@ -123,90 +123,16 @@ public class GameController : MonoBehaviour
         Debug.Log($"[GameController] Choice phase: round={currentRound}, picks={roundRoles.Length}, roles=[{string.Join(",", roundRoles)}]");
     }
 
-    void OnGUI()
-    {
-        // Leave button — top-right corner, renders in every game state
-        // (waiting, choice phase, replay). Tapping it kills the :unity
-        // process so the user lands back on KicksActivity (main process)
-        // where the wallet + sigil pills live. Match state IS preserved:
-        // it lives on chain + in MatchStore, and the menu's RESUME MATCH
-        // re-drives the state machine from there. Labelled "LEAVE" (not the
-        // old "II") so a first-time player knows how to get out — the
-        // earlier pause glyph wasn't legible as an exit.
-        float leaveWidth = 150f;
-        float leaveHeight = 64f;
-        float leaveMargin = 24f;
-        if (GUI.Button(new Rect(Screen.width - leaveWidth - leaveMargin, leaveMargin, leaveWidth, leaveHeight), "LEAVE"))
-        {
-            RequestPause();
-        }
-
-        if (!inChoicePhase && !inReplay)
-        {
-            var style = new GUIStyle(GUI.skin.label);
-            style.fontSize = 24;
-            style.alignment = TextAnchor.MiddleCenter;
-            style.normal.textColor = Color.white;
-            GUI.Label(new Rect(0, Screen.height / 2 - 20, Screen.width, 40),
-                waitingForMessage ? "Waiting for match..." : "Ready", style);
-            return;
-        }
-
-        if (!inChoicePhase) return;
-
-        float btnWidth = Screen.width / 4f;
-        float btnHeight = 80f;
-        float y = Screen.height - 200f;
-
-        var labelStyle = new GUIStyle(GUI.skin.label);
-        labelStyle.fontSize = 20;
-        labelStyle.alignment = TextAnchor.MiddleCenter;
-        labelStyle.normal.textColor = Color.white;
-        GUI.Label(
-            new Rect(Screen.width / 2 - 150, y - 110, 300, 30),
-            $"Round {currentChoice + 1} / {choices.Length}",
-            labelStyle
-        );
-
-        // Per-round role banner. Both the shoot and keep prompts have
-        // the player picking a GOAL CORNER — shooter's-perspective
-        // L/C/R (see GAME_DESIGN.md §2 coordinate convention). The
-        // keep prompt explicitly says "predict where they'll kick"
-        // instead of "pick where to dive" because the underlying
-        // commit is still the predicted target corner — the dive
-        // animation derives from that, not the other way around.
-        var roleStyle = new GUIStyle(GUI.skin.label);
-        roleStyle.fontSize = 28;
-        roleStyle.fontStyle = FontStyle.Bold;
-        roleStyle.alignment = TextAnchor.MiddleCenter;
-        string currentRole = (currentChoice < roundRoles.Length) ? roundRoles[currentChoice] : "shoot";
-        bool isShoot = currentRole == "shoot";
-        roleStyle.normal.textColor = isShoot ? new Color(0.55f, 1f, 0.48f) : new Color(1f, 0.7f, 0.3f);
-        GUI.Label(
-            new Rect(Screen.width / 2 - 220, y - 70, 440, 50),
-            isShoot ? "YOU SHOOT — pick where to kick" : "YOU KEEP — predict where they'll kick",
-            roleStyle
-        );
-
-        if (GUI.Button(new Rect(Screen.width / 2 - btnWidth * 1.5f, y, btnWidth, btnHeight), "LEFT"))
-            MakeChoice(0);
-
-        if (GUI.Button(new Rect(Screen.width / 2 - btnWidth / 2, y, btnWidth, btnHeight), "CENTER"))
-            MakeChoice(1);
-
-        if (GUI.Button(new Rect(Screen.width / 2 + btnWidth / 2, y, btnWidth, btnHeight), "RIGHT"))
-            MakeChoice(2);
-
-        string choicesSoFar = "";
-        for (int i = 0; i < currentChoice; i++)
-        {
-            choicesSoFar += choices[i] == 0 ? "L " : choices[i] == 1 ? "C " : "R ";
-        }
-        GUI.Label(
-            new Rect(Screen.width / 2 - 100, y + btnHeight + 10, 200, 40),
-            choicesSoFar
-        );
-    }
+    // OnGUI removed: every in-match 2D element now lives in the Android Compose
+    // overlays on top of Unity's surface —
+    //   - LEAVE button       → MatchLeaveButton (kills :unity)
+    //   - "Waiting" / status  → MatchStageOverlay + MatchHudOverlay
+    //   - direction picker    → MatchPickerOverlay (grouped shoots-then-keeps)
+    //   - replay scoreboard   → MatchReplayOverlay (thin HUD over the kicks)
+    // Unity is now a pure 3D renderer: the pitch + the kick cinematic
+    // (StartReplay / ShotManager.PlayReplay). The choicePhase handler +
+    // MakeChoice + RequestPause below are now dead (Kotlin drives the picker and
+    // the leave action) and can be pruned in a later pass.
 
     private void MakeChoice(int direction)
     {

@@ -10,6 +10,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.Message
 import android.os.Messenger
+import android.os.Process
 import android.os.RemoteException
 import android.util.Log
 import android.view.ViewGroup
@@ -136,6 +137,20 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
         }
     }
 
+    /**
+     * Leave the match — driven by the Compose [MatchLeaveButton]. Same two steps
+     * as Unity's old GameController.RequestPause: tell main first (it cancels the
+     * in-flight orchestrator + flips the menu to RESUME via handleMatchPaused),
+     * then kill THIS (`:unity`) process for an instant teardown. main survives,
+     * so the user lands on the live menu with no ANR. The matchPaused send is a
+     * oneway binder call, queued in the kernel before the kill, so it survives.
+     */
+    private fun leaveMatch() {
+        Log.i(TAG, "LEAVE tapped — notifying main, then killing :unity")
+        sendToMain(MatchBridge.MSG_FROM_UNITY, """{"type":"matchPaused"}""")
+        Process.killProcess(Process.myPid())
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -185,6 +200,10 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
                     // Picker on top — when a choice phase is open it's a focused
                     // modal over the dimmed pitch; otherwise it draws nothing.
                     MatchPickerOverlay()
+                    // LEAVE button is the very top layer so it's tappable over
+                    // every modal overlay (the bug: Unity's IMGUI button sat
+                    // behind these and never received the tap).
+                    MatchLeaveButton(onLeave = ::leaveMatch)
                 }
             }
         }
