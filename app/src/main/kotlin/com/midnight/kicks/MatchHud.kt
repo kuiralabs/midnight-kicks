@@ -76,6 +76,13 @@ object MatchHud {
         val mode: Mode = Mode.IDLE,
         val sessionEpochMs: Long = 0L,
         /**
+         * True while the indexer is unreachable (StatePoller lost contact).
+         * The overlay shows "Reconnecting to the network…" over whatever the
+         * current mode is, instead of an indistinguishable "waiting". Clears
+         * automatically when the indexer returns.
+         */
+        val connectionLost: Boolean = false,
+        /**
          * The local device's role in the current match (P1 / P2 / null
          * for PvAI). The overlay reads this to render scoreboard
          * labels from the user's own perspective.
@@ -171,6 +178,7 @@ object MatchHud {
     private const val EV_RESET = "reset"
     private const val EV_PICKER = "picker"
     private const val EV_PICKER_DISMISS = "dismissPicker"
+    private const val EV_CONNECTION = "connection"
 
     /**
      * How a local HUD change reaches the other process. Each process sets it:
@@ -205,6 +213,14 @@ object MatchHud {
      * sub-line and falls back to whatever the primary mode dictates.
      */
     fun publishSecondary(text: String?) = setSecondary(text, relay = true)
+
+    /**
+     * Flag/clear "indexer unreachable". Driven by [MatchManager] off the
+     * StatePoller's `connected` flow; the overlay shows "Reconnecting…" while
+     * true. Independent of [Mode] — the wait keeps its mode; this just layers
+     * the connection state on top.
+     */
+    fun publishConnectionLost(lost: Boolean) = setConnectionLost(lost, relay = true)
 
     /**
      * Surface a full-screen replay above Unity. Called by [MatchManager]
@@ -261,6 +277,7 @@ object MatchHud {
         }
         _replay.value?.let { setReplay(it.show, it.publishedAtMs, relay = true) }
         _picker.value?.let { setPicker(it, relay = true) }
+        if (_state.value.connectionLost) setConnectionLost(true, relay = true)
     }
 
     /**
@@ -291,6 +308,7 @@ object MatchHud {
             EV_RESET -> doReset(relay = false)
             EV_PICKER -> setPicker(pickerFromJson(o.getJSONObject("show")), relay = false)
             EV_PICKER_DISMISS -> clearPicker(relay = false)
+            EV_CONNECTION -> setConnectionLost(o.getBoolean("lost"), relay = false)
         }
     }
 
@@ -323,6 +341,17 @@ object MatchHud {
             JSONObject().apply {
                 put(EV, EV_SECONDARY)
                 put("secondary", text ?: JSONObject.NULL)
+            }.toString()
+        )
+    }
+
+    private fun setConnectionLost(lost: Boolean, relay: Boolean) {
+        if (_state.value.connectionLost == lost) return
+        _state.value = _state.value.copy(connectionLost = lost)
+        if (relay) relayHook?.invoke(
+            JSONObject().apply {
+                put(EV, EV_CONNECTION)
+                put("lost", lost)
             }.toString()
         )
     }

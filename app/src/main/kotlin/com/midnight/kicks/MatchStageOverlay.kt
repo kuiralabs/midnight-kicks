@@ -60,14 +60,17 @@ import kotlinx.coroutines.delay
 @Composable
 fun MatchStageOverlay() {
     val state by MatchHud.state.collectAsState()
+    val reconnecting = state.connectionLost
     val waiting = state.mode == MatchHud.Mode.WAITING_FOR_OPPONENT
-    val active = waiting || state.mode == MatchHud.Mode.TX_IN_FLIGHT
+    // Show during the long waits, OR whenever the indexer is unreachable (the
+    // "Reconnecting…" takeover, which can strike in any wait mode).
+    val active = reconnecting || waiting || state.mode == MatchHud.Mode.TX_IN_FLIGHT
 
-    // Elapsed counter for the opponent-wait, reset whenever a new wait begins
-    // (sessionEpochMs bumps on each state transition). Only ticks while waiting.
-    var elapsed by remember(state.sessionEpochMs) { mutableIntStateOf(0) }
-    LaunchedEffect(state.sessionEpochMs, state.mode) {
-        if (state.mode == MatchHud.Mode.WAITING_FOR_OPPONENT) {
+    // Elapsed counter — ticks while waiting on the opponent OR while
+    // reconnecting (so the user sees how long it's been retrying).
+    var elapsed by remember(state.sessionEpochMs, reconnecting) { mutableIntStateOf(0) }
+    LaunchedEffect(state.sessionEpochMs, state.mode, reconnecting) {
+        if (reconnecting || state.mode == MatchHud.Mode.WAITING_FOR_OPPONENT) {
             while (true) {
                 delay(1_000L)
                 elapsed += 1
@@ -76,14 +79,15 @@ fun MatchStageOverlay() {
     }
 
     AnimatedVisibility(
-        visible = active && state.primary != null,
+        visible = active && (reconnecting || state.primary != null),
         enter = fadeIn(tween(240)),
         exit = fadeOut(tween(180)),
     ) {
         StageContent(
-            primary = state.primary.orEmpty(),
+            primary = if (reconnecting) "Reconnecting to the network…" else state.primary.orEmpty(),
             secondary = state.secondary,
-            waiting = waiting,
+            waiting = waiting && !reconnecting,
+            reconnecting = reconnecting,
             elapsedSeconds = elapsed,
         )
     }
@@ -94,9 +98,14 @@ private fun StageContent(
     primary: String,
     secondary: String?,
     waiting: Boolean,
+    reconnecting: Boolean,
     elapsedSeconds: Int,
 ) {
-    val accent = if (waiting) KicksColors.Pending else KicksColors.Accent
+    val accent = when {
+        reconnecting -> KicksColors.Danger    // red — network down
+        waiting -> KicksColors.Pending         // amber — opponent's move
+        else -> KicksColors.Accent             // blue — tx in flight
+    }
 
     // Breathing ball: scale + alpha pulse so the screen is alive during the
     // longest waits (proof generation can sit ~15 s with no text change).
@@ -114,10 +123,13 @@ private fun StageContent(
         label = "ring",
     )
 
-    val sub = secondary ?: if (waiting && elapsedSeconds >= 1) {
-        "%02d:%02d".format(elapsedSeconds / 60, elapsedSeconds % 60)
-    } else {
-        null
+    val clock = "%02d:%02d".format(elapsedSeconds / 60, elapsedSeconds % 60)
+    val sub = when {
+        reconnecting ->
+            if (elapsedSeconds >= 1) "retrying… $clock — resumes automatically" else "retrying — resumes automatically"
+        secondary != null -> secondary
+        waiting && elapsedSeconds >= 1 -> clock
+        else -> null
     }
 
     Box(

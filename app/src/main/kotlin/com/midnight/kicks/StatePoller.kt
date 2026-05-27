@@ -5,6 +5,9 @@ import com.midnight.kuira.core.compact.MidnightContract
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
@@ -53,6 +56,21 @@ class StatePoller(
     }
 
     /**
+     * Whether the indexer is currently reachable. Flips to `false` after
+     * [UNREACHABLE_AFTER_FAILURES] consecutive `ledger()` failures (~6 s at the
+     * default interval) and back to `true` on the next success. Consumers
+     * (MatchManager → MatchHud) use this to show a "Reconnecting…" banner
+     * instead of an indistinguishable "waiting" while the indexer is down — and
+     * it auto-clears when it returns. A *successful* poll that simply shows the
+     * opponent hasn't acted keeps this `true` (that's a slow opponent, not a
+     * dead indexer — the two used to look identical).
+     */
+    private val _connected = MutableStateFlow(true)
+    val connected: StateFlow<Boolean> = _connected.asStateFlow()
+
+    private var consecutiveFailures = 0
+
+    /**
      * Cold flow of contract-state snapshots. Emits once per change, never
      * emits null. Completes only when the collecting scope is cancelled.
      */
@@ -72,11 +90,19 @@ class StatePoller(
     suspend fun readOnce(): ContractStateSnapshot? {
         return try {
             val ledger = contract.ledger()
+            // Reachable again — reset the failure run + clear any "reconnecting".
+            if (consecutiveFailures > 0) {
+                Log.i(TAG, "indexer reachable again for ${contract.contractAddress} (after $consecutiveFailures fail(s))")
+            }
+            consecutiveFailures = 0
+            _connected.value = true
             ContractStateSnapshot.fromLedger(ledger).also { snap ->
                 Log.d(TAG, "snapshot: ${snap.summary()}")
             }
         } catch (e: Exception) {
-            Log.w(TAG, "ledger() failed for ${contract.contractAddress} — will retry in ${pollIntervalMs}ms: ${e.message}")
+            consecutiveFailures += 1
+            if (consecutiveFailures >= UNREACHABLE_AFTER_FAILURES) _connected.value = false
+            Log.w(TAG, "ledger() failed (#$consecutiveFailures) for ${contract.contractAddress} — retry in ${pollIntervalMs}ms: ${e.message}")
             null
         }
     }
@@ -85,5 +111,7 @@ class StatePoller(
         private const val TAG = "StatePoller"
         /** 3s polling — half a typical PREPROD block, balances latency vs load. */
         const val DEFAULT_POLL_INTERVAL_MS = 3_000L
+        /** Consecutive poll failures before we declare the indexer unreachable (~6 s). */
+        const val UNREACHABLE_AFTER_FAILURES = 2
     }
 }

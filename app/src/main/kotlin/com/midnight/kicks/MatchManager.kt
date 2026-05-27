@@ -1343,6 +1343,9 @@ open class MatchManager(
             if (pollerRefCount.decrementAndGet() == 0) {
                 pollerJob?.cancel()
                 pollerJob = null
+                // No waiter left polling — drop any stale "Reconnecting…" so it
+                // doesn't linger into the next phase.
+                MatchHud.publishConnectionLost(false)
             }
         }
     }
@@ -2053,7 +2056,11 @@ open class MatchManager(
         pollerJob?.cancel()
         val poller = StatePoller(pollingContract(address))
         pollerJob = managerScope.launch {
-            poller.snapshots().collect { _contractState.value = it }
+            // Snapshots drive the wait predicates; the connected flow drives the
+            // "Reconnecting…" HUD banner so an indexer outage reads as a network
+            // issue (not a freeze) and auto-clears when it returns.
+            launch { poller.snapshots().collect { _contractState.value = it } }
+            launch { poller.connected.collect { ok -> MatchHud.publishConnectionLost(!ok) } }
         }
     }
 

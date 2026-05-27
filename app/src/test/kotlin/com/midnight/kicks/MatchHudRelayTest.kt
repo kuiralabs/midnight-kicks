@@ -2,8 +2,10 @@ package com.midnight.kicks
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -170,6 +172,18 @@ class MatchHudRelayTest {
         MatchHud.applyRemote(relayed())
 
         assertEquals(expected, MatchHud.picker.value)
+    }
+
+    @Test
+    fun `connectionLost roundTrips_bothWays`() {
+        MatchHud.publishConnectionLost(true)
+        assertTrue(MatchHud.state.value.connectionLost)
+        MatchHud.applyRemote(relayed())
+        assertTrue("lost relays across the boundary", MatchHud.state.value.connectionLost)
+
+        MatchHud.publishConnectionLost(false)
+        MatchHud.applyRemote(relayed())
+        assertFalse("clear relays across the boundary", MatchHud.state.value.connectionLost)
     }
 
     @Test
