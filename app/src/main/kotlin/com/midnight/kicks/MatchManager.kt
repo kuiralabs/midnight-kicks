@@ -501,6 +501,14 @@ open class MatchManager(
         // the user can briefly see the previous match's "FINAL 3-2"
         // scoreboard flash on top of a brand-new deploy.
         MatchHud.reset()
+        // Drop the retained contract snapshot. awaitContractState reads it via
+        // `contractState.filterNotNull().first(predicate)`, and StateFlow replays
+        // its current value — so a leftover snapshot from the PREVIOUS match
+        // (e.g. ended in sudden death → sdRound>=1, or phase==COMPLETE) would
+        // satisfy a new match's wait predicate before the new poller emits a
+        // fresh one. That made a rematch "reveal" instantly against a contract
+        // still in commit phase → "Match not in regulation reveal phase".
+        _contractState.value = null
         setState(MatchState.SdkReady)
     }
 
