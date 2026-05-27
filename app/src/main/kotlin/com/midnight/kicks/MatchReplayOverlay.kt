@@ -137,17 +137,21 @@ private fun ReplayBody(
             // beat — and a full-screen tap-swallow so stray taps don't poke the
             // 3D scene.
             Box(modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures {} }) {
-                LiveScoreChip(
-                    rounds = replay.rounds,
-                    revealed = revealedKicks,
-                    localRole = localRole,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .statusBarsPadding()
-                        .displayCutoutPadding()
-                        .padding(16.dp),
-                )
+                // Both the chip and the flash are driven by per-kick events, so
+                // they only appear once kicks start landing. That also means a
+                // binary without the per-kick emit (pre-re-export) shows nothing
+                // here rather than a frozen 0-0 — clean degradation either way.
                 if (revealedKicks > 0) {
+                    LiveScoreChip(
+                        rounds = replay.rounds,
+                        revealed = revealedKicks,
+                        localRole = localRole,
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .statusBarsPadding()
+                            .displayCutoutPadding()
+                            .padding(16.dp),
+                    )
                     val lastKick = replay.rounds[revealedKicks - 1]
                     KickFlash(
                         tick = revealedKicks,
