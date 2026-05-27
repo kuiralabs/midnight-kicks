@@ -94,7 +94,7 @@ public class ShotManager : MonoBehaviour
             List<RoundData> testRounds = new List<RoundData> {
                 new RoundData { round = 1, shooter = "P1", shootDir = 1, keepDir = 0, result = ResultGoal }
             };
-            StartCoroutine(PlayReplay(testRounds, null));
+            StartCoroutine(PlayReplay(testRounds, null, null));
         }
     }
 
@@ -137,7 +137,7 @@ public class ShotManager : MonoBehaviour
                   $"mainCamera={(mainCamera != null)}");
     }
 
-    public IEnumerator PlayReplay(List<RoundData> rounds, System.Action onComplete)
+    public IEnumerator PlayReplay(List<RoundData> rounds, System.Action<int> onRoundResolved, System.Action onComplete)
     {
         Debug.Log($"[ShotManager] PlayReplay START rounds={rounds.Count}");
         float startTime = Time.realtimeSinceStartup;
@@ -166,6 +166,11 @@ public class ShotManager : MonoBehaviour
             }
 
             currentScore = $"P1: {p1Score} - P2: {p2Score}";
+            // Tell Kotlin this kick just resolved, so the Compose overlay can
+            // flash GOAL!/SAVED! and climb its live score chip in step with the
+            // 3D action (the suspense beat). The overlay derives the outcome
+            // from its own authoritative round data; we only send the index.
+            onRoundResolved?.Invoke(i);
             yield return new WaitForSeconds(ScoreHoldBetweenRounds);
         }
 

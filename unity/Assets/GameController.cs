@@ -194,13 +194,22 @@ public class GameController : MonoBehaviour
         if (shotManager != null)
         {
             Debug.Log("[GameController] Dispatching to ShotManager.PlayReplay");
-            StartCoroutine(shotManager.PlayReplay(msg.rounds, OnReplayComplete));
+            StartCoroutine(shotManager.PlayReplay(msg.rounds, OnRoundResolved, OnReplayComplete));
         }
         else
         {
             Debug.LogError("[GameController] ShotManager not found even after auto-setup — falling back to SimulateReplay");
             StartCoroutine(SimulateReplay());
         }
+    }
+
+    // Fired by ShotManager after each kick resolves. The Compose replay overlay
+    // uses it to flash GOAL!/SAVED! and climb its live score chip in step with
+    // the 3D action. Only the index travels; Kotlin owns the authoritative
+    // round outcome.
+    private void OnRoundResolved(int index)
+    {
+        SendToKotlin("{\"type\":\"roundResult\",\"index\":" + index + "}");
     }
 
     private void OnReplayComplete()

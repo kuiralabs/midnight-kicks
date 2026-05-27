@@ -36,6 +36,19 @@ object UnityBridge {
      */
     val replayCinematicDoneAt: StateFlow<Long> = _replayCinematicDoneAt.asStateFlow()
 
+    /** A replay kick resolving in Unity: which kick ([index]) and when ([atMs]). */
+    data class ReplayKick(val atMs: Long, val index: Int)
+
+    private val _replayKick = MutableStateFlow(ReplayKick(0L, -1))
+
+    /**
+     * Emitted as each kick lands during the cinematic (Unity's per-round
+     * `roundResult`). The replay overlay flashes GOAL!/SAVED! and climbs its
+     * live score chip off this, in step with the 3D action. Carries [atMs] so a
+     * collector can ignore kicks that predate the cinematic it just fired.
+     */
+    val replayKick: StateFlow<ReplayKick> = _replayKick.asStateFlow()
+
     // ── Kotlin → Unity ──
     //
     // The choice phase no longer goes to Unity: the picker is the Compose
@@ -76,16 +89,17 @@ object UnityBridge {
     @JvmStatic
     fun receiveFromUnity(jsonString: String) {
         Log.d(TAG, "← Unity: $jsonString")
-        if (isReplayComplete(jsonString)) {
-            // Surface the cinematic-finished moment to the :unity-local overlay
-            // (see [replayCinematicDoneAt]) before relaying onward to main.
-            _replayCinematicDoneAt.value = System.currentTimeMillis()
+        // Surface replay timing to the :unity-local overlay (see
+        // [replayCinematicDoneAt] / [replayKick]) before relaying onward to main.
+        val now = System.currentTimeMillis()
+        runCatching { JSONObject(jsonString) }.getOrNull()?.let { o ->
+            when (o.optString("type")) {
+                "replayComplete" -> _replayCinematicDoneAt.value = now
+                "roundResult" -> _replayKick.value = ReplayKick(now, o.optInt("index", -1))
+            }
         }
         onMessageFromUnity?.invoke(jsonString)
     }
-
-    private fun isReplayComplete(json: String): Boolean =
-        runCatching { JSONObject(json).getString("type") == "replayComplete" }.getOrDefault(false)
 
     /**
      * The Compose picker ([MatchPickerOverlay]) submitting its locked picks —

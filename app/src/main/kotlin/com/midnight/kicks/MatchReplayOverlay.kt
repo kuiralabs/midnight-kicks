@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -22,11 +23,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -34,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 
 /**
@@ -96,33 +100,62 @@ private fun ReplayBody(
     // timestamp so each replay (even two with identical outcomes) restarts
     // clean rather than re-using the previous show's "done" state.
     var cinematicDone by remember(hudReplay.publishedAtMs) { mutableStateOf(false) }
+    var firedAtMs by remember(hudReplay.publishedAtMs) { mutableLongStateOf(0L) }
     LaunchedEffect(hudReplay.publishedAtMs) {
         cinematicDone = false
-        val firedAt = System.currentTimeMillis()
+        firedAtMs = System.currentTimeMillis()
         // Kick off the 3D cinematic the instant the replay appears. The kicks
-        // are the whole show here — nothing is drawn on top of them.
+        // are the whole show — only a small live score chip + a brief per-kick
+        // GOAL!/SAVED! flash sit over them (see below), never the result itself.
         val winner = when {
             replay.p1Score > replay.p2Score -> "P1"
             replay.p2Score > replay.p1Score -> "P2"
             else -> null
         }
         UnityBridge.playReplayCinematic(replay.rounds, replay.p1Score, replay.p2Score, winner)
-        // Hold the HUD back until Unity says the kicks are done. Gating on the
-        // real completion (not an estimated duration) is what guarantees the
+        // Hold the result HUD back until Unity says the kicks are done. Gating on
+        // the real completion (not an estimated duration) is what guarantees the
         // result never lands on top of a kick still in flight.
-        UnityBridge.replayCinematicDoneAt.first { it >= firedAt }
+        UnityBridge.replayCinematicDoneAt.first { it >= firedAtMs }
         cinematicDone = true
+    }
+
+    // How many kicks have landed so far, driven by Unity's per-kick events
+    // (correlated against firedAtMs so a stale kick from a prior replay can't
+    // bleed in). Once the cinematic is done, all of them are in.
+    val kick by UnityBridge.replayKick.collectAsState()
+    val revealedKicks = when {
+        cinematicDone -> replay.rounds.size
+        firedAtMs > 0L && kick.atMs >= firedAtMs -> (kick.index + 1).coerceIn(0, replay.rounds.size)
+        else -> 0
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (!cinematicDone) {
-            // Cinematic playing: draw NOTHING. Just swallow stray taps so they
-            // don't poke the 3D scene — the kicks are fully visible underneath.
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(Unit) { detectTapGestures {} },
-            )
+            // Cinematic playing: the kicks stay fully visible. Over them sit only
+            // a corner score chip + a transient per-kick flash — the suspense
+            // beat — and a full-screen tap-swallow so stray taps don't poke the
+            // 3D scene.
+            Box(modifier = Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures {} }) {
+                LiveScoreChip(
+                    rounds = replay.rounds,
+                    revealed = revealedKicks,
+                    localRole = localRole,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .statusBarsPadding()
+                        .displayCutoutPadding()
+                        .padding(16.dp),
+                )
+                if (revealedKicks > 0) {
+                    val lastKick = replay.rounds[revealedKicks - 1]
+                    KickFlash(
+                        tick = revealedKicks,
+                        isGoal = lastKick.result == "goal",
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                }
+            }
         }
         // Result HUD — fades in the moment the kicks finish.
         AnimatedVisibility(
@@ -131,6 +164,88 @@ private fun ReplayBody(
         ) {
             ResultHud(replay = replay, localRole = localRole, onRematch = onRematch, onMenu = onMenu)
         }
+    }
+}
+
+/**
+ * A small corner pill showing the score climbing live as kicks land — from THIS
+ * device's side ([localRole]; null = PvAI, you're P1). Counts goals in the
+ * [revealed] prefix of [rounds]; non-blocking so the 3D action stays clear.
+ */
+@Composable
+private fun LiveScoreChip(
+    rounds: List<RoundResult>,
+    revealed: Int,
+    localRole: Player?,
+    modifier: Modifier,
+) {
+    var p1 = 0
+    var p2 = 0
+    for (i in 0 until revealed.coerceAtMost(rounds.size)) {
+        val r = rounds[i]
+        if (r.result == "goal") {
+            if (r.shooter == "P1") p1 += 1 else p2 += 1
+        }
+    }
+    val isP2 = localRole == Player.P2
+    val mine = if (isP2) p2 else p1
+    val theirs = if (isP2) p1 else p2
+    val themLabel = if (localRole == null) "AI" else "OPP"
+
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(percent = 50))
+            .background(KicksColors.BannerScrim)
+            .padding(horizontal = 16.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ChipScore(label = "YOU", score = mine, accent = KicksColors.SuccessBright)
+        Text("–", color = Color.White.copy(alpha = 0.4f), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        ChipScore(label = themLabel, score = theirs, accent = KicksColors.Danger)
+    }
+}
+
+@Composable
+private fun ChipScore(label: String, score: Int, accent: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = label,
+            color = accent,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp,
+            modifier = Modifier.padding(horizontal = 6.dp),
+        )
+        Text(text = "$score", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Black)
+    }
+}
+
+/**
+ * The per-kick announcement: a big GOAL! / SAVED! that flashes in and fades as
+ * each kick resolves. Keyed on [tick] (the running kick count) so it re-fires
+ * for every kick. Transient (~1s) and unbacked so the pitch stays visible.
+ */
+@Composable
+private fun KickFlash(tick: Int, isGoal: Boolean, modifier: Modifier) {
+    var visible by remember(tick) { mutableStateOf(false) }
+    LaunchedEffect(tick) {
+        visible = true
+        delay(950)
+        visible = false
+    }
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(120)),
+        exit = fadeOut(tween(350)),
+        modifier = modifier,
+    ) {
+        Text(
+            text = if (isGoal) "GOAL!" else "SAVED!",
+            color = if (isGoal) KicksColors.SuccessBright else KicksColors.Pending,
+            fontSize = 60.sp,
+            fontWeight = FontWeight.Black,
+            letterSpacing = 2.sp,
+        )
     }
 }
 
@@ -166,6 +281,7 @@ private fun ResultHud(
                 ),
             )
             .statusBarsPadding()
+            .displayCutoutPadding()
             .padding(24.dp),
         contentAlignment = Alignment.Center,
     ) {
