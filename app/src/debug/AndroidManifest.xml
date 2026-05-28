@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only manifest for Midnight Kicks.
+
+  Allows cleartext (http/ws) traffic so debug builds can reach the local
+  Midnight node + indexer at 10.0.2.2 (localnet dev). Merged ONLY into debug
+  builds; release builds stay cleartext-free and hit HTTPS PREPROD.
+
+  Why this lives here now: Kicks previously inherited this from core:ledger's
+  debug AAR manifest. Once the SDK began publishing its *release* variants
+  (io.github.kuiralabs:*), that debug-only allowance no longer reaches
+  consumers — so each app must declare its own localnet cleartext policy
+  (BBoard + the wallet app already do; see INTEGRATION.md).
+
+  SECURITY: debug-only, never in release.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:usesCleartextTraffic="true" />
+</manifest>
