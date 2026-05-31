@@ -33,5 +33,10 @@ unity/*_BurstDebugInformation_DoNotShip/
 unity/Assets/AI Toolkit/Temp/
 unity/Assets/AI Toolkit/Temp.meta
 
+# Unity Editor session-recovery snapshots (auto-created after an
+# interrupted save / crash; not part of the project).
+unity/Assets/_Recovery/
+unity/Assets/_Recovery.meta
+
 # OS
 .DS_Store
