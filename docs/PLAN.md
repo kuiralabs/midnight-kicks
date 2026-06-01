@@ -163,6 +163,7 @@ Every friction point building BBoard standalone → becomes SDK improvement.
 | 8 | WebSocket backpressure OOM on 250k events | Medium | File streaming, Rust native memory. |
 | 9 | No contract deployment API | Medium | ✅ FIXED. `MidnightContract.deploy()` + FFI. |
 | 10 | Content behind system status bar | Low | WindowInsets padding. |
+| 11 | **16 KB page-size compliance** — Android 15+ devices use a 16 KB memory page size (a Play requirement for apps targeting Android 15+); native `.so` LOAD segments aligned to the old 4 KB boundary trip the "ELF alignment check failed" warning and run in slower page-size-compat mode. Surfaced on a 16 KB emulator running Kicks. The dialog flags many libs across three owners. | High (pre-Play, not pre-testnet) | **Ours — ✅ FIXED:** `libkuira_crypto_ffi.so` now links with `-Wl,-z,max-page-size=16384` (CMakeLists.txt); LOAD segments verified at 0x4000. **Unity (Kicks-owned) — TODO:** `libunity/libil2cpp/libmain/lib_burst_generated/libgame` need a 16 KB-aligned re-export (Unity Player setting + rebuild). **Third-party deps — TODO:** `libquickjs.so` (`com.dokar.quickjs`), `libandroidx.graphics.path.so`, `libdatastore_shared_counter.so`, `libc++_shared.so` (NDK) — clear as each ships a 16 KB-aligned release / NDK r28+ link. Non-blocking for testnet (runs in compat mode); must be clean before Play submission. |
 
 ---
 
