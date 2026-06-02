@@ -1,5 +1,6 @@
 package com.midnight.kicks
 
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
@@ -188,6 +189,8 @@ class KicksActivity : FragmentActivity() {
                     statusMessage = statusMessage.value,
                     lastChoices = lastChoices.value,
                     hasActiveSession = hasActiveSession.value,
+                    network = NetworkPref.load(this),
+                    onNetworkChange = { NetworkPref.save(this, it) },
                     onCreateMatch = ::startCreateMatch,
                     onJoinMatch = { screen.value = KicksScreen.Joining() },
                     onResumeMatch = ::resumeMatch,
@@ -609,13 +612,14 @@ class KicksActivity : FragmentActivity() {
                     // single SDK. Throws SigilRequiredException if the user
                     // hasn't forged a passkey yet — the catch below translates
                     // that into a "forge your sigil first" prompt.
+                    val bootNetwork = NetworkPref.load(this@KicksActivity)
                     sdkProvider.ensureSdk(
                         this@KicksActivity,
-                        WalletConfig(network = MidnightNetwork.UNDEPLOYED),
+                        WalletConfig(network = bootNetwork),
                     )
                     val manager = MatchManager(
                         context = applicationContext,
-                        network = MidnightNetwork.UNDEPLOYED,
+                        network = bootNetwork,
                         // Follower: takes the SDK the provider just built —
                         // no second SDK, no second chain sync.
                         sdkProvider = sdkProvider,
@@ -1296,6 +1300,8 @@ fun KicksApp(
     statusMessage: String?,
     lastChoices: String?,
     hasActiveSession: Boolean,
+    network: MidnightNetwork,
+    onNetworkChange: (MidnightNetwork) -> Unit,
     onCreateMatch: () -> Unit,
     onJoinMatch: () -> Unit,
     onResumeMatch: () -> Unit,
@@ -1306,7 +1312,7 @@ fun KicksApp(
         color = KicksColors.Background,
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            PanelBar(network = MidnightNetwork.UNDEPLOYED)
+            PanelBar(network = network, onNetworkChange = onNetworkChange)
 
             Column(
                 modifier = Modifier
@@ -1409,5 +1415,30 @@ private fun MenuButton(text: String, onClick: () -> Unit) {
             fontWeight = FontWeight.Medium,
             letterSpacing = 3.sp,
         )
+    }
+}
+
+/**
+ * App-layer persistence of the user's selected network. The SDK is
+ * network-agnostic — it takes a network config and emits onNetworkChange;
+ * remembering the choice across launches is the app's responsibility, so the
+ * wallet boots on the network the user last used instead of always defaulting
+ * to UNDEPLOYED. Plain (non-encrypted) prefs — the network id isn't a secret.
+ */
+private object NetworkPref {
+    private const val PREFS = "kicks_network_pref"
+    private const val KEY = "selected_network"
+
+    fun load(ctx: Context): MidnightNetwork =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY, null)
+            ?.let { name -> runCatching { MidnightNetwork.valueOf(name) }.getOrNull() }
+            ?: MidnightNetwork.UNDEPLOYED
+
+    fun save(ctx: Context, network: MidnightNetwork) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY, network.name)
+            .apply()
     }
 }
