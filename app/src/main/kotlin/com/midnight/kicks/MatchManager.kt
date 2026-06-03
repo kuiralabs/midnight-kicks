@@ -2465,25 +2465,8 @@ open class MatchManager(
         installContractCircuitKeys()
     }
 
-    /**
-     * Copies the V3 contract's circuit keys (joinMatch, commitRegulation,
-     * revealRegulation, commitSuddenDeath, revealSuddenDeath, claimTimeout,
-     * cancelMatch) from the APK's `assets/keys/` into `filesDir/proving_keys/`
-     * where the Rust prover expects them. APK-bundled means no per-device
-     * setup — these never need to be downloaded.
-     */
     private fun installContractCircuitKeys() {
-        val keysDir = File(context.filesDir, "proving_keys")
-        val assetKeys = context.assets.list("keys") ?: emptyArray()
-        assetKeys.filter { it.endsWith(".prover") || it.endsWith(".bzkir") || it.endsWith(".verifier") }.forEach { name ->
-            val dst = File(keysDir, name)
-            if (!dst.exists()) {
-                context.assets.open("keys/$name").use { input ->
-                    dst.outputStream().use { output -> input.copyTo(output) }
-                }
-                Log.d(TAG, "Installed contract key: $name")
-            }
-        }
+        ProvingKeyManager(context).installCircuitKeysFromAssets()
     }
 
     companion object {
