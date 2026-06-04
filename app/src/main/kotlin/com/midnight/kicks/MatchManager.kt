@@ -1033,6 +1033,17 @@ open class MatchManager(
             p2Shoots = shoots.copyOf()
             p2Keeps  = keeps.copyOf()
             p2RegulationNonce = nonce
+            // Persist BEFORE reveal — mirrors [submitP1Picks]. Without these the
+            // P2-side resume can't reopen the on-chain commitment (rehydrate finds
+            // match.regulation == null → p2Shoots stays null → revealP2 throws
+            // "No P2 shoots captured") and the stake sits until timeout-claim.
+            updateCurrentMatch { it.copy(
+                regulation = MatchStore.RegulationWitnesses(
+                    shoots = shoots.copyOf(),
+                    keeps = keeps.copyOf(),
+                    nonce = nonce.copyOf(),
+                ),
+            ) }
         }
     }
 
@@ -2822,6 +2833,8 @@ internal fun formatContractCallStage(stage: ContractCallStage): String? = when (
         is BalanceProgress.Submitting -> "Submitting to chain…"
         is BalanceProgress.WaitingFinalization -> "Waiting for block finalization…"
         is BalanceProgress.RetryingDustSync -> "Retrying dust sync…"
+        is BalanceProgress.RecoveringDustState ->
+            "Recovering dust balance — this can take a moment…"
     }
     is ContractCallStage.Submitting -> "Submitting to chain…"
 }
