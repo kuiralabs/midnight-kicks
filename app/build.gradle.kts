@@ -7,7 +7,7 @@ plugins {
     // Source of truth is contract/src/managed/penalty/, populated by
     // `npm run compact` in contract/ (requires compactc matching the
     // @midnight-ntwrk/compact-runtime version pinned in
-    // contract/package.json — currently 0.30.0 → runtime 0.15.0).
+    // contract/package.json — currently compactc 0.31.0 → runtime 0.16.0).
     // The plugin wires the sync task into preBuild + fails fast if the
     // contract hasn't been compiled.
     id("com.midnight.kuira.contract") version "0.1.0-alpha01"
