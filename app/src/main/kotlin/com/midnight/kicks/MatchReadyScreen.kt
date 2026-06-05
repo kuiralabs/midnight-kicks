@@ -1,16 +1,11 @@
 package com.midnight.kicks
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -85,24 +80,7 @@ fun MatchReadyScreen(
 
             Spacer(modifier = Modifier.height(72.dp))
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .background(
-                        Color.White.copy(alpha = 0.15f),
-                        shape = RoundedCornerShape(12.dp),
-                    )
-                    .clickable(onClick = onContinue),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "CONTINUE",
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    letterSpacing = 4.sp,
-                )
-            }
+            KicksButton(label = "CONTINUE", onClick = onContinue)
 
             Spacer(modifier = Modifier.height(20.dp))
             Text(

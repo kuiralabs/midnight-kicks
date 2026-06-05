@@ -1,7 +1,6 @@
 package com.midnight.kicks
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -150,13 +149,13 @@ private fun MatchRow(
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            // Note: the abandon X is a child Box with its own kicksPressable;
+            // it doesn't propagate to this outer onClick. Tap → resume.
+            .kicksPressable(onClick = onClick)
             .background(
                 color = Color.White.copy(alpha = 0.06f),
                 shape = RoundedCornerShape(12.dp),
             )
-            // Note: the abandon X is a child Box with its own clickable;
-            // it doesn't propagate to this outer onClick. Tap → resume.
-            .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 16.dp),
     ) {
         Row(
@@ -216,11 +215,11 @@ private fun MatchRow(
             // row doesn't accidentally trigger abandon.
             Box(
                 modifier = Modifier
+                    .kicksPressable(shape = RoundedCornerShape(6.dp), onClick = onAbandon)
                     .background(
                         color = Color.White.copy(alpha = 0.06f),
                         shape = RoundedCornerShape(6.dp),
                     )
-                    .clickable(onClick = onAbandon)
                     .padding(horizontal = 8.dp, vertical = 4.dp),
             ) {
                 Text(

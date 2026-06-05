@@ -2,7 +2,6 @@ package com.midnight.kicks
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,7 +33,7 @@ import androidx.compose.ui.unit.sp
  * stack, makes leaving work in every phase. The Unity IMGUI button is removed
  * in `GameController.cs` (lands on the next Unity re-export); this replaces it.
  *
- * Touch routing: only the pill consumes taps (its `clickable`). The enclosing
+ * Touch routing: only the pill consumes taps (its `kicksPressable`). The enclosing
  * full-screen Box has no gesture modifier, so taps anywhere else fall through
  * to the overlays / Unity beneath — this layer doesn't block gameplay.
  *
@@ -60,10 +59,10 @@ fun MatchLeaveButton(onLeave: () -> Unit) {
     ) {
         Row(
             modifier = Modifier
+                .kicksPressable(shape = RoundedCornerShape(percent = 50)) { onLeave() }
                 .clip(RoundedCornerShape(percent = 50))
                 .background(KicksColors.BannerScrim)
                 .border(1.dp, KicksColors.Danger.copy(alpha = 0.55f), RoundedCornerShape(percent = 50))
-                .clickable { onLeave() }
                 .padding(horizontal = 16.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {

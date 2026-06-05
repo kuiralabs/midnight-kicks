@@ -5,7 +5,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -415,7 +414,7 @@ private fun EndActions(onRematch: () -> Unit, onMenu: () -> Unit) {
 private fun EndButton(text: String, fill: Color, textColor: Color, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .clickable { onClick() }
+            .kicksPressable { onClick() }
             .background(color = fill, shape = RoundedCornerShape(12.dp))
             .padding(horizontal = 28.dp, vertical = 14.dp),
         contentAlignment = Alignment.Center,
@@ -509,7 +508,7 @@ private fun IntermediateContinue(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { MatchHud.dismissReplay() }
+            .kicksPressable { MatchHud.dismissReplay() }
             .background(
                 color = KicksColors.Pending,
                 shape = RoundedCornerShape(12.dp),

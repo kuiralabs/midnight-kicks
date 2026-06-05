@@ -7,7 +7,6 @@ import android.util.Log
 import androidx.activity.compose.setContent
 import androidx.fragment.app.FragmentActivity
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -191,10 +190,20 @@ class KicksActivity : FragmentActivity() {
                     hasActiveSession = hasActiveSession.value,
                     network = NetworkPref.load(this),
                     onNetworkChange = { NetworkPref.save(this, it) },
-                    onCreateMatch = ::startCreateMatch,
-                    onJoinMatch = { screen.value = KicksScreen.Joining() },
-                    onResumeMatch = ::resumeMatch,
+                    onCreateMatch = {
+                        clearMenuStatus()
+                        startCreateMatch()
+                    },
+                    onJoinMatch = {
+                        clearMenuStatus()
+                        screen.value = KicksScreen.Joining()
+                    },
+                    onResumeMatch = {
+                        clearMenuStatus()
+                        resumeMatch()
+                    },
                     onPracticeVsAi = {
+                        clearMenuStatus()
                         currentRole = null
                         launchUnityChoicePhase()
                     },
@@ -939,6 +948,19 @@ class KicksActivity : FragmentActivity() {
     }
 
     /**
+     * Clear the post-match summary the menu carries forward — the win text and
+     * the pick recap [handleMatchResult] sets, which [handleEndToMenu] keeps so
+     * the user sees the result when they land back on the menu. It's a
+     * show-once message: the moment the user starts the next thing (create /
+     * join / practice / resume / rematch) the old result is stale, so those
+     * entry points wipe it instead of letting it bleed into the new flow.
+     */
+    private fun clearMenuStatus() {
+        statusMessage.value = null
+        lastChoices.value = null
+    }
+
+    /**
      * End-screen MENU tap (the match is already RESOLVED, not paused). `:unity`
      * killed itself right after sending this, so drop the dead inbox and clear
      * the in-match HUD, then land on the menu — KEEPING the win text
@@ -962,6 +984,7 @@ class KicksActivity : FragmentActivity() {
     private fun handleRematch() {
         MatchBridge.onUnityGone()
         MatchHud.reset()
+        clearMenuStatus()
         when (lastPlayedRole) {
             null -> {
                 currentRole = null
@@ -1361,7 +1384,7 @@ fun KicksApp(
                     fontSize = 11.sp,
                     letterSpacing = 3.sp,
                     modifier = Modifier
-                        .clickable(onClick = onPracticeVsAi)
+                        .kicksPressable(shape = RoundedCornerShape(8.dp), onClick = onPracticeVsAi)
                         .padding(8.dp),
                 )
 
@@ -1405,23 +1428,7 @@ fun KicksApp(
 
 @Composable
 private fun MenuButton(text: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(56.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color.White.copy(alpha = 0.08f))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text,
-            color = Color.White,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Medium,
-            letterSpacing = 3.sp,
-        )
-    }
+    KicksButton(label = text, onClick = onClick)
 }
 
 /**

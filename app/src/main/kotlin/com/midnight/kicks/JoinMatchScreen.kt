@@ -1,7 +1,6 @@
 package com.midnight.kicks
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,8 +9,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -104,33 +101,12 @@ fun JoinMatchScreen(
             // `mn_addr_…` — different concept; matchmaking uses the
             // contract address.
             val enabled = !inFlight && address.matches(CONTRACT_ADDRESS_REGEX)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .background(
-                        if (enabled) Color.White.copy(alpha = 0.15f)
-                        else Color.White.copy(alpha = 0.05f),
-                        shape = RoundedCornerShape(12.dp),
-                    )
-                    .let { if (enabled) it.clickable { onJoin(address) } else it },
-                contentAlignment = Alignment.Center,
-            ) {
-                if (inFlight) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier.height(24.dp),
-                    )
-                } else {
-                    Text(
-                        "JOIN MATCH",
-                        color = if (enabled) Color.White else Color.White.copy(alpha = 0.3f),
-                        fontSize = 14.sp,
-                        letterSpacing = 4.sp,
-                    )
-                }
-            }
+            KicksButton(
+                label = "JOIN MATCH",
+                onClick = { onJoin(address) },
+                enabled = enabled,
+                loading = inFlight,
+            )
 
             if (inFlight) {
                 Spacer(modifier = Modifier.height(20.dp))

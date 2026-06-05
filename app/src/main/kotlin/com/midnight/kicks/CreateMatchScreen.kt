@@ -1,7 +1,6 @@
 package com.midnight.kicks
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -113,14 +112,14 @@ fun CreateMatchScreen(
 
                 Box(
                     modifier = Modifier
+                        .kicksPressable(shape = RoundedCornerShape(10.dp)) {
+                            clipboard.setText(AnnotatedString(address))
+                            copied = true
+                        }
                         .background(
                             Color.White.copy(alpha = 0.08f),
                             shape = RoundedCornerShape(10.dp),
                         )
-                        .clickable {
-                            clipboard.setText(AnnotatedString(address))
-                            copied = true
-                        }
                         .padding(horizontal = 24.dp, vertical = 12.dp),
                 ) {
                     Text(
@@ -139,32 +138,11 @@ fun CreateMatchScreen(
                 // No background coroutine pinned to this Activity's
                 // lifecycle — the session is persisted via
                 // [MatchStore] so the user can fully leave the app.
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp)
-                        .background(
-                            Color.White.copy(alpha = 0.15f),
-                            shape = RoundedCornerShape(12.dp),
-                        )
-                        .let { if (!checking) it.clickable(onClick = onCheckStatus) else it },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (checking) {
-                        CircularProgressIndicator(
-                            color = Color.White,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.height(24.dp),
-                        )
-                    } else {
-                        Text(
-                            "CHECK STATUS",
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            letterSpacing = 4.sp,
-                        )
-                    }
-                }
+                KicksButton(
+                    label = "CHECK STATUS",
+                    onClick = onCheckStatus,
+                    loading = checking,
+                )
 
                 if (statusMessage != null) {
                     Spacer(modifier = Modifier.height(20.dp))
@@ -183,25 +161,12 @@ fun CreateMatchScreen(
                 // Lives here, not in an in-match menu, because this is exactly
                 // where the creator waits for a join — once someone joins, the
                 // flow moves on to MatchReady and cancel is no longer valid.
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .background(
-                            if (confirmingCancel) KicksColors.DangerSurface else Color.Transparent,
-                            shape = RoundedCornerShape(12.dp),
-                        )
-                        .let { if (!checking) it.clickable { if (confirmingCancel) onCancel() else confirmingCancel = true } else it }
-                        .padding(horizontal = 16.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        if (confirmingCancel) "TAP AGAIN TO CANCEL & REFUND" else "CANCEL MATCH",
-                        color = KicksColors.Danger,
-                        fontSize = 13.sp,
-                        letterSpacing = 3.sp,
-                    )
-                }
+                KicksButton(
+                    label = if (confirmingCancel) "TAP AGAIN TO CANCEL & REFUND" else "CANCEL MATCH",
+                    onClick = { if (confirmingCancel) onCancel() else confirmingCancel = true },
+                    enabled = !checking,
+                    style = KicksButtonStyle.Danger,
+                )
             }
         }
     }
@@ -215,11 +180,11 @@ internal fun TopBackBar(label: String, onBack: () -> Unit) {
     ) {
         Box(
             modifier = Modifier
+                .kicksPressable(shape = RoundedCornerShape(8.dp), onClick = onBack)
                 .background(
                     Color.White.copy(alpha = 0.08f),
                     shape = RoundedCornerShape(8.dp),
                 )
-                .clickable(onClick = onBack)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             Text("‹  BACK", color = Color.White, fontSize = 12.sp, letterSpacing = 2.sp)
