@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -76,8 +77,8 @@ fun KicksButton(
     val height = if (style == KicksButtonStyle.Danger) 48.dp else 56.dp
     val container = when {
         style == KicksButtonStyle.Danger -> Color.Transparent
-        !enabled -> Color.White.copy(alpha = 0.05f)
-        else -> Color.White.copy(alpha = 0.12f)
+        !enabled -> Color.White.copy(alpha = 0.08f)
+        else -> Color.White.copy(alpha = 0.20f)
     }
     val content = when {
         style == KicksButtonStyle.Danger -> KicksColors.Danger
@@ -173,6 +174,9 @@ fun Modifier.kicksPressable(
         label = "kicksPressScale",
     )
     return this
+        // HIG: guarantee a ≥48dp touch target even for small chips/links;
+        // the visual stays compact and centered within the expanded target.
+        .minimumInteractiveComponentSize()
         .scale(scale)
         .clip(shape)
         .drawWithContent {

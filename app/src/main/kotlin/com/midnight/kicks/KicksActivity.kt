@@ -5,8 +5,11 @@ import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.fragment.app.FragmentActivity
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -23,7 +27,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -161,6 +168,11 @@ class KicksActivity : FragmentActivity() {
     private var replayAutoAdvanceJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Edge-to-edge per Android HIG: the menu's stadium backdrop draws behind
+        // the system bars while content claims the safe area via window insets
+        // (see KicksApp). Required default on Android 15; opt in explicitly so
+        // older versions match.
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
         // Register for Unity bridge messages. Post-split these arrive relayed
@@ -1341,11 +1353,35 @@ fun KicksApp(
         color = KicksColors.Background,
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
+            // World Cup stadium backdrop — the menu's signature visual.
+            Image(
+                painter = painterResource(R.drawable.world_cup_stadium),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+            // Legibility scrim: light at the top so the stadium + flags read
+            // through, darkening toward the bottom where the menu sits.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0f to KicksColors.Background.copy(alpha = 0.30f),
+                            0.45f to KicksColors.Background.copy(alpha = 0.62f),
+                            1f to KicksColors.Background.copy(alpha = 0.94f),
+                        ),
+                    ),
+            )
+
             PanelBar(network = network, onNetworkChange = onNetworkChange)
 
             Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    // Keep the menu within the status/nav/cutout safe area; the
+                    // stadium Image + scrim above stay edge-to-edge behind the bars.
+                    .systemBarsPadding()
                     .padding(24.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -1364,29 +1400,46 @@ fun KicksApp(
                     letterSpacing = 8.sp,
                 )
 
-                Spacer(modifier = Modifier.height(64.dp))
+                Spacer(modifier = Modifier.height(48.dp))
 
-                if (hasActiveSession) {
-                    MenuButton("RESUME MATCH", onClick = onResumeMatch)
-                    Spacer(modifier = Modifier.height(16.dp))
-                }
-                MenuButton("CREATE MATCH", onClick = onCreateMatch)
-                Spacer(modifier = Modifier.height(16.dp))
-                MenuButton("JOIN MATCH", onClick = onJoinMatch)
-                Spacer(modifier = Modifier.height(28.dp))
-                // Dev affordance — kept accessible while Phase 4 PvP
-                // chain logic is being plumbed. Drop it (or hide behind
-                // a long-press / debug build) once two-emulator E2E is
-                // wired through CREATE / JOIN.
-                Text(
-                    "PRACTICE VS AI",
-                    color = Color.White.copy(alpha = 0.3f),
-                    fontSize = 11.sp,
-                    letterSpacing = 3.sp,
+                // Glass panel enclosing the menu actions so the buttons read
+                // cleanly over the bright stadium behind them.
+                Column(
                     modifier = Modifier
-                        .kicksPressable(shape = RoundedCornerShape(8.dp), onClick = onPracticeVsAi)
-                        .padding(8.dp),
-                )
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color.Black.copy(alpha = 0.82f))
+                        .border(
+                            width = 1.dp,
+                            color = Color.White.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(24.dp),
+                        )
+                        .padding(horizontal = 20.dp, vertical = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    if (hasActiveSession) {
+                        MenuButton("RESUME MATCH", onClick = onResumeMatch)
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+                    MenuButton("CREATE MATCH", onClick = onCreateMatch)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    MenuButton("JOIN MATCH", onClick = onJoinMatch)
+                    Spacer(modifier = Modifier.height(20.dp))
+                    // Dev affordance — kept accessible while Phase 4 PvP
+                    // chain logic is being plumbed. Drop it (or hide behind
+                    // a long-press / debug build) once two-emulator E2E is
+                    // wired through CREATE / JOIN.
+                    Text(
+                        "PRACTICE VS AI",
+                        color = Color.White.copy(alpha = 0.4f),
+                        fontSize = 11.sp,
+                        letterSpacing = 3.sp,
+                        modifier = Modifier
+                            .kicksPressable(shape = RoundedCornerShape(8.dp), onClick = onPracticeVsAi)
+                            // ≥48dp touch target (HIG) — visual stays compact.
+                            .padding(horizontal = 16.dp, vertical = 17.dp),
+                    )
+                }
 
                 if (statusMessage != null || lastChoices != null) {
                     Spacer(modifier = Modifier.height(48.dp))
