@@ -103,9 +103,25 @@ open class MatchManager(
 
     private var sdk: MidnightSdk? = null
 
-    /** Single accessor that asserts SDK is initialized — avoids `sdk!!` everywhere. */
+    /**
+     * Single accessor for the live SDK.
+     *
+     * In follower mode (production) this reads the provider's CURRENT SDK, not a
+     * cached reference. A network switch rebuilds the shared SDK; caching the one
+     * we saw at [initSdkInternal] would strand every later action on the boot
+     * network's wallet — the deploy would balance dust against the old address
+     * (0 UTXOs) and fail with "Insufficient dust balance" even though the wallet
+     * is funded on the newly-selected network. Reading [MidnightSdkProvider.sdk]
+     * live keeps us on whatever network the authority (wallet panel /
+     * [KicksActivity.ensureSdkReady]) last built. Standalone mode (tests /
+     * non-panel hosts) uses the SDK we built ourselves.
+     */
     private val requireSdk: MidnightSdk
-        get() = requireNotNull(sdk) { "SDK not initialized — call initSdk first" }
+        get() = sdkProvider?.let { provider ->
+            requireNotNull(provider.sdk.value) {
+                "SDK not ready — provider has no live SDK (network switch in flight?)"
+            }
+        } ?: requireNotNull(sdk) { "SDK not initialized — call initSdk first" }
 
     /**
      * Scope owning the poll-loop coroutine. SupervisorJob so a poller crash

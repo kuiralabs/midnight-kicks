@@ -604,22 +604,28 @@ class KicksActivity : FragmentActivity() {
     private fun ensureSdkReady(onReady: () -> Unit) {
         lifecycleScope.launch {
             try {
+                // Reconcile the shared SDK to the user's CURRENT network on EVERY
+                // action, not just first launch. A network switch only saves
+                // NetworkPref + refreshes the wallet panel; the Kicks action path
+                // must independently re-point the provider, else a Create/Join
+                // after switching runs against the boot network's wallet (stale
+                // dust → "Insufficient dust balance"). MatchManager (a follower)
+                // reads the provider's live SDK, so re-pointing here is enough —
+                // no MatchManager rebuild needed at the menu. ensureSdk dedups an
+                // unchanged config (cheap on the hot path). Throws
+                // SigilRequiredException until a passkey is forged — the catch
+                // below turns that into a "forge your sigil first" prompt.
+                val currentNetwork = NetworkPref.load(this@KicksActivity)
+                sdkProvider.ensureSdk(
+                    this@KicksActivity,
+                    WalletConfig(network = currentNetwork),
+                )
                 if (matchManager == null) {
-                    // Build (or reuse) the one shared SDK via the provider.
-                    // First launch shows one biometric prompt (PRF derivation),
-                    // later launches hit the SeedVault cache. Same UNDEPLOYED
-                    // config as the wallet panel, so the provider dedups to a
-                    // single SDK. Throws SigilRequiredException if the user
-                    // hasn't forged a passkey yet — the catch below translates
-                    // that into a "forge your sigil first" prompt.
-                    val bootNetwork = NetworkPref.load(this@KicksActivity)
-                    sdkProvider.ensureSdk(
-                        this@KicksActivity,
-                        WalletConfig(network = bootNetwork),
-                    )
+                    // First launch shows one biometric prompt (PRF derivation);
+                    // later launches hit the SeedVault cache.
                     val manager = MatchManager(
                         context = applicationContext,
-                        network = bootNetwork,
+                        network = currentNetwork,
                         // Follower: takes the SDK the provider just built —
                         // no second SDK, no second chain sync.
                         sdkProvider = sdkProvider,
