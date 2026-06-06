@@ -23,7 +23,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -46,10 +48,12 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 /**
@@ -270,16 +274,27 @@ class KicksActivity : FragmentActivity() {
                         }
                     },
                 )
-                KicksScreen.Resume -> ResumeScreen(
-                    // Read the store on every recomposition so a Backup +
-                    // Restore round-trip that adds matches while the user
-                    // is on this screen surfaces them without a navigate-
-                    // away/back dance.
-                    matches = store.loadAll(),
-                    onBack = { screen.value = KicksScreen.Menu },
-                    onMatchSelected = ::resumeIntoMatch,
-                    onAbandon = { pendingAbandon.value = it },
-                )
+                KicksScreen.Resume -> {
+                    // Load the store OFF the main thread. loadAll() decrypts each
+                    // match from EncryptedSharedPreferences (and, on first access,
+                    // builds the Keystore master key) — doing that synchronously
+                    // during recomposition janked the list and made rows feel
+                    // unresponsive. Reloads on entering Resume and after an abandon
+                    // (key2) so Backup/Restore-added matches still surface.
+                    val resumeMatches by produceState(
+                        initialValue = emptyList<MatchStore.Match>(),
+                        key1 = screen.value,
+                        key2 = pendingAbandon.value,
+                    ) {
+                        value = withContext(Dispatchers.IO) { store.loadAll() }
+                    }
+                    ResumeScreen(
+                        matches = resumeMatches,
+                        onBack = { screen.value = KicksScreen.Menu },
+                        onMatchSelected = ::resumeIntoMatch,
+                        onAbandon = { pendingAbandon.value = it },
+                    )
+                }
             }
             // Abandon-match confirmation dialog. Sits outside the
             // screen `when` so it overlays whichever screen is up.
@@ -291,13 +306,18 @@ class KicksActivity : FragmentActivity() {
                     match = match,
                     onConfirm = {
                         Log.i(TAG, "Abandoning match ${match.address.take(16)}… (role=${match.role})")
-                        store.delete(match.address)
-                        hasActiveSession.value = store.loadAll().isNotEmpty()
-                        pendingAbandon.value = null
-                        // If we were on Resume and this was the last
-                        // match, fall back to the Menu.
-                        if (store.loadAll().isEmpty()) {
-                            screen.value = KicksScreen.Menu
+                        // delete() does a blocking EncryptedSharedPreferences
+                        // .commit(); run it + the reload off the main thread.
+                        lifecycleScope.launch {
+                            val remaining = withContext(Dispatchers.IO) {
+                                store.delete(match.address)
+                                store.loadAll()
+                            }
+                            hasActiveSession.value = remaining.isNotEmpty()
+                            pendingAbandon.value = null
+                            // If we were on Resume and this was the last match,
+                            // fall back to the Menu.
+                            if (remaining.isEmpty()) screen.value = KicksScreen.Menu
                         }
                     },
                     onCancel = { pendingAbandon.value = null },
