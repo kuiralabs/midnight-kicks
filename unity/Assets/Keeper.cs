@@ -46,6 +46,14 @@ public class Keeper : MonoBehaviour
     private float currentDiveDuration = 1f;
     private Animator animator;
 
+    /// Wired in ShotManager to the ball's parry; invoked by [OnSaveContact].
+    public System.Action saveContact;
+
+    /// Animation Event target: place an event on the contact frame of each dive
+    /// clip (GoalkeeperDiveLeft/Right/JumpCenter) that calls this — fires the
+    /// parry exactly when the keeper's hands meet the ball.
+    public void OnSaveContact() => saveContact?.Invoke();
+
     void Start()
     {
         initialPosition = transform.position;

@@ -21,16 +21,12 @@ public class PitchMarkings : MonoBehaviour
 
     private const float PenaltyArcRadius = 9.15f;     // FIFA: 9.15m
     private const int PenaltyArcSegments = 48;
-    private const float PenaltySpotMarkerRadius = 0.11f; // matches ball footprint
-    private const float PenaltySpotLineWidth = 0.04f;    // thin painted ring, not a fat chalk band
+    private const float PenaltySpotMarkerRadius = 0.11f; // solid spot, matches ball footprint
 
-    // The penalty spot sits directly under the ball at z=0 — real soccer
-    // pitches paint the spot exactly where the ball rests for the kick.
-    // Our ball is at (0, 0.11, 0); placing the spot here means the ball
-    // covers it during idle and only the thin painted ring is visible.
-    // This is a deliberate departure from FIFA's "11m from goal" distance
-    // (our 50m-long field doesn't preserve full-scale FIFA distances anyway).
-    private const float SpotZ = 0f;
+    // Must match BallKicker.restPosition.z so the painted dot sits directly
+    // under the resting ball, not behind it. (A deliberate departure from FIFA's
+    // 11m-from-goal distance; our 50m field doesn't preserve full scale anyway.)
+    private const float SpotZ = 0.2f;
 
     private const float GoalLineZ = 9.5f;             // matches Keeper z position
     private const float LineHeight = 0.02f;           // above field to avoid z-fighting
@@ -94,17 +90,14 @@ public class PitchMarkings : MonoBehaviour
 
     private void DrawPenaltySpot()
     {
-        const int segments = 20;
-        var points = new Vector3[segments + 1];
-        for (int i = 0; i <= segments; i++)
-        {
-            float angle = (i / (float)segments) * Mathf.PI * 2f;
-            points[i] = new Vector3(
-                Mathf.Cos(angle) * PenaltySpotMarkerRadius,
-                LineHeight,
-                SpotZ + Mathf.Sin(angle) * PenaltySpotMarkerRadius);
-        }
-        DrawLineLoop("PenaltySpot", points, closed: false, width: PenaltySpotLineWidth);
+        // Solid painted dot (a flat cylinder cap facing up), not an outline.
+        var spot = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+        spot.name = "PenaltySpot";
+        spot.transform.SetParent(transform, worldPositionStays: false);
+        spot.transform.position = new Vector3(0f, LineHeight, SpotZ);
+        spot.transform.localScale = new Vector3(PenaltySpotMarkerRadius * 2f, 0.004f, PenaltySpotMarkerRadius * 2f);
+        Destroy(spot.GetComponent<Collider>());
+        spot.GetComponent<MeshRenderer>().material = lineMaterial;
     }
 
     private void DrawPenaltyArc()

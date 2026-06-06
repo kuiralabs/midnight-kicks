@@ -65,6 +65,24 @@ public class ShotManager : MonoBehaviour
     private static readonly Vector3 ActionLook       = new Vector3(  0f, 0.8f, 9.5f);
     private const float              ActionFov       = 35f;
 
+    // ── Aspect-aware framing (portrait fix) ──
+    // A behind+above angle whose FOV is computed each round to keep the shooter,
+    // the goal mouth, and the keeper's dive range in the viewport for the CURRENT
+    // screen aspect. Portrait has a narrow horizontal FOV, which is why a camera
+    // tuned on a wide editor aspect drops the shooter off the side; this recomputes
+    // the FOV from the targets + Screen aspect so they stay framed. Tunable below.
+    [SerializeField] private Vector3 framingOffset = new Vector3(0f, 2.5f, -7f);
+    [SerializeField] private Vector3 framingGoal   = new Vector3(0f, 1.5f, 9.5f);
+    [SerializeField] private float   framingGoalHalfWidth = 2.6f;
+    [SerializeField] private float   framingPadding = 1.15f;
+    [SerializeField] private float   framingMinFov  = 32f;
+    [SerializeField] private float   framingMaxFov  = 82f;
+
+    // Run-up leg cadence multiplier: speeds up the in-place Run clip so the feet
+    // plant at the run's travel speed instead of sliding (it read as a walk at
+    // 1×). Tune until the feet stop skating.
+    [SerializeField] private float runAnimSpeed = 1.4f;
+
     // ── UI style font sizes ──
     private const int ScoreFontSize = 32;
     private const int ResultFontSize = 72;
@@ -129,6 +147,10 @@ public class ShotManager : MonoBehaviour
         }
 
         if (mainCamera == null) mainCamera = Camera.main;
+
+        // Fire the ball's parry from the keeper's dive-contact Animation Event.
+        if (keeper != null && ballKicker != null)
+            keeper.saveContact = ballKicker.RequestSaveDeflect;
 
         Debug.Log($"[ShotManager] CacheShooter: shooter={(shooter != null)} " +
                   $"shooterAnim={(shooterAnim != null)} " +
@@ -227,6 +249,49 @@ public class ShotManager : MonoBehaviour
     }
 
     /// <summary>
+    /// Aspect-aware shot: from a behind+above angle, compute the FOV that keeps
+    /// the shooter, the goal mouth, and the keeper's dive range inside the
+    /// viewport for the current screen aspect (so the shooter stays visible in
+    /// portrait). Held static for the round.
+    /// </summary>
+    private void FrameShot()
+    {
+        Vector3 goalLeft  = framingGoal + Vector3.left  * framingGoalHalfWidth;
+        Vector3 goalRight = framingGoal + Vector3.right * framingGoalHalfWidth;
+        Vector3 center = Vector3.Lerp(shooterKickPos, framingGoal, 0.5f);
+        ApplyFramed(center + framingOffset, center, shooterStartPos, shooterKickPos, goalLeft, goalRight);
+    }
+
+    /// <summary>
+    /// Place the camera at <paramref name="camPos"/> looking at
+    /// <paramref name="lookAt"/>, then widen the (vertical) FOV until every
+    /// point in <paramref name="points"/> fits — accounting for the current
+    /// aspect, where the horizontal FOV = vertical FOV scaled by width/height.
+    /// </summary>
+    private void ApplyFramed(Vector3 camPos, Vector3 lookAt, params Vector3[] points)
+    {
+        if (mainCamera == null) return;
+        Transform cam = mainCamera.transform;
+        cam.position = camPos;
+        cam.LookAt(lookAt);
+
+        float aspect = mainCamera.aspect; // width / height; < 1 in portrait
+        float maxTanV = 0.02f;
+        float maxTanH = 0.02f;
+        foreach (var p in points)
+        {
+            Vector3 v = cam.InverseTransformPoint(p); // camera-local, +z forward
+            if (v.z <= 0.05f) continue;               // ignore points behind the camera
+            maxTanV = Mathf.Max(maxTanV, Mathf.Abs(v.y) / v.z);
+            maxTanH = Mathf.Max(maxTanH, Mathf.Abs(v.x) / v.z);
+        }
+        float vFovForHeight = 2f * Mathf.Atan(maxTanV);
+        float vFovForWidth  = 2f * Mathf.Atan(maxTanH / aspect);
+        float vFov = Mathf.Max(vFovForHeight, vFovForWidth) * Mathf.Rad2Deg * framingPadding;
+        mainCamera.fieldOfView = Mathf.Clamp(vFov, framingMinFov, framingMaxFov);
+    }
+
+    /// <summary>
     /// Slow cinematic push-in from EstablishingCam to ActionCam. Runs in
     /// parallel with PlayRound so the dolly arrives at peak zoom exactly at
     /// the moment of impact. Lerps position, look-at, and FOV simultaneously
@@ -262,17 +327,20 @@ public class ShotManager : MonoBehaviour
             if (shooterAnim != null) shooterAnim.Play(AnimIdle);
         }
 
-        // Snap to the wide establishing shot, then start the slow push-in.
-        // Dolly runs across the entire pre-kick window (PreRunHold + Run +
-        // KickWindup) so peak zoom lands exactly when the ball is struck.
+        // Aspect-aware framing held for the round: keeps the shooter, ball and
+        // goal in shot on the current screen aspect (the portrait fix). The
+        // cinematic push-in is parked until the camera is rebuilt on Cinemachine.
         if (cameraDolly != null) StopCoroutine(cameraDolly);
-        ApplyCamera(EstablishingCam, EstablishingLook, EstablishingFov);
-        cameraDolly = StartCoroutine(DollyToAction(PreRunHold + RunDuration + KickWindupDuration));
+        FrameShot();
 
         currentFeedback = "";
         yield return new WaitForSeconds(PreRunHold);
 
-        if (shooterAnim != null) shooterAnim.Play(AnimRun);
+        if (shooterAnim != null)
+        {
+            shooterAnim.speed = runAnimSpeed;
+            shooterAnim.Play(AnimRun);
+        }
 
         float elapsed = 0f;
         while (elapsed < RunDuration)
@@ -286,10 +354,14 @@ public class ShotManager : MonoBehaviour
         if (shooter != null)
             shooter.transform.position = shooterKickPos;
 
-        if (shooterAnim != null) shooterAnim.Play(AnimKick);
+        if (shooterAnim != null)
+        {
+            shooterAnim.speed = 1f;
+            shooterAnim.Play(AnimKick);
+        }
         yield return new WaitForSeconds(KickWindupDuration);
 
-        if (ballKicker != null) ballKicker.KickTo(round.shootDir);
+        if (ballKicker != null) ballKicker.KickTo(round.shootDir, round.result == ResultGoal);
         yield return new WaitForSeconds(KeeperDiveDelay);
         if (keeper != null) keeper.Dive(round.keepDir, KeeperDiveDuration);
 
