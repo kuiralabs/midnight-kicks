@@ -1,6 +1,7 @@
 package com.midnight.kicks
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -146,17 +147,26 @@ private fun MatchRow(
     onClick: () -> Unit,
     onAbandon: () -> Unit,
 ) {
+    val roleColor = when (match.role) {
+        Player.P1 -> KicksColors.AccentBright
+        Player.P2 -> KicksColors.SuccessBright
+    }
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            // Note: the abandon X is a child Box with its own kicksPressable;
-            // it doesn't propagate to this outer onClick. Tap → resume.
+            // Abandon ✕ is a child with its own kicksPressable, so it doesn't
+            // propagate to this outer onClick. Tap → resume.
             .kicksPressable(onClick = onClick)
             .background(
-                color = Color.White.copy(alpha = 0.06f),
-                shape = RoundedCornerShape(12.dp),
+                color = Color.White.copy(alpha = 0.09f),
+                shape = RoundedCornerShape(14.dp),
             )
-            .padding(horizontal = 20.dp, vertical = 16.dp),
+            .border(
+                width = 1.dp,
+                color = Color.White.copy(alpha = 0.10f),
+                shape = RoundedCornerShape(14.dp),
+            )
+            .padding(horizontal = 18.dp, vertical = 16.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -166,21 +176,16 @@ private fun MatchRow(
             // across rows when both P1 and P2 matches coexist.
             Box(
                 modifier = Modifier
-                    .background(
-                        color = when (match.role) {
-                            Player.P1 -> KicksColors.AccentBright.copy(alpha = 0.18f)
-                            Player.P2 -> KicksColors.SuccessBright.copy(alpha = 0.18f)
-                        },
-                        shape = RoundedCornerShape(6.dp),
-                    )
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .background(roleColor.copy(alpha = 0.20f), shape = RoundedCornerShape(7.dp))
+                    .border(1.dp, roleColor.copy(alpha = 0.45f), RoundedCornerShape(7.dp))
+                    .padding(horizontal = 9.dp, vertical = 5.dp),
             ) {
                 Text(
                     text = match.role.name,
-                    color = Color.White,
+                    color = roleColor,
                     fontSize = 11.sp,
                     letterSpacing = 2.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontWeight = FontWeight.Bold,
                 )
             }
 
@@ -194,14 +199,14 @@ private fun MatchRow(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = match.address.shortAddress(),
-                    color = Color.White.copy(alpha = 0.85f),
+                    color = Color.White.copy(alpha = 0.92f),
                     fontSize = 13.sp,
                     fontFamily = FontFamily.Monospace,
                 )
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = deadlineLabel(match.deadline),
-                    color = Color.White.copy(alpha = 0.4f),
+                    color = Color.White.copy(alpha = 0.5f),
                     fontSize = 11.sp,
                     letterSpacing = 1.sp,
                 )
@@ -217,7 +222,7 @@ private fun MatchRow(
                 modifier = Modifier
                     .kicksPressable(shape = RoundedCornerShape(6.dp), onClick = onAbandon)
                     .background(
-                        color = Color.White.copy(alpha = 0.06f),
+                        color = Color.White.copy(alpha = 0.08f),
                         shape = RoundedCornerShape(6.dp),
                     )
                     .padding(horizontal = 8.dp, vertical = 4.dp),
@@ -234,7 +239,7 @@ private fun MatchRow(
 
             Text(
                 "›",
-                color = Color.White.copy(alpha = 0.4f),
+                color = Color.White.copy(alpha = 0.55f),
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Light,
             )

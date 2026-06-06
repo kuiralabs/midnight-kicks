@@ -1168,7 +1168,7 @@ class KicksActivity : FragmentActivity() {
         // the *other* player's picks form the line we show.
         val opponentShoots = if (currentRole == Player.P2) result.p1Shoots else result.p2Shoots
         val opponentLabels = opponentShoots.map(::directionLabel)
-        val youLabel = if (currentRole == Player.P2) "P2 (you)" else "You"
+        val youLabel = playerProfile.value.name.ifBlank { "You" }
         val themLabel = if (currentRole == null) "AI" else "Opponent"
         lastChoices.value =
             "$youLabel: ${deviceLabels.joinToString(" ")}  $themLabel: ${opponentLabels.joinToString(" ")}"

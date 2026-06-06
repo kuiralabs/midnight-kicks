@@ -33,6 +33,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -309,6 +310,15 @@ private fun ResultHud(
  * exits. Outcome is framed from THIS device ([localRole]; null = PvAI, human is
  * P1), so each player sees their own win/loss.
  */
+/** The local player's name from their profile, upper-cased for label use; falls
+ *  back to "YOU" when unset. The opponent's name is unknown to this device, so
+ *  it stays "AI" / "OPPONENT". */
+@Composable
+private fun rememberPlayerLabel(): String {
+    val context = LocalContext.current
+    return remember { PlayerProfileStore.load(context).name.ifBlank { "YOU" }.uppercase() }
+}
+
 @Composable
 private fun EndScreen(
     replay: MatchHud.ReplayShow,
@@ -320,6 +330,7 @@ private fun EndScreen(
     val mine = if (isP2) replay.p2Score else replay.p1Score
     val theirs = if (isP2) replay.p1Score else replay.p2Score
     val won = mine > theirs
+    val playerLabel = rememberPlayerLabel()
     val opponentName = if (localRole == null) "AI" else "OPPONENT"
 
     val accent = if (won) KicksColors.Warning else KicksColors.Danger
@@ -330,8 +341,8 @@ private fun EndScreen(
     ) {
         Text(text = if (won) "🏆" else "💔", fontSize = 52.sp)
         VerdictBadge(won = won, accent = accent)
-        ResultScore(mine = mine, theirs = theirs, won = won, opponentName = opponentName, accent = accent)
-        ShootoutRecap(rounds = replay.rounds, localRole = localRole, opponentName = opponentName)
+        ResultScore(playerLabel = playerLabel, mine = mine, theirs = theirs, won = won, opponentName = opponentName, accent = accent)
+        ShootoutRecap(playerLabel = playerLabel, rounds = replay.rounds, localRole = localRole, opponentName = opponentName)
         EndActions(onRematch = onRematch, onMenu = onMenu)
     }
 }
@@ -356,12 +367,12 @@ private fun VerdictBadge(won: Boolean, accent: Color) {
 }
 
 @Composable
-private fun ResultScore(mine: Int, theirs: Int, won: Boolean, opponentName: String, accent: Color) {
+private fun ResultScore(playerLabel: String, mine: Int, theirs: Int, won: Boolean, opponentName: String, accent: Color) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-        ScoreSide(label = "YOU", score = mine, color = if (won) accent else Color.White.copy(alpha = 0.85f))
+        ScoreSide(label = playerLabel, score = mine, color = if (won) accent else Color.White.copy(alpha = 0.85f))
         Text("–", color = Color.White.copy(alpha = 0.3f), fontSize = 40.sp, fontWeight = FontWeight.Light)
         ScoreSide(
             label = opponentName,
@@ -393,7 +404,7 @@ private fun ScoreSide(label: String, score: Int, color: Color) {
  * order, with regulation and sudden-death visually split. ● = goal, ○ = saved.
  */
 @Composable
-private fun ShootoutRecap(rounds: List<RoundResult>, localRole: Player?, opponentName: String) {
+private fun ShootoutRecap(playerLabel: String, rounds: List<RoundResult>, localRole: Player?, opponentName: String) {
     val isP2 = localRole == Player.P2
     val mineTag = if (isP2) "P2" else "P1"
     val theirsTag = if (isP2) "P1" else "P2"
@@ -405,7 +416,7 @@ private fun ShootoutRecap(rounds: List<RoundResult>, localRole: Player?, opponen
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        RecapRow(label = "YOU", marks = mineMarks)
+        RecapRow(label = playerLabel, marks = mineMarks)
         RecapRow(label = opponentName, marks = theirMarks)
         Text(
             text = "● goal   ○ saved",
@@ -430,7 +441,8 @@ private fun RecapRow(label: String, marks: List<Boolean>) {
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 1.sp,
-            modifier = Modifier.width(34.dp),
+            maxLines = 1,
+            modifier = Modifier.width(72.dp),
         )
         marks.forEachIndexed { idx, goal ->
             // Visually separate regulation from sudden death.
@@ -497,11 +509,10 @@ private fun Header(kind: MatchHud.ReplayKind, sdRoundNumber: Int?) {
 
 @Composable
 private fun Scoreboard(p1Score: Int, p2Score: Int, localRole: Player?) {
-    // Render the user's column with the "YOU / X" prefix so they can
-    // tell at a glance which side they are. [localRole] = null in PvAI.
     val isP2 = localRole == Player.P2
-    val p1Label = if (isP2) "P1" else "YOU / P1"
-    val p2Label = if (isP2) "YOU / P2" else "P2"
+    val playerLabel = rememberPlayerLabel()
+    val p1Label = if (isP2) "P1" else playerLabel
+    val p2Label = if (isP2) playerLabel else "P2"
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
