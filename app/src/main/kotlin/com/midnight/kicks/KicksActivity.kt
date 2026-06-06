@@ -1317,9 +1317,12 @@ class KicksActivity : FragmentActivity() {
                     return@launch
                 }
                 try {
-                    val result = when (role) {
-                        Player.P1 -> manager.resumePlayAsP1(getSdPicks = ::gatherSdPicksFromUi)
-                        Player.P2 -> manager.resumePlayAsP2(getSdPicks = ::gatherSdPicksFromUi)
+                    val result = when {
+                        // PvAI (role is P1 but the AI is local) — drive both
+                        // sides, don't wait for a non-existent remote P2.
+                        manager.isVsAi -> manager.resumeAgainstAi(getSdPicks = ::gatherSdPicksFromUi)
+                        role == Player.P1 -> manager.resumePlayAsP1(getSdPicks = ::gatherSdPicksFromUi)
+                        else -> manager.resumePlayAsP2(getSdPicks = ::gatherSdPicksFromUi)
                     }
                     // Device's own pick labels for the bottom-of-screen
                     // recap — read from the rehydrated picks in result.

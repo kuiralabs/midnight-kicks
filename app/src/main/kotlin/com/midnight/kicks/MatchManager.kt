@@ -168,6 +168,15 @@ open class MatchManager(
     // store on every fresh joinAsP2.
     private var p2SecretKey = ByteArray(SECRET_KEY_BYTES).also { random.nextBytes(it) }
 
+    // True for a PvAI match (this device drives both players). Set by [aiJoin],
+    // re-derived on resume from a persisted [MatchStore.Match.ai] in
+    // [rehydrateLocalIdentity], cleared by [resetForNewAction]. Routes the P2
+    // commit/reveal persistence into the AI slot (so it doesn't clobber P1's)
+    // and tells the resume path to DRIVE the AI's moves instead of waiting.
+    // Readable by the activity's resume router (PvAI → resumeAgainstAi).
+    var isVsAi = false
+        private set
+
     // V3 regulation picks + nonces — captured at commit, reused at reveal.
     // Each player commits shoots[5] + keeps[5] together; one nonce binds
     // the whole regulation batch.
@@ -506,6 +515,8 @@ open class MatchManager(
         p1SdShoot = 0
         p1SdKeep = 0
         p1SdNonce = null
+        // Fresh action defaults to PvP; aiJoin re-sets this true for PvAI.
+        isVsAi = false
         currentAddress = null
         // Clear the role too — the next deploy / join / resume will
         // set it to the right value. Leaving a stale role would make
@@ -589,6 +600,24 @@ open class MatchManager(
                     p2SdKeep = sd.keep
                     p2SdNonce = sd.nonce.copyOf()
                 }
+            }
+        }
+        // PvAI: the device is P1 (loaded above) AND controls the AI's P2 side.
+        // Rehydrate the AI from its dedicated slot — its key + witnesses must be
+        // the exact ones that committed on chain so [resumeAgainstAi] can drive
+        // the AI's reveal. Presence of [ai] is the PvAI discriminator on resume.
+        match.ai?.let { ai ->
+            isVsAi = true
+            p2SecretKey = ai.secretKey.copyOf()
+            ai.regulation?.let { reg ->
+                p2Shoots = reg.shoots.copyOf()
+                p2Keeps = reg.keeps.copyOf()
+                p2RegulationNonce = reg.nonce.copyOf()
+            }
+            ai.sd?.let { sd ->
+                p2SdShoot = sd.shoot
+                p2SdKeep = sd.keep
+                p2SdNonce = sd.nonce.copyOf()
             }
         }
     }
@@ -707,6 +736,12 @@ open class MatchManager(
         retryUntilIndexerReady(JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS) {
             callCircuit(p2SecretKey, prev.address, "joinMatch", arrayOf(deadline))
         }
+        // This is a PvAI match — the AI joined from THIS device. Persist its
+        // secret key now so a resume after process death can drive the AI's
+        // reveal with the exact key that hashed into the on-chain commitment
+        // (it's otherwise regenerated random each session → reveal would fail).
+        isVsAi = true
+        updateCurrentMatch { it.copy(ai = MatchStore.AiState(secretKey = p2SecretKey.copyOf())) }
     }
 
     /**
@@ -1051,15 +1086,25 @@ open class MatchManager(
             p2RegulationNonce = nonce
             // Persist BEFORE reveal — mirrors [submitP1Picks]. Without these the
             // P2-side resume can't reopen the on-chain commitment (rehydrate finds
-            // match.regulation == null → p2Shoots stays null → revealP2 throws
+            // no P2 regulation → p2Shoots stays null → revealP2 throws
             // "No P2 shoots captured") and the stake sits until timeout-claim.
-            updateCurrentMatch { it.copy(
-                regulation = MatchStore.RegulationWitnesses(
-                    shoots = shoots.copyOf(),
-                    keeps = keeps.copyOf(),
-                    nonce = nonce.copyOf(),
-                ),
-            ) }
+            //
+            // PvAI: write the AI's witnesses into the SEPARATE [ai] slot, not the
+            // shared [regulation] one — on a PvAI device that same slot already
+            // holds P1's regulation (from submitP1Picks), and clobbering it would
+            // break P1's own reveal on resume. PvP-P2 keeps the top-level slot.
+            val reg = MatchStore.RegulationWitnesses(
+                shoots = shoots.copyOf(),
+                keeps = keeps.copyOf(),
+                nonce = nonce.copyOf(),
+            )
+            updateCurrentMatch {
+                if (isVsAi) {
+                    it.copy(ai = (it.ai ?: MatchStore.AiState(p2SecretKey.copyOf())).copy(regulation = reg))
+                } else {
+                    it.copy(regulation = reg)
+                }
+            }
         }
     }
 
@@ -1212,16 +1257,22 @@ open class MatchManager(
             p2SdShoot = shoot
             p2SdKeep  = keep
             p2SdNonce = nonce
-            // Persist before reveal — a process kill mid-SD loses the
-            // nonce otherwise, and the commitment can't be re-opened.
-            updateCurrentMatch { it.copy(
-                sd = MatchStore.SdWitnesses(
-                    round = prev.round,
-                    shoot = shoot,
-                    keep = keep,
-                    nonce = nonce.copyOf(),
-                ),
-            ) }
+            // Persist before reveal — a process kill mid-SD loses the nonce
+            // otherwise, and the commitment can't be re-opened. PvAI writes the
+            // AI's SD witnesses into the [ai] slot (mirrors submitP2Picks).
+            val sd = MatchStore.SdWitnesses(
+                round = prev.round,
+                shoot = shoot,
+                keep = keep,
+                nonce = nonce.copyOf(),
+            )
+            updateCurrentMatch {
+                if (isVsAi) {
+                    it.copy(ai = (it.ai ?: MatchStore.AiState(p2SecretKey.copyOf())).copy(sd = sd))
+                } else {
+                    it.copy(sd = sd)
+                }
+            }
         }
 
     /** P1 reveals SD pick. BothSdCommitted → P1SdRevealed. */
@@ -1838,6 +1889,72 @@ open class MatchManager(
             } else {
                 throw IllegalStateException(
                     "resumePlayAsP1 SD loop stalled at ${state.value::class.simpleName} for round $round",
+                )
+            }
+        }
+        return result
+    }
+
+    /**
+     * Resume a PvAI match (this device drives BOTH players). Mirror of
+     * [resumePlayAsP1], but where that one *waits* for a remote P2,
+     * this one *drives* the AI's missing moves — because in PvAI there is no
+     * other device to act. The AI's key + committed picks are rehydrated from
+     * [MatchStore.Match.ai] (see [rehydrateLocalIdentity]), so a reveal reopens
+     * the exact on-chain commitment.
+     *
+     * State-gated and idempotent: safe to call from any post-commit state. An
+     * AI commit only happens at a state where the AI demonstrably hasn't
+     * committed yet (the chain-derived state would be further along otherwise),
+     * so fresh random picks there are valid.
+     *
+     * @throws NeedFreshPicksException if the match is pre-commit (the human's
+     *   picks are still needed — caller routes to the picker).
+     */
+    suspend fun resumeAgainstAi(
+        getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
+    ): MatchResult {
+        unwrapFailedState("resumeAgainstAi")
+        val current = state.value
+        if (current.address == null) {
+            throw NoActiveMatchException("resumeAgainstAi: no active match — state is ${current::class.simpleName}")
+        }
+        if (current.protocolRank < PhaseRank.P1_COMMITTED) {
+            throw NeedFreshPicksException(
+                "resumeAgainstAi: state==${current::class.simpleName} is pre-commit; call playAgainstAi(...) with fresh picks",
+            )
+        }
+        Log.i(TAG, "resumeAgainstAi: starting from ${current::class.simpleName}")
+
+        // Regulation — each `if` re-reads state.value so we fall through.
+        if (state.value is MatchState.P1Committed) {
+            // P1 committed, AI hasn't (else the chain state would be further on).
+            // Fresh AI picks are valid — nothing of the AI's is on chain yet.
+            submitP2Picks(generateAiPicks(), generateAiPicks())
+        }
+        if (state.value is MatchState.BothCommitted) revealP1()
+        // The reported hang: P1 revealed, AI hadn't — DRIVE the AI's reveal with
+        // its rehydrated key/picks/nonce (revealP2), instead of waitForP2Revealed.
+        var result: MatchResult? =
+            if (state.value is MatchState.P1Revealed) revealP2() else null
+
+        // Sudden-death — drive both sides locally, same shape as playAgainstAi.
+        while (result == null) {
+            val round = currentSdRoundOrError()
+            if (state.value is MatchState.SdRoundOpen) {
+                val (pShoot, pKeep) = getSdPicks(round)
+                submitP1SdPick(pShoot, pKeep)
+            }
+            if (state.value is MatchState.P1SdCommitted) {
+                // AI hasn't committed this SD round yet → fresh random pick.
+                submitP2SdPick(random.nextInt(DIRECTION_COUNT), random.nextInt(DIRECTION_COUNT))
+            }
+            if (state.value is MatchState.BothSdCommitted) revealP1Sd()
+            if (state.value is MatchState.P1SdRevealed) {
+                result = revealP2Sd()
+            } else {
+                throw IllegalStateException(
+                    "resumeAgainstAi SD loop stalled at ${state.value::class.simpleName} for round $round",
                 )
             }
         }

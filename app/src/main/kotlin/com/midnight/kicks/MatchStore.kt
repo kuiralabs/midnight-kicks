@@ -86,6 +86,14 @@ class MatchStore internal constructor(
         val secretKey: ByteArray,
         val regulation: RegulationWitnesses? = null,
         val sd: SdWitnesses? = null,
+        /**
+         * The AI opponent's (P2) persisted identity + witnesses — present iff
+         * this is a PvAI match. The device controls both players, so the AI's
+         * own secret key + picks must survive process death for resume to drive
+         * the AI's reveal with the SAME key that committed on chain. Null for
+         * PvP (the opponent is a separate device) — that's the PvAI discriminator.
+         */
+        val ai: AiState? = null,
     ) {
         fun copy(
             address: String = this.address,
@@ -94,7 +102,8 @@ class MatchStore internal constructor(
             secretKey: ByteArray = this.secretKey,
             regulation: RegulationWitnesses? = this.regulation,
             sd: SdWitnesses? = this.sd,
-        ): Match = Match(address, role, deadline, secretKey, regulation, sd)
+            ai: AiState? = this.ai,
+        ): Match = Match(address, role, deadline, secretKey, regulation, sd, ai)
 
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -104,7 +113,8 @@ class MatchStore internal constructor(
                 deadline == other.deadline &&
                 secretKey.contentEquals(other.secretKey) &&
                 regulation == other.regulation &&
-                sd == other.sd
+                sd == other.sd &&
+                ai == other.ai
         }
 
         override fun hashCode(): Int {
@@ -114,13 +124,49 @@ class MatchStore internal constructor(
             result = 31 * result + secretKey.contentHashCode()
             result = 31 * result + (regulation?.hashCode() ?: 0)
             result = 31 * result + (sd?.hashCode() ?: 0)
+            result = 31 * result + (ai?.hashCode() ?: 0)
             return result
         }
 
         override fun toString(): String =
             "Match(address=${address.take(16)}…, role=$role, deadline=$deadline, " +
                 "regulation=${if (regulation != null) "[set]" else "null"}, " +
-                "sd=${if (sd != null) "[round=${sd.round}]" else "null"})"
+                "sd=${if (sd != null) "[round=${sd.round}]" else "null"}, " +
+                "ai=${if (ai != null) "[set]" else "null"})"
+    }
+
+    /**
+     * The AI opponent's persisted side of a PvAI match: its secret key plus the
+     * regulation / sudden-death witnesses it committed. Kept separate from the
+     * local player's slots ([Match.regulation] / [Match.sd]) so a PvAI device —
+     * which commits for BOTH players — doesn't overwrite its own witnesses with
+     * the AI's. Same `data class` ByteArray trap as the others → hand-rolled.
+     */
+    class AiState(
+        val secretKey: ByteArray,
+        val regulation: RegulationWitnesses? = null,
+        val sd: SdWitnesses? = null,
+    ) {
+        fun copy(
+            secretKey: ByteArray = this.secretKey,
+            regulation: RegulationWitnesses? = this.regulation,
+            sd: SdWitnesses? = this.sd,
+        ): AiState = AiState(secretKey, regulation, sd)
+
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is AiState) return false
+            return secretKey.contentEquals(other.secretKey) &&
+                regulation == other.regulation &&
+                sd == other.sd
+        }
+
+        override fun hashCode(): Int {
+            var result = secretKey.contentHashCode()
+            result = 31 * result + (regulation?.hashCode() ?: 0)
+            result = 31 * result + (sd?.hashCode() ?: 0)
+            return result
+        }
     }
 
     /** Same `data class` trap as [Match] — `ByteArray`/`IntArray` require content-equality. */
@@ -316,19 +362,13 @@ class MatchStore internal constructor(
         put(KEY_ROLE, match.role.name)
         put(KEY_DEADLINE, match.deadline)
         put(KEY_SECRET_KEY, match.secretKey.toB64())
-        match.regulation?.let { reg ->
-            put(KEY_REGULATION, JSONObject().apply {
-                put(KEY_REG_SHOOTS, encodePicks(reg.shoots))
-                put(KEY_REG_KEEPS, encodePicks(reg.keeps))
-                put(KEY_REG_NONCE, reg.nonce.toB64())
-            })
-        }
-        match.sd?.let { sd ->
-            put(KEY_SD, JSONObject().apply {
-                put(KEY_SD_ROUND, sd.round)
-                put(KEY_SD_SHOOT, sd.shoot)
-                put(KEY_SD_KEEP, sd.keep)
-                put(KEY_SD_NONCE, sd.nonce.toB64())
+        match.regulation?.let { put(KEY_REGULATION, encodeRegulation(it)) }
+        match.sd?.let { put(KEY_SD, encodeSd(it)) }
+        match.ai?.let { ai ->
+            put(KEY_AI, JSONObject().apply {
+                put(KEY_AI_SECRET, ai.secretKey.toB64())
+                ai.regulation?.let { put(KEY_REGULATION, encodeRegulation(it)) }
+                ai.sd?.let { put(KEY_SD, encodeSd(it)) }
             })
         }
     }
@@ -338,21 +378,41 @@ class MatchStore internal constructor(
         role = Player.valueOf(json.getString(KEY_ROLE)),
         deadline = json.getLong(KEY_DEADLINE),
         secretKey = json.getString(KEY_SECRET_KEY).fromB64(),
-        regulation = json.optJSONObject(KEY_REGULATION)?.let { reg ->
-            RegulationWitnesses(
-                shoots = decodePicks(reg.getString(KEY_REG_SHOOTS)),
-                keeps = decodePicks(reg.getString(KEY_REG_KEEPS)),
-                nonce = reg.getString(KEY_REG_NONCE).fromB64(),
+        regulation = json.optJSONObject(KEY_REGULATION)?.let(::decodeRegulation),
+        sd = json.optJSONObject(KEY_SD)?.let(::decodeSd),
+        ai = json.optJSONObject(KEY_AI)?.let { ai ->
+            AiState(
+                secretKey = ai.getString(KEY_AI_SECRET).fromB64(),
+                regulation = ai.optJSONObject(KEY_REGULATION)?.let(::decodeRegulation),
+                sd = ai.optJSONObject(KEY_SD)?.let(::decodeSd),
             )
         },
-        sd = json.optJSONObject(KEY_SD)?.let { sd ->
-            SdWitnesses(
-                round = sd.getInt(KEY_SD_ROUND),
-                shoot = sd.getInt(KEY_SD_SHOOT),
-                keep = sd.getInt(KEY_SD_KEEP),
-                nonce = sd.getString(KEY_SD_NONCE).fromB64(),
-            )
-        },
+    )
+
+    private fun encodeRegulation(reg: RegulationWitnesses): JSONObject = JSONObject().apply {
+        put(KEY_REG_SHOOTS, encodePicks(reg.shoots))
+        put(KEY_REG_KEEPS, encodePicks(reg.keeps))
+        put(KEY_REG_NONCE, reg.nonce.toB64())
+    }
+
+    private fun decodeRegulation(reg: JSONObject): RegulationWitnesses = RegulationWitnesses(
+        shoots = decodePicks(reg.getString(KEY_REG_SHOOTS)),
+        keeps = decodePicks(reg.getString(KEY_REG_KEEPS)),
+        nonce = reg.getString(KEY_REG_NONCE).fromB64(),
+    )
+
+    private fun encodeSd(sd: SdWitnesses): JSONObject = JSONObject().apply {
+        put(KEY_SD_ROUND, sd.round)
+        put(KEY_SD_SHOOT, sd.shoot)
+        put(KEY_SD_KEEP, sd.keep)
+        put(KEY_SD_NONCE, sd.nonce.toB64())
+    }
+
+    private fun decodeSd(sd: JSONObject): SdWitnesses = SdWitnesses(
+        round = sd.getInt(KEY_SD_ROUND),
+        shoot = sd.getInt(KEY_SD_SHOOT),
+        keep = sd.getInt(KEY_SD_KEEP),
+        nonce = sd.getString(KEY_SD_NONCE).fromB64(),
     )
 
     private fun encodePicks(picks: IntArray): String = picks.joinToString(",")
@@ -417,5 +477,9 @@ class MatchStore internal constructor(
         private const val KEY_SD_SHOOT = "shoot"
         private const val KEY_SD_KEEP = "keep"
         private const val KEY_SD_NONCE = "nonce"
+        // PvAI: the AI opponent's persisted side (additive + optional, so old
+        // PvP records decode with ai=null — no SCHEMA_VERSION bump needed).
+        private const val KEY_AI = "ai"
+        private const val KEY_AI_SECRET = "aiSecret"
     }
 }

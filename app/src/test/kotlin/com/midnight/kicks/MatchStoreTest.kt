@@ -319,6 +319,64 @@ class MatchStoreTest {
         assertEquals(p2Match, loaded)
     }
 
+    // ── PvAI: the AI opponent's persisted side (resumable on-chain PvAI) ──
+
+    @Test
+    fun `save then load preserves the AI slot (key + regulation + sd)`() {
+        val ai = MatchStore.AiState(
+            secretKey = ByteArray(32) { 0xA1.toByte() },
+            regulation = MatchStore.RegulationWitnesses(
+                shoots = intArrayOf(0, 1, 2, 0, 1),
+                keeps = intArrayOf(2, 1, 0, 2, 1),
+                nonce = ByteArray(16) { 0xB2.toByte() },
+            ),
+            sd = MatchStore.SdWitnesses(round = 2, shoot = 1, keep = 0, nonce = ByteArray(16) { 0xC3.toByte() }),
+        )
+        val match = fixtureMatch(address = "pvai", role = Player.P1).copy(ai = ai)
+        store.save(match)
+
+        val loaded = store.load("pvai")
+        assertNotNull(loaded)
+        assertEquals("whole record (incl. ai) round-trips by value", match, loaded)
+        assertNotNull(loaded!!.ai)
+        assertArrayEquals(ai.secretKey, loaded.ai!!.secretKey)
+        assertArrayEquals(ai.regulation!!.shoots, loaded.ai!!.regulation!!.shoots)
+        assertArrayEquals(ai.regulation!!.nonce, loaded.ai!!.regulation!!.nonce)
+        assertEquals(2, loaded.ai!!.sd!!.round)
+    }
+
+    @Test
+    fun `cloud snapshot round-trip preserves the AI slot`() {
+        val ai = MatchStore.AiState(
+            secretKey = ByteArray(32) { 0x7A.toByte() },
+            regulation = MatchStore.RegulationWitnesses(
+                shoots = intArrayOf(1, 1, 1, 1, 1),
+                keeps = intArrayOf(0, 0, 0, 0, 0),
+                nonce = ByteArray(16) { 0x9C.toByte() },
+            ),
+        )
+        store.save(fixtureMatch(address = "pvai-cloud", role = Player.P1).copy(ai = ai))
+
+        val blob = store.snapshotBytes()
+        store.clear()
+        assertNull("cleared", store.load("pvai-cloud"))
+        store.restoreFromBytes(blob)
+
+        val restored = store.load("pvai-cloud")
+        assertNotNull(restored)
+        assertNotNull("ai survives the cloud blob", restored!!.ai)
+        assertArrayEquals(ai.secretKey, restored.ai!!.secretKey)
+        assertNull("no sd was set", restored.ai!!.sd)
+    }
+
+    @Test
+    fun `a PvP record (no AI slot) decodes with ai = null`() {
+        // Backward-compat: the ai field is additive + optional, so an existing
+        // PvP record (and any pre-PvAI-feature record) loads with ai == null.
+        store.save(fixtureMatch(address = "pvp", role = Player.P2))
+        assertNull(store.load("pvp")!!.ai)
+    }
+
     // ── Helpers ──
 
     private fun fixtureMatch(
