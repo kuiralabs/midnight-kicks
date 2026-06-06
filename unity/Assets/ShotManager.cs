@@ -40,30 +40,13 @@ public class ShotManager : MonoBehaviour
     private const float CelebrationHops = 2f;
     private const float DefeatLeanDegrees = 20f;
 
-    // ── Camera framing — two anchors per kick (FC25-style off-axis cam) ──
-    // Behind-the-shooter cams hide the ball because the shooter occludes it.
-    // Solution: position the wide shot 30° off-axis (rotated around the
-    // shooter) so we see past the shooter's shoulder to the ball at his feet.
-    //
-    // EstablishingCam: 30° off-axis, high cherry-picker. Wide cinematic
-    // outside angle showing the whole penalty area + arc + ball + goal.
-    // ActionCam: ~15° off-axis (small offset so the ball stays visible),
-    // eye-level, telephoto. Tight focus on the ball-and-goal axis.
-    //
-    // The dolly runs across the FULL pre-kick window (PreRunHold + Run +
-    // KickWindup ≈ 2.85s) for a slow, cinematic push-in. Peak zoom hits
-    // exactly when the ball is struck. After the reaction, PlayRound snaps
-    // back to EstablishingCam for the next round.
-    //
-    // CameraSetup.cs places the camera at EstablishingCam at scene load so
-    // the menu / idle pose matches the in-play wide shot. Keep both in sync.
+    // Opening pan (PlayIntro): IntroStartCam → EstablishingCam wide overview.
+    // Per-kick framing is FrameShot (aspect-aware) below; CameraSetup.cs places
+    // the idle/menu camera at EstablishingCam to match.
     private static readonly Vector3 IntroStartCam    = new Vector3( 12f, 11f, -22f);
     private static readonly Vector3 EstablishingCam  = new Vector3(  7f,  7f, -15f);
     private static readonly Vector3 EstablishingLook = new Vector3(  0f, 0.5f,  4f);
     private const float              EstablishingFov = 60f;
-    private static readonly Vector3 ActionCam        = new Vector3(2.5f, 2.5f, -8f);
-    private static readonly Vector3 ActionLook       = new Vector3(  0f, 0.8f, 9.5f);
-    private const float              ActionFov       = 35f;
 
     // ── Aspect-aware framing (portrait fix) ──
     // A behind+above angle whose FOV is computed each round to keep the shooter,
@@ -83,26 +66,13 @@ public class ShotManager : MonoBehaviour
     // 1×). Tune until the feet stop skating.
     [SerializeField] private float runAnimSpeed = 1.4f;
 
-    // ── UI style font sizes ──
-    private const int ScoreFontSize = 32;
-    private const int ResultFontSize = 72;
-    private const int FeedbackFontSize = 64;
-
     // ── Runtime state ──
     private GameObject shooter;
     private Animator shooterAnim;
     private Quaternion shooterInitialRotation;
     private Camera mainCamera;
-    private Coroutine cameraDolly;
-    private GUIStyle scoreStyle;
-    private GUIStyle resultStyle;
-    private GUIStyle feedbackStyle;
     private bool isPlaying = false;
-    private bool showResult = false;
     private string resultMessage = "";
-    private string currentFeedback = "";
-    private string currentScore = "P1: 0 - P2: 0";
-    private Color feedbackColor = Color.white;
 
     void Update()
     {
@@ -165,14 +135,12 @@ public class ShotManager : MonoBehaviour
         float startTime = Time.realtimeSinceStartup;
 
         isPlaying = true;
-        showResult = false;
         CacheShooter();
 
         yield return StartCoroutine(PlayIntro());
 
         int p1Score = 0;
         int p2Score = 0;
-        currentScore = "P1: 0 - P2: 0";
 
         for (int i = 0; i < rounds.Count; i++)
         {
@@ -187,7 +155,6 @@ public class ShotManager : MonoBehaviour
                 else p2Score++;
             }
 
-            currentScore = $"P1: {p1Score} - P2: {p2Score}";
             // Tell Kotlin this kick just resolved, so the Compose overlay can
             // flash GOAL!/SAVED! and climb its live score chip in step with the
             // 3D action (the suspense beat). The overlay derives the outcome
@@ -200,9 +167,7 @@ public class ShotManager : MonoBehaviour
         else if (p2Score > p1Score) resultMessage = "PLAYER 2 WINS!";
         else resultMessage = "DRAW!";
 
-        showResult = true;
         yield return new WaitForSeconds(FinalResultHold);
-        showResult = false;
 
         isPlaying = false;
         float duration = Time.realtimeSinceStartup - startTime;
@@ -212,14 +177,9 @@ public class ShotManager : MonoBehaviour
 
     private IEnumerator PlayIntro()
     {
-        currentFeedback = "GET READY...";
         float elapsed = 0f;
 
-        if (mainCamera == null)
-        {
-            currentFeedback = "";
-            yield break;
-        }
+        if (mainCamera == null) yield break;
         Transform cam = mainCamera.transform;
         mainCamera.fieldOfView = EstablishingFov;
 
@@ -233,13 +193,9 @@ public class ShotManager : MonoBehaviour
         }
 
         ApplyCamera(EstablishingCam, EstablishingLook, EstablishingFov);
-        currentFeedback = "";
     }
 
-    /// <summary>
-    /// Snap the camera to a position + look-at + FOV in one call. Keeps the
-    /// per-frame interpolation in <see cref="DollyToAction"/> readable.
-    /// </summary>
+    /// <summary>Snap the camera to a position + look-at + FOV in one call.</summary>
     private void ApplyCamera(Vector3 pos, Vector3 lookAt, float fov)
     {
         if (mainCamera == null) return;
@@ -291,31 +247,6 @@ public class ShotManager : MonoBehaviour
         mainCamera.fieldOfView = Mathf.Clamp(vFov, framingMinFov, framingMaxFov);
     }
 
-    /// <summary>
-    /// Slow cinematic push-in from EstablishingCam to ActionCam. Runs in
-    /// parallel with PlayRound so the dolly arrives at peak zoom exactly at
-    /// the moment of impact. Lerps position, look-at, and FOV simultaneously
-    /// with SmoothStep easing so it's gentle at start and end.
-    /// </summary>
-    private IEnumerator DollyToAction(float duration)
-    {
-        if (mainCamera == null) yield break;
-        Transform cam = mainCamera.transform;
-
-        float elapsed = 0f;
-        while (elapsed < duration)
-        {
-            elapsed += Time.deltaTime;
-            float t = Mathf.SmoothStep(0f, 1f, elapsed / duration);
-            cam.position = Vector3.Lerp(EstablishingCam, ActionCam, t);
-            cam.LookAt(Vector3.Lerp(EstablishingLook, ActionLook, t));
-            mainCamera.fieldOfView = Mathf.Lerp(EstablishingFov, ActionFov, t);
-            yield return null;
-        }
-        ApplyCamera(ActionCam, ActionLook, ActionFov);
-        cameraDolly = null;
-    }
-
     private IEnumerator PlayRound(RoundData round)
     {
         if (ballKicker != null) ballKicker.ResetBall();
@@ -330,10 +261,8 @@ public class ShotManager : MonoBehaviour
         // Aspect-aware framing held for the round: keeps the shooter, ball and
         // goal in shot on the current screen aspect (the portrait fix). The
         // cinematic push-in is parked until the camera is rebuilt on Cinemachine.
-        if (cameraDolly != null) StopCoroutine(cameraDolly);
         FrameShot();
 
-        currentFeedback = "";
         yield return new WaitForSeconds(PreRunHold);
 
         if (shooterAnim != null)
@@ -366,9 +295,6 @@ public class ShotManager : MonoBehaviour
         if (keeper != null) keeper.Dive(round.keepDir, KeeperDiveDuration);
 
         yield return new WaitForSeconds(BallFlightDuration);
-
-        currentFeedback = round.result.ToUpper() + "!";
-        feedbackColor = round.result == ResultGoal ? Color.green : Color.yellow;
 
         // Post-kick reactions. With only Idle / Run / Kick on the shooter and
         // Idle / Dive* / FallenIdle on the keeper, we layer procedural motion
@@ -425,10 +351,7 @@ public class ShotManager : MonoBehaviour
         }
     }
 
-    // OnGUI + EnsureGuiStyles removed: the replay's score / result / per-round
-    // feedback text now lives in the Compose MatchReplayOverlay (the score HUD +
-    // the result) over the live 3D, and the goal/save OUTCOME is conveyed by the
-    // 3D animation itself (ball in net vs keeper save). ShotManager is now pure
-    // 3D choreography. The currentScore / resultMessage / currentFeedback fields
-    // it still sets are dead (no renderer) and can be pruned in a later pass.
+    // No OnGUI: the score / result / feedback live in the Compose
+    // MatchReplayOverlay; the goal/save outcome is conveyed by the 3D animation.
+    // ShotManager is pure 3D choreography.
 }
