@@ -103,80 +103,63 @@ public class ShooterAppearance : MonoBehaviour
             return;
         }
 
-        // Also walk MeshRenderers in case any sub-meshes aren't skinned.
+        // Classify by RENDERER (GameObject) name, not material name: the Mixamo
+        // FBX shares a couple of materials (Ch38_body, Ch38_hair) across many
+        // sub-meshes, so the material name reads "body" even on the Shirt/Shorts/
+        // Socks renderers — the GameObject name is the reliable signal. Walk the
+        // skinned (rigged) renderers plus any non-skinned sub-meshes.
         var skinned = shooter.GetComponentsInChildren<SkinnedMeshRenderer>(includeInactive: true);
         var statics = shooter.GetComponentsInChildren<MeshRenderer>(includeInactive: true);
         Debug.Log($"[ShooterAppearance] Found {skinned.Length} SkinnedMeshRenderer(s) and {statics.Length} MeshRenderer(s) on '{ShooterObjectName}'");
 
-        int paletteIdx = 0;
-        int dressed = 0;
-        int skipped = 0;
-        int totalSlots = 0;
-
-        foreach (var r in skinned)
-        {
-            var mats = r.materials;
-            for (int i = 0; i < mats.Length; i++)
-            {
-                var m = mats[i];
-                if (m == null) continue;
-                totalSlots++;
-
-                // Classify by RENDERER (GameObject) name, not material name.
-                // The Mixamo FBX shares 2 materials (Ch38_body, Ch38_hair)
-                // across 7 sub-meshes — the material name says "body" even
-                // for the Shirt/Shorts/Socks renderers. The GameObject name
-                // (Ch38_Shirt, Ch38_Shorts, etc.) is the reliable signal.
-                Slot slot = ClassifyByName(r.name);
-                bool hasBaseMap = m.HasProperty("_BaseMap") && m.GetTexture("_BaseMap") != null;
-                bool hasMainTex = m.HasProperty("_MainTex") && m.GetTexture("_MainTex") != null;
-                bool hasTexture = hasBaseMap || hasMainTex;
-
-                Color color;
-                string label;
-                if (ForcePaintAll)
-                {
-                    color = DebugPalette[paletteIdx % DebugPalette.Length];
-                    paletteIdx++;
-                    ApplyKitColor(m, color);
-                    label = $"FORCE→{ColorUtility.ToHtmlStringRGB(color)}";
-                    dressed++;
-                }
-                else if (TryGetKitColor(slot, out color))
-                {
-                    ApplyKitColor(m, color);
-                    label = $"{slot}=#{ColorUtility.ToHtmlStringRGB(color)}";
-                    dressed++;
-                }
-                else
-                {
-                    label = $"{slot} (skipped)";
-                    skipped++;
-                }
-                Debug.Log($"[ShooterAppearance] SKIN {r.name}[{i}] '{m.name}' → {label} (texture={hasTexture}, shader={m.shader.name})");
-            }
-            r.materials = mats;
-        }
-
-        // Repeat for any non-skinned MeshRenderers (rare on rigged Mixamo
-        // characters, but accessories/props can sneak in).
-        foreach (var r in statics)
-        {
-            var mats = r.materials;
-            for (int i = 0; i < mats.Length; i++)
-            {
-                var m = mats[i];
-                if (m == null) continue;
-                totalSlots++;
-                Color color = DebugPalette[paletteIdx % DebugPalette.Length];
-                paletteIdx++;
-                ApplyKitColor(m, color);
-                Debug.Log($"[ShooterAppearance] MESH {r.name}[{i}] '{m.name}' → FORCE→{ColorUtility.ToHtmlStringRGB(color)} (shader={m.shader.name})");
-            }
-            r.materials = mats;
-        }
+        int paletteIdx = 0, dressed = 0, skipped = 0, totalSlots = 0;
+        foreach (var r in skinned) DressRenderer(r, ref paletteIdx, ref dressed, ref skipped, ref totalSlots);
+        foreach (var r in statics) DressRenderer(r, ref paletteIdx, ref dressed, ref skipped, ref totalSlots);
 
         Debug.Log($"[ShooterAppearance] Done — totalSlots={totalSlots}, dressed={dressed}, skipped={skipped}");
+    }
+
+    /// <summary>
+    /// Apply the kit to one renderer's material slots, classified by the
+    /// renderer's GameObject name. Debug-palette colors are used ONLY when
+    /// [ForcePaintAll] is set; otherwise an unclassified slot is left untouched
+    /// so the FBX's own face/body/hair textures show through (this is what keeps
+    /// non-kit sub-meshes from rendering in random rainbow colors).
+    /// </summary>
+    private void DressRenderer(Renderer r, ref int paletteIdx, ref int dressed, ref int skipped, ref int totalSlots)
+    {
+        var mats = r.materials;
+        for (int i = 0; i < mats.Length; i++)
+        {
+            var m = mats[i];
+            if (m == null) continue;
+            totalSlots++;
+
+            Slot slot = ClassifyByName(r.name);
+            Color color;
+            string label;
+            if (ForcePaintAll)
+            {
+                color = DebugPalette[paletteIdx % DebugPalette.Length];
+                paletteIdx++;
+                ApplyKitColor(m, color);
+                label = $"FORCE→{ColorUtility.ToHtmlStringRGB(color)}";
+                dressed++;
+            }
+            else if (TryGetKitColor(slot, out color))
+            {
+                ApplyKitColor(m, color);
+                label = $"{slot}=#{ColorUtility.ToHtmlStringRGB(color)}";
+                dressed++;
+            }
+            else
+            {
+                label = $"{slot} (skipped)";
+                skipped++;
+            }
+            Debug.Log($"[ShooterAppearance] {r.name}[{i}] '{m.name}' → {label} (shader={m.shader.name})");
+        }
+        r.materials = mats;
     }
 
     /// <summary>

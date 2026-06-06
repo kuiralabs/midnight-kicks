@@ -73,6 +73,9 @@ public class ShotManager : MonoBehaviour
     private Camera mainCamera;
     private bool isPlaying = false;
     private string resultMessage = "";
+    // Which side ("P1"/"P2") is the local device — set per replay so the shooter
+    // wears the local vs opponent kit each round. Defaults to P1 (PvAI / editor).
+    private string localSide = "P1";
 
     void Update()
     {
@@ -82,7 +85,7 @@ public class ShotManager : MonoBehaviour
             List<RoundData> testRounds = new List<RoundData> {
                 new RoundData { round = 1, shooter = "P1", shootDir = 1, keepDir = 0, result = ResultGoal }
             };
-            StartCoroutine(PlayReplay(testRounds, null, null));
+            StartCoroutine(PlayReplay(testRounds, "P1", null, null));
         }
     }
 
@@ -129,9 +132,10 @@ public class ShotManager : MonoBehaviour
                   $"mainCamera={(mainCamera != null)}");
     }
 
-    public IEnumerator PlayReplay(List<RoundData> rounds, System.Action<int> onRoundResolved, System.Action onComplete)
+    public IEnumerator PlayReplay(List<RoundData> rounds, string localSide, System.Action<int> onRoundResolved, System.Action onComplete)
     {
-        Debug.Log($"[ShotManager] PlayReplay START rounds={rounds.Count}");
+        this.localSide = string.IsNullOrEmpty(localSide) ? "P1" : localSide;
+        Debug.Log($"[ShotManager] PlayReplay START rounds={rounds.Count} localSide={this.localSide}");
         float startTime = Time.realtimeSinceStartup;
 
         isPlaying = true;
@@ -147,6 +151,7 @@ public class ShotManager : MonoBehaviour
             var round = rounds[i];
             Debug.Log($"[ShotManager] Round {i + 1}/{rounds.Count} shooter={round.shooter} " +
                       $"shootDir={round.shootDir} keepDir={round.keepDir} result={round.result}");
+            DressShooterForRound(round);
             yield return StartCoroutine(PlayRound(round));
 
             if (round.result == ResultGoal)
@@ -173,6 +178,18 @@ public class ShotManager : MonoBehaviour
         float duration = Time.realtimeSinceStartup - startTime;
         Debug.Log($"[ShotManager] PlayReplay END after {duration:F1}s, final={resultMessage}");
         onComplete?.Invoke();
+    }
+
+    /// <summary>
+    /// Dress the shooter in the kit of whoever takes this kick: the local kit
+    /// when this round's shooter is our side, the opponent kit otherwise. The
+    /// keeper keeps its own fixed goalkeeper kit (KeeperAppearance), so it's not
+    /// touched here.
+    /// </summary>
+    private void DressShooterForRound(RoundData round)
+    {
+        var kit = round.shooter == localSide ? MatchKits.Local : MatchKits.Opponent;
+        ShooterAppearance.SetKit(kit.jersey, kit.shorts, kit.socks);
     }
 
     private IEnumerator PlayIntro()

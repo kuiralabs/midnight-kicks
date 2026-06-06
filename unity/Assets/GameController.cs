@@ -144,14 +144,20 @@ public class GameController : MonoBehaviour
 
         if (TryParseKit(msg.player, out Color pj, out Color ps, out Color pk))
         {
+            MatchKits.Local = new MatchKits.Kit { jersey = pj, shorts = ps, socks = pk };
+            // Idle/pre-replay pose wears the local kit; the per-round swap takes
+            // over once the cinematic starts (ShotManager dresses by side).
             ShooterAppearance.SetKit(pj, ps, pk);
-            Debug.Log($"[GameController] Shooter kit ← {msg.playerName} (#{ColorUtility.ToHtmlStringRGB(pj)})");
+            Debug.Log($"[GameController] Local kit ← {msg.playerName} (#{ColorUtility.ToHtmlStringRGB(pj)})");
         }
         if (msg.opponent != null && TryParseKit(msg.opponent, out Color oj, out Color os, out Color ok))
         {
-            KeeperAppearance.SetKit(oj, os, ok);
-            Debug.Log($"[GameController] Keeper kit ← opponent (#{ColorUtility.ToHtmlStringRGB(oj)})");
+            MatchKits.Opponent = new MatchKits.Kit { jersey = oj, shorts = os, socks = ok };
+            Debug.Log($"[GameController] Opponent kit ← (#{ColorUtility.ToHtmlStringRGB(oj)})");
         }
+        // The keeper keeps its own fixed, distinct goalkeeper kit
+        // (KeeperAppearance's default) — deliberately NOT the opponent kit, so it
+        // always reads as the keeper no matter which side is defending.
     }
 
     private static bool TryParseKit(KitColorsJson kit, out Color jersey, out Color shorts, out Color socks)
@@ -235,7 +241,7 @@ public class GameController : MonoBehaviour
         if (shotManager != null)
         {
             Debug.Log("[GameController] Dispatching to ShotManager.PlayReplay");
-            StartCoroutine(shotManager.PlayReplay(msg.rounds, OnRoundResolved, OnReplayComplete));
+            StartCoroutine(shotManager.PlayReplay(msg.rounds, msg.localSide, OnRoundResolved, OnReplayComplete));
         }
         else
         {
@@ -376,6 +382,7 @@ public class ReplayMessage
 {
     public string type;
     public List<RoundData> rounds;
+    public string localSide; // "P1"/"P2" — which side this device is
 }
 
 [System.Serializable]

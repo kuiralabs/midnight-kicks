@@ -62,7 +62,13 @@ object UnityBridge {
      * behind a text scoreboard + Continue. Uses [deliverToUnityPlayer] (the
      * `:unity`-local hand-off) since the caller is already in `:unity`.
      */
-    fun playReplayCinematic(rounds: List<RoundResult>, p1Score: Int, p2Score: Int, winner: String?) {
+    fun playReplayCinematic(
+        rounds: List<RoundResult>,
+        p1Score: Int,
+        p2Score: Int,
+        winner: String?,
+        localSide: String,
+    ) {
         val json = JSONObject().apply {
             put("type", "replay")
             put("rounds", roundsToJson(rounds))
@@ -71,6 +77,9 @@ object UnityBridge {
                 put("p2", p2Score)
             })
             put("winner", winner ?: JSONObject.NULL)
+            // "P1"/"P2": lets Unity tell the local player's kicks from the
+            // opponent's so the shooter wears the right kit each round.
+            put("localSide", localSide)
         }
         deliverToUnityPlayer(json.toString())
     }

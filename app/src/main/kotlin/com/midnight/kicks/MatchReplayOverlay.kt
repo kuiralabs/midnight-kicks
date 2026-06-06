@@ -113,7 +113,12 @@ private fun ReplayBody(
             replay.p2Score > replay.p1Score -> "P2"
             else -> null
         }
-        UnityBridge.playReplayCinematic(replay.rounds, replay.p1Score, replay.p2Score, winner)
+        UnityBridge.playReplayCinematic(
+            replay.rounds, replay.p1Score, replay.p2Score, winner,
+            // Which side this device is, so Unity dresses the shooter in the
+            // local vs opponent kit per round. PvAI (null) = you're P1.
+            localSide = (localRole ?: Player.P1).name,
+        )
         // Hold the result HUD back until Unity says the kicks are done. Gating on
         // the real completion (not an estimated duration) is what guarantees the
         // result never lands on top of a kick still in flight.
