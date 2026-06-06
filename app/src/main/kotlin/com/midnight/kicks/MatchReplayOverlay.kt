@@ -5,6 +5,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -321,26 +322,69 @@ private fun EndScreen(
     val won = mine > theirs
     val opponentName = if (localRole == null) "AI" else "OPPONENT"
 
+    val accent = if (won) KicksColors.Warning else KicksColors.Danger
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        Text(text = if (won) "🏆" else "💔", fontSize = 56.sp)
-        Text(
-            text = if (won) "YOU WIN!" else "$opponentName WINS",
-            color = if (won) KicksColors.Success else KicksColors.Danger,
-            fontSize = 34.sp,
-            fontWeight = FontWeight.Black,
-            letterSpacing = 2.sp,
-        )
-        Text(
-            text = "$mine – $theirs",
-            color = Color.White,
-            fontSize = 52.sp,
-            fontWeight = FontWeight.Bold,
-        )
+        Text(text = if (won) "🏆" else "💔", fontSize = 52.sp)
+        VerdictBadge(won = won, accent = accent)
+        ResultScore(mine = mine, theirs = theirs, won = won, opponentName = opponentName, accent = accent)
         ShootoutRecap(rounds = replay.rounds, localRole = localRole, opponentName = opponentName)
         EndActions(onRematch = onRematch, onMenu = onMenu)
+    }
+}
+
+@Composable
+private fun VerdictBadge(won: Boolean, accent: Color) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(percent = 50))
+            .background(accent.copy(alpha = 0.14f))
+            .border(1.dp, accent.copy(alpha = 0.5f), RoundedCornerShape(percent = 50))
+            .padding(horizontal = 30.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = if (won) "VICTORY" else "DEFEAT",
+            color = accent,
+            fontSize = 30.sp,
+            fontWeight = FontWeight.Black,
+            letterSpacing = 5.sp,
+        )
+    }
+}
+
+@Composable
+private fun ResultScore(mine: Int, theirs: Int, won: Boolean, opponentName: String, accent: Color) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        ScoreSide(label = "YOU", score = mine, color = if (won) accent else Color.White.copy(alpha = 0.85f))
+        Text("–", color = Color.White.copy(alpha = 0.3f), fontSize = 40.sp, fontWeight = FontWeight.Light)
+        ScoreSide(
+            label = opponentName,
+            score = theirs,
+            color = if (!won) accent else Color.White.copy(alpha = 0.85f),
+        )
+    }
+}
+
+@Composable
+private fun ScoreSide(label: String, score: Int, color: Color) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            label,
+            color = Color.White.copy(alpha = 0.5f),
+            fontSize = 11.sp,
+            letterSpacing = 2.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Text("$score", color = color, fontSize = 60.sp, fontWeight = FontWeight.Black)
     }
 }
 
@@ -405,8 +449,8 @@ private fun RecapRow(label: String, marks: List<Boolean>) {
 @Composable
 private fun EndActions(onRematch: () -> Unit, onMenu: () -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        EndButton(text = "REMATCH", fill = KicksColors.Picking, textColor = KicksColors.SurfaceMuted, onClick = onRematch)
-        EndButton(text = "MENU", fill = KicksColors.SurfaceMuted, textColor = Color.White, onClick = onMenu)
+        EndButton(text = "REMATCH", fill = Color.White, textColor = KicksColors.Background, onClick = onRematch)
+        EndButton(text = "MENU", fill = Color.White.copy(alpha = 0.10f), textColor = Color.White, onClick = onMenu)
     }
 }
 

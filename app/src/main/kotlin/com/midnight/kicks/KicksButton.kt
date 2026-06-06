@@ -31,7 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /** Visual variants for [KicksButton]. */
-enum class KicksButtonStyle { Primary, Danger }
+enum class KicksButtonStyle { Primary, Secondary, Danger }
 
 /**
  * The shared Kicks action button. Replaces the per-screen hand-rolled
@@ -78,11 +78,13 @@ fun KicksButton(
     val container = when {
         style == KicksButtonStyle.Danger -> Color.Transparent
         !enabled -> Color.White.copy(alpha = 0.08f)
+        style == KicksButtonStyle.Secondary -> Color.White.copy(alpha = 0.08f)
         else -> Color.White.copy(alpha = 0.20f)
     }
     val content = when {
         style == KicksButtonStyle.Danger -> KicksColors.Danger
         !enabled -> Color.White.copy(alpha = 0.40f)
+        style == KicksButtonStyle.Secondary -> Color.White.copy(alpha = 0.75f)
         else -> Color.White
     }
 

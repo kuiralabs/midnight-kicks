@@ -1,6 +1,7 @@
 package com.midnight.kicks
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,6 +66,9 @@ fun CreateMatchScreen(
     // so it's a two-tap confirm rather than a single tap that could fire by
     // accident while the user is fiddling with the QR / copy.
     var confirmingCancel by remember { mutableStateOf(false) }
+    // Deploy finishing must not yank the user out of customizing; they tap
+    // CONTINUE when ready.
+    var proceed by remember { mutableStateOf(false) }
 
     Surface(modifier = Modifier.fillMaxSize(), color = KicksColors.Background) {
         Column(
@@ -79,27 +83,32 @@ fun CreateMatchScreen(
 
             Spacer(modifier = Modifier.height(48.dp))
 
-            if (address == null) {
-                // Turn the deploy wait into "build your player": the contract
-                // lands in the background while the user picks name / nation /
-                // kit. The deploy status is a slim line, not a blocking spinner.
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        color = Color.White.copy(alpha = 0.7f),
-                        strokeWidth = 2.dp,
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        "Deploying contract…",
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 13.sp,
-                        letterSpacing = 2.sp,
-                    )
+            if (!proceed) {
+                if (address == null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Color.White.copy(alpha = 0.7f),
+                            strokeWidth = 2.dp,
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            "Deploying contract…",
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = 13.sp,
+                            letterSpacing = 2.sp,
+                        )
+                    }
+                } else {
+                    DeployedBanner()
                 }
                 Spacer(modifier = Modifier.height(28.dp))
                 PlayerCustomizeCard(profile = profile, onProfileChange = onProfileChange)
-            } else {
+                if (address != null) {
+                    Spacer(modifier = Modifier.height(28.dp))
+                    KicksButton(label = "CONTINUE", onClick = { proceed = true })
+                }
+            } else if (address != null) {
                 Text(
                     "SHARE WITH OPPONENT",
                     color = Color.White.copy(alpha = 0.5f),
@@ -187,6 +196,34 @@ fun CreateMatchScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun DeployedBanner() {
+    Row(
+        modifier = Modifier
+            .background(
+                KicksColors.Success.copy(alpha = 0.16f),
+                shape = RoundedCornerShape(percent = 50),
+            )
+            .border(
+                width = 1.dp,
+                color = KicksColors.Success.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(percent = 50),
+            )
+            .padding(horizontal = 18.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("✓", color = KicksColors.Success, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            "MATCH DEPLOYED",
+            color = KicksColors.Success,
+            fontSize = 12.sp,
+            letterSpacing = 3.sp,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
 

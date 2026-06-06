@@ -1455,20 +1455,16 @@ fun KicksApp(
                     MenuButton("CREATE MATCH", onClick = onCreateMatch)
                     Spacer(modifier = Modifier.height(16.dp))
                     MenuButton("JOIN MATCH", onClick = onJoinMatch)
-                    Spacer(modifier = Modifier.height(20.dp))
-                    // Dev affordance — kept accessible while Phase 4 PvP
-                    // chain logic is being plumbed. Drop it (or hide behind
-                    // a long-press / debug build) once two-emulator E2E is
-                    // wired through CREATE / JOIN.
-                    Text(
-                        "PRACTICE VS AI",
-                        color = Color.White.copy(alpha = 0.4f),
-                        fontSize = 11.sp,
-                        letterSpacing = 3.sp,
-                        modifier = Modifier
-                            .kicksPressable(shape = RoundedCornerShape(8.dp), onClick = onPracticeVsAi)
-                            // ≥48dp touch target (HIG) — visual stays compact.
-                            .padding(horizontal = 16.dp, vertical = 17.dp),
+                    Spacer(modifier = Modifier.height(16.dp))
+                    // PvAI is a full on-chain match against a local AI opponent
+                    // (deploy → commit → reveal, same as PvP). A real but
+                    // visually-secondary button so it's easy to test while
+                    // two-device PvP E2E is being wired; hide behind a debug
+                    // build once that lands.
+                    KicksButton(
+                        label = "PRACTICE VS AI",
+                        onClick = onPracticeVsAi,
+                        style = KicksButtonStyle.Secondary,
                     )
                 }
 

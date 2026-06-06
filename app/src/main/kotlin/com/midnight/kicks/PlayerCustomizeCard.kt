@@ -1,5 +1,6 @@
 package com.midnight.kicks
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -23,7 +24,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -98,20 +105,32 @@ fun PlayerCustomizeCard(
     }
 }
 
-/** Shirt + shorts + socks swatch beside the player's name and nation. */
 @Composable
 private fun KitPreview(team: Team, jersey: Jersey, name: String) {
     val kit = team.kit(jersey)
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            KitPiece(kit.jersey, width = 64.dp, height = 54.dp)
-            Spacer(Modifier.height(3.dp))
-            KitPiece(kit.shorts, width = 50.dp, height = 22.dp)
-            Spacer(Modifier.height(3.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                KitPiece(kit.socks, width = 11.dp, height = 18.dp)
-                KitPiece(kit.socks, width = 11.dp, height = 18.dp)
-            }
+        Box(
+            modifier = Modifier.size(width = 124.dp, height = 134.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            // Platform so dark away kits (navy / black) don't vanish on the
+            // near-black screen.
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color.White.copy(alpha = 0.07f)),
+            )
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.radialGradient(
+                            colors = listOf(kit.jersey.copy(alpha = 0.22f), Color.Transparent),
+                        ),
+                    ),
+            )
+            KitAvatar(kit = kit, modifier = Modifier.size(width = 108.dp, height = 126.dp))
         }
         Spacer(Modifier.width(20.dp))
         Column {
@@ -139,16 +158,81 @@ private fun KitPreview(team: Team, jersey: Jersey, name: String) {
     }
 }
 
-/** One coloured kit element, with a hairline so white strips read on dark. */
 @Composable
-private fun KitPiece(color: Color, width: androidx.compose.ui.unit.Dp, height: androidx.compose.ui.unit.Dp) {
-    Box(
-        Modifier
-            .size(width = width, height = height)
-            .clip(RoundedCornerShape(4.dp))
-            .background(color)
-            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(4.dp)),
-    )
+private fun KitAvatar(kit: KitColors, modifier: Modifier = Modifier) {
+    val stroke = Stroke(width = 2.5f)
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val cx = w / 2f
+
+        // ── Jersey: flat-shouldered tee with short sleeves + V-neck ──
+        val collarHalf = w * 0.08f
+        val bodyHalf = w * 0.19f
+        val sleeveOuter = w * 0.46f
+        val shoulderY = h * 0.10f
+        val sleeveBottomY = h * 0.27f
+        val armpitY = h * 0.24f
+        val hemY = h * 0.50f
+        val collarBottomY = h * 0.17f
+        val jersey = Path().apply {
+            moveTo(cx - collarHalf, shoulderY)
+            lineTo(cx - sleeveOuter, shoulderY)
+            lineTo(cx - sleeveOuter, sleeveBottomY)
+            lineTo(cx - bodyHalf, armpitY)
+            lineTo(cx - bodyHalf, hemY)
+            lineTo(cx + bodyHalf, hemY)
+            lineTo(cx + bodyHalf, armpitY)
+            lineTo(cx + sleeveOuter, sleeveBottomY)
+            lineTo(cx + sleeveOuter, shoulderY)
+            lineTo(cx + collarHalf, shoulderY)
+            lineTo(cx, collarBottomY)
+            close()
+        }
+        drawPath(jersey, kit.jersey)
+        drawPath(jersey, outlineFor(kit.jersey), style = stroke)
+
+        // ── Shorts: waistband + two legs with a centre split ──
+        val waistY = h * 0.53f
+        val shortsBottomY = h * 0.73f
+        val crotchY = h * 0.66f
+        val shortHalf = w * 0.185f
+        val legInner = w * 0.035f
+        val shorts = Path().apply {
+            moveTo(cx - shortHalf, waistY)
+            lineTo(cx + shortHalf, waistY)
+            lineTo(cx + shortHalf, shortsBottomY)
+            lineTo(cx + legInner, shortsBottomY)
+            lineTo(cx, crotchY)
+            lineTo(cx - legInner, shortsBottomY)
+            lineTo(cx - shortHalf, shortsBottomY)
+            close()
+        }
+        drawPath(shorts, kit.shorts)
+        drawPath(shorts, outlineFor(kit.shorts), style = stroke)
+
+        // ── Socks: a pair of rounded columns ──
+        val sockTopY = h * 0.77f
+        val sockH = h * 0.21f
+        val sockW = w * 0.11f
+        val sockGap = w * 0.04f
+        val corner = CornerRadius(sockW * 0.45f, sockW * 0.45f)
+        val sockOutline = outlineFor(kit.socks)
+        for (left in listOf(cx - sockGap - sockW, cx + sockGap)) {
+            drawRoundRect(kit.socks, topLeft = Offset(left, sockTopY), size = Size(sockW, sockH), cornerRadius = corner)
+            drawRoundRect(sockOutline, topLeft = Offset(left, sockTopY), size = Size(sockW, sockH), cornerRadius = corner, style = stroke)
+        }
+    }
+}
+
+/**
+ * A silhouette outline that contrasts the piece itself — a dark edge on light
+ * kits, a light edge on dark kits — so navy / black / white strips all read on
+ * the panel (fixes dark away kits vanishing against the near-black screen).
+ */
+private fun outlineFor(c: Color): Color {
+    val luminance = 0.299f * c.red + 0.587f * c.green + 0.114f * c.blue
+    return if (luminance > 0.55f) Color.Black.copy(alpha = 0.40f) else Color.White.copy(alpha = 0.55f)
 }
 
 /** HOME / AWAY segmented toggle. */
