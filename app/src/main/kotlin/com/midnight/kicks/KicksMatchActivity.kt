@@ -8,11 +8,13 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.Build
 import android.os.Message
 import android.os.Messenger
 import android.os.Process
 import android.os.RemoteException
 import android.util.Log
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.foundation.layout.Box
@@ -237,6 +239,15 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
         addContentView(composeView, params)
+
+        // When the Unity scene is idle (e.g. the direction picker is up with no
+        // 3D animation), the OS frame-throttles this overlay window — Choreographer
+        // delivers callbacks at a fraction of vsync, so Compose can't redraw and
+        // taps appear to do nothing until a stray frame arrives. Request a high
+        // frame rate for the overlay so it keeps drawing live. (API 35+.)
+        if (Build.VERSION.SDK_INT >= 35) {
+            composeView.requestedFrameRate = View.REQUESTED_FRAME_RATE_CATEGORY_HIGH
+        }
     }
 
     override fun onDestroy() {
