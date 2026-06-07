@@ -3,7 +3,11 @@ package com.midnight.kicks
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -221,6 +225,19 @@ private fun RoleBanner(isShoot: Boolean) {
 /** A row of [total] dots, the first [done] filled in [accent]. */
 @Composable
 private fun ProgressPips(total: Int, done: Int, accent: Color) {
+    // The current pip breathes continuously. Besides the "your turn" cue, this
+    // infinite transition is the picker's frame driver: hosted on top of Unity's
+    // native surface with no HUD banner animating, Compose would otherwise not be
+    // driven to recompose, so taps (step changes) wouldn't render until some
+    // other frame happened to occur. A continuous animation keeps the frame
+    // clock ticking so every tap shows immediately.
+    val pulse = rememberInfiniteTransition(label = "pickerPulse")
+    val pulseScale by pulse.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.35f,
+        animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
+        label = "pickerPulse",
+    )
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         repeat(total) { i ->
             val filled = i < done
@@ -230,7 +247,7 @@ private fun ProgressPips(total: Int, done: Int, accent: Color) {
                 current -> accent.copy(alpha = 0.45f)
                 else -> Color.White.copy(alpha = 0.20f)
             }
-            val scale by animateFloatAsState(if (current) 1.25f else 1f, tween(200), label = "pip")
+            val scale = if (current) pulseScale else 1f
             Box(
                 modifier = Modifier
                     .graphicsLayer { scaleX = scale; scaleY = scale }
