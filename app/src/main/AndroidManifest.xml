@@ -4,12 +4,19 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- appCategory override: Unity's library manifest sets appCategory="game",
+         which makes Samsung's Game Optimizing Service classify us as a game and
+         subject the match window to its BBA frame-callback throttle (freezes the
+         Compose picker once Unity's scene idles). Declassify to dodge GOS.
+         tools:replace forces our value to win over the merged Unity value. -->
     <application
         android:name=".KicksApplication"
         android:allowBackup="false"
+        android:appCategory="social"
         android:label="Midnight Kicks"
         android:supportsRtl="true"
-        android:theme="@style/Theme.MidnightKicks">
+        android:theme="@style/Theme.MidnightKicks"
+        tools:replace="android:appCategory">
 
         <!-- Our Kotlin launcher activity -->
         <activity

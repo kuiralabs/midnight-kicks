@@ -225,12 +225,7 @@ private fun RoleBanner(isShoot: Boolean) {
 /** A row of [total] dots, the first [done] filled in [accent]. */
 @Composable
 private fun ProgressPips(total: Int, done: Int, accent: Color) {
-    // The current pip breathes continuously. Besides the "your turn" cue, this
-    // infinite transition is the picker's frame driver: hosted on top of Unity's
-    // native surface with no HUD banner animating, Compose would otherwise not be
-    // driven to recompose, so taps (step changes) wouldn't render until some
-    // other frame happened to occur. A continuous animation keeps the frame
-    // clock ticking so every tap shows immediately.
+    // The current pip breathes continuously as a "your turn" cue.
     val pulse = rememberInfiniteTransition(label = "pickerPulse")
     val pulseScale by pulse.animateFloat(
         initialValue = 1f,

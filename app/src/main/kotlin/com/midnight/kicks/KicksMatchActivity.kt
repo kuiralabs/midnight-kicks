@@ -8,19 +8,15 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.Build
 import android.os.Message
 import android.os.Messenger
 import android.os.Process
 import android.os.RemoteException
 import android.util.Log
-import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
@@ -213,17 +209,6 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
                 // When the replay isn't showing, the Box has nothing
                 // to draw beyond the HUD itself.
                 Box(modifier = Modifier.fillMaxSize()) {
-                    // Keep this overlay window's frame loop alive from window
-                    // creation. On-chain matches get this for free — MatchManager
-                    // continuously publishes HUD updates that animate the overlay
-                    // — but off-chain practice publishes nothing, so the window
-                    // would idle and the OS throttles its frames, freezing the
-                    // picker (taps mutate state but don't repaint). A continuous
-                    // frame request, started before the window can idle, keeps it
-                    // drawing live regardless of whether a MatchManager is active.
-                    LaunchedEffect(Unit) {
-                        while (true) withFrameNanos { }
-                    }
                     // Full-screen wait "stage" (covers Unity's idle label +
                     // masks the commit/reveal wait). Bottom of the stack — the
                     // phase overlays below are mutually exclusive with it.
@@ -252,15 +237,6 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
         addContentView(composeView, params)
-
-        // When the Unity scene is idle (e.g. the direction picker is up with no
-        // 3D animation), the OS frame-throttles this overlay window — Choreographer
-        // delivers callbacks at a fraction of vsync, so Compose can't redraw and
-        // taps appear to do nothing until a stray frame arrives. Request a high
-        // frame rate for the overlay so it keeps drawing live. (API 35+.)
-        if (Build.VERSION.SDK_INT >= 35) {
-            composeView.requestedFrameRate = View.REQUESTED_FRAME_RATE_CATEGORY_HIGH
-        }
     }
 
     override fun onDestroy() {
