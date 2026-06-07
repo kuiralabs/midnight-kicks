@@ -6,19 +6,22 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.displayCutoutPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -156,8 +159,7 @@ private fun ReplayBody(
                         localRole = localRole,
                         modifier = Modifier
                             .align(Alignment.TopStart)
-                            .statusBarsPadding()
-                            .displayCutoutPadding()
+                            .windowInsetsPadding(WindowInsets.safeDrawing)
                             .padding(16.dp),
                     )
                     val lastKick = replay.rounds[revealedKicks - 1]
@@ -314,6 +316,9 @@ private fun ResultHud(
     onRematch: () -> Unit,
     onMenu: () -> Unit,
 ) {
+    // In landscape (short height) the result content is taller than the viewport,
+    // so top-align + scroll instead of centering (centering would clip top/bottom).
+    val compact = isCompactHeight()
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -324,10 +329,10 @@ private fun ResultHud(
                     1f to KicksColors.Background.copy(alpha = 0.96f),
                 ),
             )
-            .statusBarsPadding()
-            .displayCutoutPadding()
-            .padding(24.dp),
-        contentAlignment = Alignment.Center,
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .padding(24.dp)
+            .then(if (compact) Modifier.verticalScroll(rememberScrollState()) else Modifier),
+        contentAlignment = if (compact) Alignment.TopCenter else Alignment.Center,
     ) {
         if (replay.p1Score != replay.p2Score) {
             EndScreen(replay = replay, localRole = localRole, onRematch = onRematch, onMenu = onMenu)

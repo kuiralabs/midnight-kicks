@@ -18,7 +18,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -213,6 +217,9 @@ class KicksActivity : FragmentActivity() {
         handleDeepLink(intent)
 
         setContent {
+            // Adaptive WindowSizeClass for the whole UI tree; recomputes on
+            // rotation (observes Configuration) under this activity's configChanges.
+            ProvideWindowSizeClass(this@KicksActivity) {
             when (val s = screen.value) {
                 KicksScreen.Menu -> KicksApp(
                     statusMessage = statusMessage.value,
@@ -345,6 +352,7 @@ class KicksActivity : FragmentActivity() {
                     onCancel = { pendingAbandon.value = null },
                 )
             }
+            } // ProvideWindowSizeClass
         }
     }
 
@@ -1506,6 +1514,9 @@ fun KicksApp(
     onQuickPractice: () -> Unit,
     onPracticeVsAi: () -> Unit,
 ) {
+    // Landscape (short height): scroll the menu + tighten spacers so every button
+    // stays reachable; portrait keeps the centered layout.
+    val compact = isCompactHeight()
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = KicksColors.Background,
@@ -1537,11 +1548,13 @@ fun KicksApp(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    // Keep the menu within the status/nav/cutout safe area; the
-                    // stadium Image + scrim above stay edge-to-edge behind the bars.
-                    .systemBarsPadding()
+                    // safeDrawing keeps the menu clear of status/nav/cutout on ALL
+                    // edges (incl. side bars in landscape); the stadium Image +
+                    // scrim above stay edge-to-edge behind the bars.
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .then(if (compact) Modifier.verticalScroll(rememberScrollState()) else Modifier)
                     .padding(24.dp),
-                verticalArrangement = Arrangement.Center,
+                verticalArrangement = if (compact) Arrangement.Top else Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
@@ -1558,7 +1571,7 @@ fun KicksApp(
                     letterSpacing = 8.sp,
                 )
 
-                Spacer(modifier = Modifier.height(48.dp))
+                Spacer(modifier = Modifier.height(if (compact) 20.dp else 48.dp))
 
                 // Glass panel enclosing the menu actions so the buttons read
                 // cleanly over the bright stadium behind them.
@@ -1602,7 +1615,7 @@ fun KicksApp(
                 }
 
                 if (statusMessage != null || lastChoices != null) {
-                    Spacer(modifier = Modifier.height(48.dp))
+                    Spacer(modifier = Modifier.height(if (compact) 20.dp else 48.dp))
                     if (lastChoices != null) {
                         Text(
                             lastChoices,

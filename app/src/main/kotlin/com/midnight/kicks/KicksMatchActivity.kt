@@ -202,6 +202,9 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
             // `.clickable { }` on a full-screen Box), Unity input
             // dies silently — flag any such modifier in review.
             setContent {
+                // Adaptive size class for the in-match overlays (picker, replay,
+                // etc.) so they reflow in landscape. Provided in the :unity root.
+                ProvideWindowSizeClass(this@KicksMatchActivity) {
                 // Box stack: the full-screen replay overlay paints
                 // first (when active it dims Unity and shows the
                 // scoreboard), the HUD banner paints on top so its
@@ -223,6 +226,7 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
                     // behind these and never received the tap).
                     MatchLeaveButton(onLeave = ::leaveMatch)
                 }
+                } // ProvideWindowSizeClass
             }
         }
 
