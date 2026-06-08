@@ -445,7 +445,8 @@ private fun ScoreSide(label: String, score: Int, color: Color) {
 
 /**
  * Classic penalty-board recap: one row of goal/save marks per player, in kicking
- * order, with regulation and sudden-death visually split. ● = goal, ○ = saved.
+ * order, with regulation and sudden-death visually split. Reuses the live
+ * scoreboard's pips — green ✓ scored, red ✕ saved — so both reads match.
  */
 @Composable
 private fun ShootoutRecap(playerLabel: String, rounds: List<RoundResult>, localRole: Player?, opponentName: String) {
@@ -463,7 +464,7 @@ private fun ShootoutRecap(playerLabel: String, rounds: List<RoundResult>, localR
         RecapRow(label = playerLabel, marks = mineMarks)
         RecapRow(label = opponentName, marks = theirMarks)
         Text(
-            text = "● goal   ○ saved",
+            text = "✓ scored   ✕ saved",
             color = Color.White.copy(alpha = 0.45f),
             fontSize = 11.sp,
             letterSpacing = 1.sp,
@@ -493,11 +494,8 @@ private fun RecapRow(label: String, marks: List<Boolean>) {
             if (idx == REGULATION_KICKS_PER_PLAYER) {
                 Text(text = "|", color = Color.White.copy(alpha = 0.3f), fontSize = 16.sp)
             }
-            Text(
-                text = if (goal) "●" else "○",
-                color = if (goal) KicksColors.Success else Color.White.copy(alpha = 0.4f),
-                fontSize = 18.sp,
-            )
+            // Reuse the live scoreboard pip (all recap marks are final/revealed).
+            ShotPip(ShotMark(revealed = true, goal = goal))
         }
     }
 }
