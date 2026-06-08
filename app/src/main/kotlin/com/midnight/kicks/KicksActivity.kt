@@ -87,6 +87,11 @@ class KicksActivity : FragmentActivity() {
     // three screens. handleDeepLink() / button onClicks mutate this; the
     // setContent { } block switches on it.
     private val screen = mutableStateOf<KicksScreen>(KicksScreen.Menu)
+
+    // Cold-start Kuira Labs brand splash. Shown once (this field is set false
+    // when the splash finishes; it isn't reset on return-from-match, since the
+    // activity isn't recreated then). Gates the lobby music too — see onResume.
+    private val splashVisible = mutableStateOf(true)
     // Per-screen UX state for the create-and-go flow.
     private val creatingChecking = mutableStateOf(false)
     private val creatingStatus = mutableStateOf<String?>(null)
@@ -224,7 +229,14 @@ class KicksActivity : FragmentActivity() {
             // Adaptive WindowSizeClass for the whole UI tree; recomputes on
             // rotation (observes Configuration) under this activity's configChanges.
             ProvideWindowSizeClass(this@KicksActivity) {
-            when (val s = screen.value) {
+            if (splashVisible.value) {
+                // Brand splash on cold start; it starts the lobby theme itself
+                // when it hands off (so the sting + theme never overlap).
+                KuiraSplashScreen(onFinished = {
+                    splashVisible.value = false
+                    LobbyMusic.resume(this@KicksActivity)
+                })
+            } else when (val s = screen.value) {
                 KicksScreen.Menu -> KicksApp(
                     statusMessage = statusMessage.value,
                     lastChoices = lastChoices.value,
@@ -691,8 +703,9 @@ class KicksActivity : FragmentActivity() {
         super.onResume()
         // Lobby theme plays while the menu is foregrounded. Launching a match
         // backgrounds this activity (→ onPause), so the theme ducks out for the
-        // Unity match audio and resumes here on return.
-        LobbyMusic.resume(this)
+        // Unity match audio and resumes here on return. Held off during the
+        // cold-start splash — that hands the theme off itself when it finishes.
+        if (!splashVisible.value) LobbyMusic.resume(this)
     }
 
     override fun onPause() {
