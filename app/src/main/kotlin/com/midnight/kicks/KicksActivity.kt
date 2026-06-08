@@ -20,8 +20,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1545,8 +1547,6 @@ fun KicksApp(
                     ),
             )
 
-            PanelBar(network = network, onNetworkChange = onNetworkChange)
-
             val panel = @Composable { mod: Modifier ->
                 MenuPanel(
                     hasActiveSession = hasActiveSession,
@@ -1558,53 +1558,71 @@ fun KicksApp(
                     modifier = mod,
                 )
             }
-            if (compact) {
-                // Landscape: two panes — brand + status on the left, the action
-                // panel on the right — so every button fits the short height
-                // without scrolling (the right pane still scrolls as a fallback).
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .windowInsetsPadding(WindowInsets.safeDrawing)
-                        .padding(horizontal = 32.dp, vertical = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(32.dp),
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
+
+            // PanelBar sits ATOP the menu in a Column (its documented pattern),
+            // not overlaid in the Box — so the menu content fills only the space
+            // *below* the pills and can never rise under them (the landscape
+            // panel was colliding with the top-right wallet pill). The stadium
+            // image + scrim above remain full-bleed behind this Column.
+            // PanelBar already clears the status bar; the content below only
+            // needs the side + bottom safe insets (landscape nav bar / cutout).
+            Column(modifier = Modifier.fillMaxSize()) {
+                PanelBar(network = network, onNetworkChange = onNetworkChange)
+
+                val contentInsets = Modifier.windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(
+                        WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom,
+                    ),
+                )
+                if (compact) {
+                    // Landscape: two panes — brand + status on the left, the
+                    // action panel on the right — so every button fits the short
+                    // height without scrolling (the right pane scrolls as a
+                    // fallback).
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .then(contentInsets)
+                            .padding(horizontal = 32.dp, vertical = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(32.dp),
                     ) {
-                        MenuBrand()
-                        MenuStatus(statusMessage, lastChoices, topGap = 20.dp)
-                        Spacer(modifier = Modifier.height(20.dp))
-                        MenuFooter()
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            MenuBrand()
+                            MenuStatus(statusMessage, lastChoices, topGap = 20.dp)
+                            Spacer(modifier = Modifier.height(20.dp))
+                            MenuFooter()
+                        }
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            panel(Modifier)
+                        }
                     }
+                } else {
+                    // Portrait: the classic centered stack.
                     Column(
                         modifier = Modifier
-                            .weight(1f)
-                            .verticalScroll(rememberScrollState()),
+                            .fillMaxSize()
+                            .then(contentInsets)
+                            .padding(24.dp),
                         verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
+                        MenuBrand()
+                        Spacer(modifier = Modifier.height(48.dp))
                         panel(Modifier)
+                        MenuStatus(statusMessage, lastChoices, topGap = 48.dp)
+                        Spacer(modifier = Modifier.height(48.dp))
+                        MenuFooter()
                     }
-                }
-            } else {
-                // Portrait: the classic centered stack.
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .windowInsetsPadding(WindowInsets.safeDrawing)
-                        .padding(24.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    MenuBrand()
-                    Spacer(modifier = Modifier.height(48.dp))
-                    panel(Modifier)
-                    MenuStatus(statusMessage, lastChoices, topGap = 48.dp)
-                    Spacer(modifier = Modifier.height(48.dp))
-                    MenuFooter()
                 }
             }
         }

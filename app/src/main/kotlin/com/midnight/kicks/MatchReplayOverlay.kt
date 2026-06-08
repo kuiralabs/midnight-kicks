@@ -316,9 +316,11 @@ private fun ResultHud(
     onRematch: () -> Unit,
     onMenu: () -> Unit,
 ) {
-    // In landscape (short height) the result content is taller than the viewport,
-    // so top-align + scroll instead of centering (centering would clip top/bottom).
+    // Landscape (short height) keeps a scroll as a safety net. The decisive end
+    // screen reflows to a two-pane that fits, so it stays centered; the tied
+    // "continue" beat can be taller than a landscape viewport, so it top-aligns.
     val compact = isCompactHeight()
+    val decisive = replay.p1Score != replay.p2Score
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -330,11 +332,11 @@ private fun ResultHud(
                 ),
             )
             .windowInsetsPadding(WindowInsets.safeDrawing)
-            .padding(24.dp)
+            .padding(if (compact) 16.dp else 24.dp)
             .then(if (compact) Modifier.verticalScroll(rememberScrollState()) else Modifier),
-        contentAlignment = if (compact) Alignment.TopCenter else Alignment.Center,
+        contentAlignment = if (compact && !decisive) Alignment.TopCenter else Alignment.Center,
     ) {
-        if (replay.p1Score != replay.p2Score) {
+        if (decisive) {
             EndScreen(replay = replay, localRole = localRole, onRematch = onRematch, onMenu = onMenu)
         } else {
             Column(
@@ -379,15 +381,41 @@ private fun EndScreen(
 
     val accent = if (won) KicksColors.Warning else KicksColors.Danger
 
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        Text(text = if (won) "🏆" else "💔", fontSize = 52.sp)
-        VerdictBadge(won = won, accent = accent)
-        ResultScore(playerLabel = playerLabel, mine = mine, theirs = theirs, won = won, opponentName = opponentName, accent = accent)
-        ShootoutRecap(playerLabel = playerLabel, rounds = replay.rounds, localRole = localRole, opponentName = opponentName)
-        EndActions(onRematch = onRematch, onMenu = onMenu)
+    if (isCompactHeight()) {
+        // Landscape: two panes — the emotional summary (verdict + score) on the
+        // left, the detail + exits (recap + REMATCH/MENU) on the right — so the
+        // celebration fits the short height without scrolling or clipping.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(40.dp),
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(text = if (won) "🏆" else "💔", fontSize = 36.sp)
+                VerdictBadge(won = won, accent = accent)
+                ResultScore(playerLabel = playerLabel, mine = mine, theirs = theirs, won = won, opponentName = opponentName, accent = accent)
+            }
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                ShootoutRecap(playerLabel = playerLabel, rounds = replay.rounds, localRole = localRole, opponentName = opponentName)
+                EndActions(onRematch = onRematch, onMenu = onMenu)
+            }
+        }
+    } else {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
+            Text(text = if (won) "🏆" else "💔", fontSize = 52.sp)
+            VerdictBadge(won = won, accent = accent)
+            ResultScore(playerLabel = playerLabel, mine = mine, theirs = theirs, won = won, opponentName = opponentName, accent = accent)
+            ShootoutRecap(playerLabel = playerLabel, rounds = replay.rounds, localRole = localRole, opponentName = opponentName)
+            EndActions(onRematch = onRematch, onMenu = onMenu)
+        }
     }
 }
 
