@@ -1,6 +1,9 @@
 package com.midnight.kicks
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -19,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -32,10 +36,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -265,31 +273,57 @@ private fun ShotPip(mark: ShotMark) {
 }
 
 /**
- * The per-kick announcement: a big GOAL! / SAVED! that flashes in and fades as
- * each kick resolves. Keyed on [tick] (the running kick count) so it re-fires
- * for every kick. Transient (~1s) and unbacked so the pitch stays visible.
+ * The per-kick announcement: a big GOAL! / SAVED! that stamps in as each kick
+ * resolves — a spring "punch" (scale overshoot) over a radial accent burst, with
+ * a drop shadow so it reads over the bright pitch/crowd. Keyed on [tick] (the
+ * running kick count) so it re-fires for every kick. Transient (~1s) and unbacked
+ * so the 3D action stays visible. The cinematic is the one moment Unity is
+ * actively rendering, so these animations get frames (no idle throttle).
  */
 @Composable
 private fun KickFlash(tick: Int, isGoal: Boolean, modifier: Modifier) {
     var visible by remember(tick) { mutableStateOf(false) }
+    // Punch-in scale with overshoot: snaps from small → past 1 → settles, so the
+    // call lands like a stamp rather than a plain fade.
+    val punch = remember(tick) { Animatable(0.55f) }
     LaunchedEffect(tick) {
         visible = true
-        delay(950)
+        punch.snapTo(0.55f)
+        punch.animateTo(1f, spring(dampingRatio = 0.42f, stiffness = Spring.StiffnessMediumLow))
+        delay(900)
         visible = false
     }
+    val accent = if (isGoal) KicksColors.SuccessBright else KicksColors.Pending
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(120)),
-        exit = fadeOut(tween(350)),
+        enter = fadeIn(tween(90)),
+        exit = fadeOut(tween(320)),
         modifier = modifier,
     ) {
-        Text(
-            text = if (isGoal) "GOAL!" else "SAVED!",
-            color = if (isGoal) KicksColors.SuccessBright else KicksColors.Pending,
-            fontSize = 60.sp,
-            fontWeight = FontWeight.Black,
-            letterSpacing = 2.sp,
-        )
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.graphicsLayer { scaleX = punch.value; scaleY = punch.value },
+        ) {
+            // Radial accent burst behind the text — reads as an impact, not label.
+            Box(
+                modifier = Modifier
+                    .size(260.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.radialGradient(listOf(accent.copy(alpha = 0.38f), Color.Transparent)),
+                    ),
+            )
+            Text(
+                text = if (isGoal) "GOAL!" else "SAVED!",
+                color = accent,
+                fontSize = 66.sp,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 2.sp,
+                style = TextStyle(
+                    shadow = Shadow(Color.Black.copy(alpha = 0.65f), Offset(0f, 4f), blurRadius = 12f),
+                ),
+            )
+        }
     }
 }
 
