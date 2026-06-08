@@ -2,9 +2,10 @@ package com.midnight.kicks
 
 import android.content.Context
 import android.util.Log
-import com.midnight.kuira.core.compact.BalanceProgress
 import androidx.compose.ui.graphics.toArgb
 import com.midnight.kuira.core.compact.ContractCallStage
+import com.midnight.kuira.dapp.defaultLabel
+import com.midnight.kuira.dapp.progressFraction
 import com.midnight.kuira.core.compact.MidnightContract
 import com.midnight.kuira.core.compact.WitnessKind
 import com.midnight.kuira.core.compact.WitnessResult
@@ -2518,8 +2519,8 @@ open class MatchManager(
     private fun stageReporter(circuitName: String): (ContractCallStage) -> Unit = { stage ->
         Log.d(TAG, "$circuitName: ${stage.javaClass.simpleName}")
         MatchHud.publishSecondary(
-            formatContractCallStage(stage),
-            contractCallProgress(stage),
+            stage.defaultLabel(),
+            stage.progressFraction(),
             submissionAccentArgb(circuitName),
         )
     }
@@ -2969,63 +2970,7 @@ internal fun hudModeFor(state: MatchState, role: Player?): MatchHud.Mode {
     }
 }
 
-/**
- * User-facing label for a contract-call stage. Returns `null` to clear
- * the sub-line (e.g. when the stage doesn't add information the user
- * needs to see).
- *
- * Stage class names are emitted to logs as-is for grep; the *user* sees
- * these humanized strings instead. Adjust freely — these are
- * presentation copy, not protocol.
- */
-internal fun formatContractCallStage(stage: ContractCallStage): String? = when (stage) {
-    is ContractCallStage.FetchingState -> "Fetching contract state…"
-    is ContractCallStage.Executing -> "Building transaction…"
-    is ContractCallStage.Proving -> "Generating zero-knowledge proof…"
-    is ContractCallStage.Balancing -> "Balancing dust fee…"
-    is ContractCallStage.BalancingDetail -> when (stage.progress) {
-        is BalanceProgress.SyncingDust -> "Syncing dust wallet…"
-        // Raw event counts (and the -1 "not started" sentinel) are meaningless
-        // to the player — the bar conveys progress; the line stays human.
-        is BalanceProgress.SyncingDustProgress -> "Syncing dust wallet…"
-        is BalanceProgress.ProvingDust -> "Proving dust payment…"
-        is BalanceProgress.Submitting -> "Submitting to chain…"
-        is BalanceProgress.WaitingFinalization -> "Waiting for block finalization…"
-        is BalanceProgress.RetryingDustSync -> "Retrying dust sync…"
-        is BalanceProgress.RecoveringDustState ->
-            "Recovering dust balance — this can take a moment…"
-    }
-    is ContractCallStage.Submitting -> "Submitting to chain…"
-}
-
-/**
- * Maps a circuit-call [stage] to a 0..1 progress value for the stage bar.
- *
- * Bands are weighted by typical duration, not evenly — proving is near-instant
- * while finalization dominates, so finalization sits near-full (the bar would
- * otherwise stall there and read as a hang). The dust-sync sub-progress fills
- * its own band so the player sees smooth motion without raw event counts. The
- * bar is clamped monotonic in the overlay, so retry/recovery stages reporting a
- * lower value never make it visibly retreat.
- */
-internal fun contractCallProgress(stage: ContractCallStage): Float = when (stage) {
-    is ContractCallStage.FetchingState -> 0.08f
-    is ContractCallStage.Executing -> 0.15f
-    is ContractCallStage.Proving -> 0.30f
-    is ContractCallStage.Balancing -> 0.35f
-    is ContractCallStage.BalancingDetail -> when (val p = stage.progress) {
-        is BalanceProgress.SyncingDust -> 0.40f
-        is BalanceProgress.SyncingDustProgress -> {
-            val frac = if (p.totalEvents > 0) {
-                (p.eventsProcessed.toFloat() / p.totalEvents).coerceIn(0f, 1f)
-            } else 0f
-            0.40f + frac * 0.15f // 0.40 → 0.55 within the dust-sync band
-        }
-        is BalanceProgress.ProvingDust -> 0.62f
-        is BalanceProgress.Submitting -> 0.72f
-        is BalanceProgress.WaitingFinalization -> 0.90f
-        is BalanceProgress.RetryingDustSync -> 0.40f
-        is BalanceProgress.RecoveringDustState -> 0.50f
-    }
-    is ContractCallStage.Submitting -> 0.80f
-}
+// Stage → label / 0..1 progress mapping now lives in the SDK
+// (`com.midnight.kuira.dapp.defaultLabel()` / `.progressFraction()`), dogfooded
+// here via stageReporter. The per-submission accent stays app-side
+// (submissionAccentArgb) since it encodes Kicks' brand colours.
