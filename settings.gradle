@@ -3,11 +3,6 @@ pluginManagement {
         google()
         mavenCentral()
         gradlePluginPortal()
-        // Kuira Contract plugin during local dev — Maven Central pulls
-        // it once an alpha is published, mavenLocal handles the case
-        // where you've run `./gradlew publishToMavenLocal` in the parent
-        // monorepo on a version that isn't released yet.
-        mavenLocal()
     }
 }
 plugins {
@@ -19,10 +14,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // Kuira SDK is published from the parent build via
-        // `./gradlew publishToMavenLocal`. POMs include transitive deps,
-        // so kicks doesn't have to redeclare zxing/bitcoinj/etc. by hand.
-        mavenLocal()
     }
 }
 
