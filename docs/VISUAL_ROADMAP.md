@@ -4,10 +4,23 @@
 presentation. Use this doc to plan asset acquisition, art passes, and
 lighting work after the gameplay loop is locked in.
 
-**Status:** Phase 1 environment is in place (procedural grass, true-FIFA
-pitch markings, flat crowd backdrop with tileable texture, daylight
-lighting, FC25-style camera framing). Everything below this point is
-incremental polish.
+**Last reconciled against code: 2026-06-14 (HEAD 3bd8e52).** Fidelity is
+**stylized, not photoreal** — what shipped reads as FC25-style framing built
+from flat-painted Mixamo meshes, procedural/drop-in textures, and a single
+fixed camera. The FC25-tier goals below remain aspirational.
+
+**Status:** A lot more than Phase 1 is now in place. ✅ Real rigged soccer
+characters (Shooter + Keeper, `soccer_character.fbx`) replaced the X Bot robot;
+✅ per-round national kit swap + a distinct Campos goalkeeper; ✅ La Bombonera
+match audio + lobby theme; ✅ procedural grass + true-FIFA pitch markings;
+✅ curved crowd backdrop + daylight lighting; ✅ an aspect-aware behind-shooter
+camera with intro dolly; ✅ a choreographed 3D cinematic with live GOAL/SAVED +
+climbing score; ✅ name/nation/kit customization; ✅ a 2D Compose results screen.
+Still pending toward FC25: 🔶 single fixed camera (no Cinemachine multi-cam
+director), and the bigger asset lifts below (HDRI sky, modeled stadium, net
+cloth physics, photoreal players). Caveat: several C# changes (notably the
+per-kick `roundResult` emit) need a Unity re-export to take effect on device —
+the source is committed but the shipped binary may lag.
 
 ---
 
@@ -21,16 +34,16 @@ Honest gap analysis:
 | Pitch markings | Procedural LineRenderers, true FIFA dimensions | Baked into the field texture, slightly worn/dirty |
 | Goal | Imported FBX, white materials, no physics | Detailed mesh, cloth-physics net that ripples on impact |
 | Ball | Default + texture | High-poly with hex/pent panel pattern, motion blur, deformation |
-| Players | Mixamo X Bot (one generic robot mannequin, recolored) | Photo-scanned individual players in team kits |
-| Animations | 3 states (Idle/Run/Kick), no celebration | Dozens of states with proper transitions, ragdoll on falls |
-| Crowd | Tiled photo on a flat backdrop wall | Animated 3D crowd with section colors, banners, choreographed waves |
-| Stadium structure | None — flat backdrop | Full architectural model: roof, trusses, scoreboards, tunnels, ad boards |
+| Players | ✅ Real rigged `soccer_character.fbx` (Shooter + Keeper), flat-painted in per-round national kits (X Bot kept only as inactive backup) | Photo-scanned individual players in team kits |
+| Animations | Idle/Run/Kick states + procedural reactions (celebration hops / defeat lean), scripted kinematic ball — no authored celebration clips or ragdoll | Dozens of states with proper transitions, ragdoll on falls |
+| Crowd | ✅ Curved panoramic crowd arc (`StadiumCrowd.png`), procedural tint fallback — not yet animated | Animated 3D crowd with section colors, banners, choreographed waves |
+| Stadium structure | Still none — curved crowd image wall only, no modeled architecture | Full architectural model: roof, trusses, scoreboards, tunnels, ad boards |
 | Sky | Solid color | HDRI photo with real cloud detail |
 | Lighting | Daylight directional + flat ambient | Time-of-day system, real-time floodlights, baked GI, volumetric cones |
 | Post-processing | Disabled (was crushing brightness) | Tuned tonemapping, color grade, subtle bloom on net hits, DoF on close-ups |
-| Cameras | Single Main Camera, fixed angle | Cinemachine multi-camera director with broadcast cuts |
-| Audio | None | Crowd roar, kick thump, post clang, net swish, whistle, commentary |
-| UI | IMGUI text labels | uGUI canvas with score, time, lower-third punch graphics |
+| Cameras | Single behind-shooter camera (aspect-aware FOV, 2.2s intro dolly) — still one fixed angle | Cinemachine multi-camera director with broadcast cuts |
+| Audio | ✅ Layered La Bombonera mix (looping drum-chant bed + kick/net/drum SFX + random crowd roars + match-end eruption) + lobby theme — no commentary | Crowd roar, kick thump, post clang, net swish, whistle, commentary |
+| UI | ✅ 2D Compose overlay (live scoreboard, GOAL/SAVED punch, result/celebration end screen) over Unity — Unity itself is pure 3D, no OnGUI | uGUI canvas with score, time, lower-third punch graphics |
 
 The gap is **mostly assets**, not code. Procedural work hits a ceiling — beyond
 this, every win needs a model, texture, or animation clip.
@@ -57,9 +70,17 @@ Lowest effort, often biggest visual jump per hour.
 - **Sources:** Sketchfab (search "soccer ball"), or many free PBR balls on the Unity Asset Store.
 - **Drop-in:** Replace the Ball GameObject's mesh + material. Keep the `BallKicker` script attached.
 
-### 1D. Real player models  ⭐ (biggest visual jump for least effort)
-- **What:** Swap the Mixamo X Bot (generic robot) currently used for both `Shooter`
-  and `Keeper` for real-looking characters in soccer kits.
+### 1D. Real player models  ⭐ (biggest visual jump for least effort) — ✅ DONE
+- **Status:** ✅ Shipped. Both `Shooter` and `Keeper` were swapped to a real
+  rigged `soccer_character.fbx`; the X Bot survives only as inactive scene
+  backups. Per-round national kit swap + a distinct Campos goalkeeper are also
+  in place. Fidelity is **stylized** — the characters are flat-color-painted
+  Mixamo meshes (no scanned faces / real kit textures), so the FC25 "photo-scanned
+  players in team kits" goal remains aspirational. The investigation below is
+  kept for history (it documents how we got past the unrigged-Tripo wall via
+  Path A).
+- **What (original goal):** Swap the Mixamo X Bot (generic robot) used for both
+  `Shooter` and `Keeper` for real-looking characters in soccer kits.
 - **Why high impact:** Players are on-screen the entire match, foreground, large.
   Going from robot mannequin to recognizable footballer transforms perception
   of the game.
@@ -134,7 +155,12 @@ Lowest effort, often biggest visual jump per hour.
 - **Sources:** [polyhaven.com/hdris](https://polyhaven.com/hdris) — free CC0 HDR photos. Pick a daylight stadium or open-sky one.
 - **Workflow:** Drop the `.hdr` into `unity/Assets/Skyboxes/`. Lighting Settings → Skybox Material → assign. Update `StadiumFloodlights.cs` to NOT override the skybox.
 
-### 3B. Cinemachine multi-camera director  ⭐
+### 3B. Cinemachine multi-camera director  ⭐ — 🔶 PENDING
+- **Status:** 🔶 Not built. What ships today is a single behind-shooter camera
+  (aspect-aware FOV + 2.2s intro dolly) — it reads as FC25-style framing but is
+  one fixed angle, not a multi-cam broadcast director. Cinemachine is not yet
+  installed (it survives only as a "parked until…" comment in `ShotManager`).
+  The goal below stands.
 - **What:** Multiple cameras (wide stadium shot, behind-shooter, kick close-up, behind-keeper, slow-mo replay) that cut between angles automatically during the match.
 - **Why high impact:** Single camera = static game feel. Cuts = broadcast feel.
 - **How:** Install Cinemachine via Package Manager. Create `CinemachineVirtualCamera` objects for each angle. Use `CinemachineBrain` to blend between them. Drive cuts from `ShotManager.cs` with `priority` swaps.
@@ -152,7 +178,13 @@ Lowest effort, often biggest visual jump per hour.
 
 ## Tier 4 — Stadium environment
 
-### 4A. Real stadium 3D model  ⭐ (biggest single visual change available)
+### 4A. Real stadium 3D model  ⭐ (biggest single visual change available) — 🔶 PENDING
+- **Status:** 🔶 Not built. The current backdrop is a curved panoramic crowd
+  arc (`CrowdBackdrop.cs` rendering `StadiumCrowd.png`) — there is still no
+  modeled stadium architecture (roof / stands / scoreboard). The goal below
+  stands. ⚠️ Note: `WorldCupStadiumBackground.png` (+ `_mobile`) is committed
+  but referenced by no C# script — it appears to be a dead/unused asset; the
+  active backdrop is `StadiumCrowd.png`. (Flagged for cleanup, not removed.)
 - **What:** Replace the flat crowd wall with a properly modeled stadium — roof trusses, multiple stand tiers, scoreboards, tunnels.
 - **Why huge impact:** Most of the scene's "feel" comes from the environment. A real stadium model puts everything else in context.
 - **Sources:** Sketchfab (search "soccer stadium", filter CC + downloadable), Unity Asset Store ("Soccer Stadium" packs ~$20-30), free models on TurboSquid / OpenGameArt.
@@ -171,18 +203,38 @@ Lowest effort, often biggest visual jump per hour.
 
 ## Tier 5 — Polish
 
-### 5A. Audio  ⭐
+### 5A. Audio  ⭐ — ✅ DONE
+- **Status:** ✅ Shipped. `AudioManager.cs` plays a layered La Bombonera mix
+  (looping drum-chant bed + kick/net/drum-strike SFX + random crowd roars +
+  match-end eruption), wired to goal/save/match-end cues; the lobby theme
+  (`LobbyMusic.kt`, `res/raw/intro_theme.mp3`) plays on menu resume. Audio
+  files are committed under `Resources/Audio` and `res/raw`. Not yet present:
+  commentator-style snippets. Caveat: the Unity-side cues need a re-export to
+  be audible on device. The goal/sources below are kept for reference.
 - **What:** Crowd roar (loops), kick thump, post clang, net swish, whistle, save grunt, optional commentator-style snippets.
 - **Why high impact:** Audio fills the missing 50% of "production value". Watching the same animation with vs without crowd noise feels completely different.
 - **Sources:** Free CC0 SFX: [freesound.org](https://freesound.org), [opengameart.org](https://opengameart.org). Crowd loops searchable as "stadium crowd ambience".
 - **How:** Drop WAV/MP3 files into `Assets/Audio/`, AudioSource components on relevant GameObjects, trigger via existing `ShotManager.cs` callbacks.
 
-### 5B. Match-flow uGUI
-- **What:** Replace the `OnGUI` text labels (`GET READY`, `PLAYER 1 WINS!`, score, feedback) with a proper uGUI Canvas with TextMeshPro, slide-in/slide-out animations, lower-third punch graphics.
+### 5B. Match-flow uGUI — 🔶 SUPERSEDED in practice (uGUI not pursued)
+- **Status:** 🔶 The original `OnGUI` text labels no longer exist in Unity —
+  `ShotManager` is now pure 3D choreography ("No OnGUI"), and match-flow UI
+  (live per-shot scoreboard, GOAL!/SAVED! punch, result/celebration end screen)
+  ships as a **2D Compose overlay** (`MatchReplayOverlay.kt`) drawn over the
+  Unity view, not a Unity uGUI Canvas. So the "replace IMGUI with uGUI" framing
+  is effectively superseded by the Compose route; pursuing uGUI inside Unity is
+  optional. Kept here for the record.
+- **What (original):** Replace the `OnGUI` text labels (`GET READY`, `PLAYER 1 WINS!`, score, feedback) with a proper uGUI Canvas with TextMeshPro, slide-in/slide-out animations, lower-third punch graphics.
 - **Why:** IMGUI looks placeholder-y. uGUI = "this is finished software".
 - **How:** Unity Editor: Canvas → World/Screen Space → TextMeshPro objects → Animator for entry/exit transitions.
 
-### 5C. Replay system with multiple angles
+### 5C. Replay system with multiple angles — 🔶 PARTIAL
+- **Status:** 🔶 The cinematic core is ✅ built — `ShotManager.PlayReplay`
+  choreographs the run-up / kick / dive / ball-flight, and the Compose overlay
+  drives a live scoreboard + GOAL/SAVED flash over it. What's still pending is
+  the **multiple angles** part: that depends on the Cinemachine multi-cam
+  director in 3B (🔶 not built), so today the replay plays from the single
+  fixed camera. The goal below stands.
 - **What:** After each shot, replay it from 2-3 cinematic angles (already half-built via `ShotManager.PlayReplay` + the planned Cinemachine work in 3B).
 - **How:** Cinemachine virtual cameras + a coroutine that cycles them with timed cuts.
 
@@ -192,15 +244,17 @@ Lowest effort, often biggest visual jump per hour.
 
 Picking the items where effort × impact is highest:
 
-1. **1D — Real player models from Mixamo** (1-2 hours)
-2. **3A — HDRI skybox from Poly Haven** (30 minutes)
-3. **3B — Cinemachine multi-camera replays** (1-2 days)
-4. **4A — Real stadium 3D model** (1 day to find + integrate)
-5. **5A — Audio (crowd loop + 4-5 SFX)** (2-4 hours)
+1. **1D — Real player models from Mixamo** (1-2 hours) — ✅ DONE
+2. **3A — HDRI skybox from Poly Haven** (30 minutes) — 🔶 pending
+3. **3B — Cinemachine multi-camera replays** (1-2 days) — 🔶 pending
+4. **4A — Real stadium 3D model** (1 day to find + integrate) — 🔶 pending
+5. **5A — Audio (crowd loop + 4-5 SFX)** (2-4 hours) — ✅ DONE
 
 These five together get us probably **80% of the way to FC25-level feel**, without
-custom shaders, art skills, or paid assets. Three are pure drop-ins (1D, 3A, 5A);
-two need Unity Editor scene work (3B, 4A).
+custom shaders, art skills, or paid assets. Two of the five (1D, 5A) are now
+shipped; the remaining three — HDRI skybox (3A, a drop-in) and the two
+Unity-Editor scene jobs (3B Cinemachine, 4A stadium) — are the highest-leverage
+work still open.
 
 ---
 

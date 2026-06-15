@@ -2,6 +2,7 @@
 
 **Target:** FIFA World Cup 2026 (June 11 - July 19)
 **Updated:** 2026-05-27
+**Last reconciled against code: 2026-06-14 (HEAD 3bd8e52)**
 
 ---
 
@@ -21,7 +22,7 @@ Sudden death: **one pairing per batch** (your `shoot` + your `keep`). Decisive w
 
 **Anti-cheat:** commit-reveal. Pedersen commitment of `(shoots[5], keeps[5])` + 32-byte nonce stored as private state. ZK circuit proves revealed values match commitments. Cannot change choices after commit.
 
-> **Status:** V3 is the live spec across contract, Kotlin, and Unity (2026-05-18), and the two-player game runs end-to-end on-chain (two-emulator E2E green 2026-05-24). A 2026-05-27 pass hardened the sudden-death + rematch flow and revamped the in-match game-feel. **The game is playable; remaining work is Phase 5 polish + a pending Unity re-export, then Phase 6 launch.** Leaderboard, cloud auto-backup, and rematch re-pairing are v1.1 (post-beta).
+> **Status:** V3 is the live spec across contract, Kotlin, and Unity (2026-05-18), and the two-player game runs end-to-end on-chain. The orchestration layer is complete: the MatchManager state machine fully implements PvP (deploy/join, per-role P1/P2/AI drivers, StatePoller on-chain polling, encrypted cross-process resume). The "two-emulator E2E green 2026-05-24" was a one-off **manual** two-emulator run — there is **no automated two-device/on-chain E2E test** in the tree (the only instrumented test stubs the chain seams). A 2026-05-27 pass hardened the sudden-death + rematch flow and revamped the in-match game-feel. **The game is playable; remaining work is Phase 5 polish + a pending Unity re-export, then Phase 6 launch.** Leaderboard, cloud auto-backup, and rematch re-pairing are v1.1 (post-beta).
 
 Detailed game logic, state machine, circuit specs, UI flows, and Unity bridge spec in [`GAME_DESIGN.md`](GAME_DESIGN.md). Current Unity work and asset checklist in [`../ROADMAP.md`](../UI_ROADMAP.md).
 
@@ -38,7 +39,7 @@ Detailed game logic, state machine, circuit specs, UI flows, and Unity bridge sp
 
 ## Matchmaking
 
-- **QR (in-person):** Create Match → show QR → opponent scans → joined.
+- **QR (in-person):** Create Match → show QR → opponent scans (with an **external** scanner — in-app scanning is Phase 5 polish, not yet built) → joined.
 - **Deep link (remote):** Create Match → share `midnight://kicks?match=<contract_address>` → opponent opens.
 - Match ID = deployed contract address. No central server.
 
@@ -77,9 +78,10 @@ Separate repo: `midnight-kicks/` (app/ + unity/ + contract/). Consumes Kuira SDK
 
 ## Progress
 
-- [x] **Phase 1 — Compact contract**
-  - [x] penalty.compact V2 (commit-reveal, batch, sudden death, timeout)
-  - [x] Deploy to undeployed + 27 tests + security registry
+- [x] **Phase 1 — Compact contract** (now V3 — see Phase 4 migration notes below; these lines retained for history)
+  - [x] penalty.compact V3 (commit-reveal, batch, sudden death, timeout) — symmetric 10-round shootout; supersedes the original V2 line
+  - [x] Deploy on-demand (each match = new contract, deployed at runtime via `MatchManager.deploy()`) + security registry (vulnerable-contract exploit fixture). Test suite is 43 `it()` blocks (31 penalty + 12 security), not the original 27.
+    - ⚠️ **Caveat (verified 2026-06-14):** the JS/vitest suite does NOT run green as committed — it fails at import with a runtime version mismatch (compiled code expects 0.16.0, the checked-in lockfile/`node_modules` still pin 0.15.0). 0.16.0 is published on npm, so a fresh `npm install` re-resolves and re-greens it, but the repo as committed is red.
 - [x] **Phase 2 — Midnight Android SDK** (validated 2026-04-28)
   - [x] MidnightSdk facade + embedded wallet (balance + prove + submit)
   - [x] Proving key auto-download
@@ -108,9 +110,9 @@ Separate repo: `midnight-kicks/` (app/ + unity/ + contract/). Consumes Kuira SDK
   - [x] MatchManager — deploy/join/commit/reveal/claim circuit calls (state-machine refactor 2026-05-12: discrete suspend transitions, `StateFlow<MatchState>` as source of truth, `KicksActivity` is now a thin presenter over the SDK)
   - [x] StatePoller — watch opponent actions via indexer (2026-05-13: 3s poll on `MidnightConfig.queryState`, parses `penalty.compact` ledger via verified cell indices, exposed on `MatchManager.contractState: StateFlow`)
   - [x] PvP wait helpers — `MatchManager.waitForP2Committed()` / `waitForP2Revealed()` spin up the StatePoller only for the wait window (not continuously), then transition the state machine when chain state matches; `waitForP2Revealed` also reads `p2Choices` from the snapshot to build the final `MatchResult` (we never see the friend's choices locally in PvP). Unblocks Phase 4.
-- [x] **Phase 4 — Full two-player game** — runs end-to-end on-chain (two-emulator E2E green 2026-05-24). Leaderboard reclassified to v1.1 (post-beta); everything required for two-player play is done.
+- [x] **Phase 4 — Full two-player game** — orchestration runs end-to-end on-chain. The "two-emulator E2E green 2026-05-24" was a **manual** run, not a reproducible automated test (the only instrumented test stubs the chain seams — see the Two-emulator E2E item below). Leaderboard reclassified to v1.1 (post-beta); everything required for two-player play is done in code.
   - [x] Onboarding (passkey → biometric → play) — sigil panel handles it, "create identity" cue shown in `SigilStatusPanel.NoneBody` covers first-launch. Tutorial overlay for "how to play" is a P5 polish item, not a blocker.
-  - [x] **Matchmaking — UI scaffolding** — `CreateMatchScreen` (deploy → QR + COPY), `JoinMatchScreen` (paste/prefill + JOIN), state-based nav in `KicksActivity`, `handleDeepLink` populates `JoinMatchScreen` from `midnight://kicks?match=…`.
+  - [x] **Matchmaking — UI scaffolding** — `CreateMatchScreen` (deploy → QR **generation** + COPY), `JoinMatchScreen` (paste/prefill + JOIN), state-based nav in `KicksActivity`, `handleDeepLink` populates `JoinMatchScreen` from `midnight://kicks?match=…`. Note: only QR *generation* ships; there is **no in-app QR scanner** — the opponent uses an external scanner or pastes the address (in-app scanner is the Phase 5 item below).
   - [x] **Matchmaking — chain logic** — `MatchManager.joinAsP2(address)`, `awaitOpponentJoin()`. Plumbed into both screens.
   - [x] **Create-and-go session** — no blocking auto-await on creator's device. Session persisted via `MatchStore` (encrypted), `RESUME MATCH` on menu, `CHECK STATUS` on `CreateMatchScreen` runs a short non-terminal probe.
   - [x] **PvP gameplay orchestrators** — `MatchManager.playAsP1` / `playAsP2`, P2-side `waitForP1Committed` / `waitForP1Revealed` (captures P1's shoots/keeps from chain snapshot). `KicksActivity.handleChoicesLocked` dispatches by role.
@@ -122,7 +124,7 @@ Separate repo: `midnight-kicks/` (app/ + unity/ + contract/). Consumes Kuira SDK
   - [x] **State-machine hardening** — resume-aware + idempotent transitions over a lossless `contract.ledger()` read; kills the "assume step 1 but the chain is at step N" bug class. Per-role `resumePlayAsP1/P2` walk the steps and skip whatever's already on chain (the generic version is wishlist #16).
   - [x] **Wallet seed via `WalletSeedSource`** — dropped the hardcoded `TEST_SEED`; Kicks bootstraps the real sigil-derived seed, same path as the wallet panel.
   - [x] **Cross-process resume** — `MatchStore` (encrypted per-match secret key + shoots/keeps/nonce) + `MatchStoreBackupProvider` (Block Store) + `ResumeScreen` / `ResumeRouting`; a match survives app kill and resumes from chain state.
-  - [x] **Two-emulator E2E on localnet (V3)** — ran green end-to-end (verified 2026-05-24): create on emulator A, deep-link from emulator B, full regulation + sudden-death loop including the SD UI handoff. The two-player game works on-chain.
+  - [~] **Two-emulator E2E on localnet (V3) — MANUAL run only, no automated test.** A one-off manual run went green end-to-end (2026-05-24): create on emulator A, deep-link from emulator B, full regulation + sudden-death loop including the SD UI handoff. The orchestration code is complete and the two-player game works on-chain, **but there is no reproducible automated two-device/on-chain test** — the only instrumented test (`MatchManagerStateMachineTest`) stubs the chain seams (`initSdk`/`executeDeploy`/`executeJoinMatch`/`afterDeploySettle`), so it covers the state machine, not the live chain. An automated two-device E2E remains to build.
   - [x] **Results display** — the match outcome (winner / draw, per-round breakdown, final score) renders in the replay overlay via `MatchState.Resolved(MatchResult)`. No separate results screen needed.
   - [ ] **On-chain leaderboard (registry contract) — deferred to v1.1 (post-beta).** Approach decided 2026-05-24 (registry contract; verify-via-`external-contract` trust model so a client can't record a win that didn't happen). The game is fully playable without it, so it's punted past open beta. Build notes in the Leaderboard section.
 - [ ] **Phase 5 — Polish + release**

@@ -3,15 +3,19 @@
 **Source of truth for game logic, state machine, UI flows, and integration specs.**
 Contract implementation: [`../contract/src/penalty.compact`](../contract/src/penalty.compact)
 
-> **Contract version: V3 spec (target) / V2 deployed (current).**
-> The contract on chain today implements **V2** — each player commits 5
-> dual-purpose directions; P1 gets 3 shots vs P2's 2 in a 5-round batch
-> (see §2 "V2 reference"). This document specifies **V3**, the target
-> redesign aligned with real penalty-shootout rules: each player commits
-> **5 shots + 5 keeps (10 directions)**, both play shooter and keeper an
-> equal number of times. V3 requires a fresh contract deploy; matches
-> created on V2 cannot upgrade mid-flight. See §2 "V3 model" for the
-> data shape and scoring.
+> **Last reconciled against code: 2026-06-14 (HEAD 3bd8e52).**
+>
+> **Contract version: V3 (live — the only contract that exists).**
+> V3 is wired end to end across `penalty.compact`, the compiled
+> `managed/penalty` artifacts, the Kotlin witnesses, and the on-device
+> app assets. Each player commits **5 shots + 5 keeps (10 directions)**;
+> both play shooter and keeper an equal number of times, aligned with
+> real penalty-shootout rules. See §2 "V3 model" for the data shape and
+> scoring. There is **no V2 contract in the tree** — V2 was fully
+> replaced by the V3 migration (commit 7370c7f); the §2 "V2 reference"
+> and §7 "V2 → V3 migration" sections below are retained as historical
+> context only. The contract is **deployed dynamically per match at
+> runtime** (`MatchManager.deploy()`), not to a fixed static address.
 
 ---
 
@@ -152,9 +156,13 @@ might pick `shoots = [L, L, R, C, R]` and `keeps = [R, R, L, L, C]` —
 the contract reads each from its own array; one doesn't constrain the
 other.
 
-### V2 reference (current contract)
+### V2 reference (historical — superseded by V3)
 
-The on-chain contract is still V2:
+> **Historical only.** V2 no longer exists in the tree; V3 is the live
+> contract (commit 7370c7f replaced V2). Kept for context on why the
+> shape changed.
+
+V2 used a single dual-purpose array per player:
 
 ```compact
 struct BatchPreimage { c0, c1, c2, c3, c4 : Uint<8> }
@@ -249,16 +257,26 @@ decisive result is ~2. The protocol supports arbitrary SD batches.
 
 ## 3. Contract circuits (V3)
 
+> **Names reconciled to the live V3 contract (`penalty.compact`,
+> `managed/penalty/compiler/contract-info.json`).** V3 exposes exactly
+> 7 proof circuits (plus the constructor); the earlier draft used the
+> V2-era names `commitBatch`/`revealBatch`/`sdCommitBatch`/
+> `sdRevealAndResolve`/`claimPayout`, which no longer exist.
+
 | Circuit | When | Inputs (public) | Witnesses (private) | Effects |
 |---------|------|-----------------|--------------------|---------|
 | `constructor` | Deploy | — | — | `phase=WAITING`, P1=caller, deadline=now+1hr |
-| `joinMatch` | P2 joins | — | secretKey | Set P2, escrow stake, `phase→COMMITTING`, deadline=now+5min |
-| `commitBatch` | Each player, regulation | — | `shoots[5]` + `keeps[5]` + nonce | Store commitment hash of `RegulationBatch`, set committed flag. Auto-advances `phase→REVEALING` when both committed. |
-| `revealBatch` | Each player, regulation | — | `shoots[5]` + `keeps[5]` + nonce | Verify vs commitment, store revealed `shoots` & `keeps`. Last reveal auto-scores 10 rounds, sets winner or `phase→SD_COMMITTING`. |
-| `sdCommitBatch` | Each player, SD pairing | — | `shoot` + `keep` + nonce | Store SD-pairing commitment hash. Auto-advances `phase→SD_REVEALING` when both committed. |
-| `sdRevealAndResolve` | Each player, SD pairing | — | `shoot` + `keep` + nonce | Verify, last reveal scores the pairing. Decisive → `phase→COMPLETE`; tied → `phase→SD_COMMITTING` (next pairing). |
-| `claimTimeout` | Deadline passed (any non-WAITING, non-COMPLETE phase) | — | secretKey | Forfeit opponent, payout to caller |
-| `claimPayout` | COMPLETE phase | — | secretKey | Transfer stake to winner; draw → refund both |
+| `joinMatch` | P2 joins | `commitDeadlineSecs` | `localSecretKey` | Set P2, escrow stake, `phase→COMMITTING`, set deadline |
+| `commitRegulation` | Each player, regulation | — | `localShoots[5]` + `localKeeps[5]` + `localNonce` | Store commitment hash of `RegulationBatch`, set committed flag. Auto-advances `phase→REVEALING` when both committed. |
+| `revealRegulation` | Each player, regulation | — | `localShoots[5]` + `localKeeps[5]` + `localNonce` | Verify vs commitment, store revealed `shoots` & `keeps`. Last reveal auto-scores 10 rounds, sets winner or `phase→SD_COMMITTING`. |
+| `commitSuddenDeath` | Each player, SD pairing | — | `localSdShoot` + `localSdKeep` + `localNonce` | Store SD-pairing commitment hash. Auto-advances `phase→SD_REVEALING` when both committed. |
+| `revealSuddenDeath` | Each player, SD pairing | — | `localSdShoot` + `localSdKeep` + `localNonce` | Verify, last reveal scores the pairing. Decisive → `phase→COMPLETE`; tied → `phase→SD_COMMITTING` (next pairing). |
+| `claimTimeout` | Deadline passed (any non-WAITING, non-COMPLETE phase) | — | `localSecretKey` | Forfeit opponent → `phase→COMPLETE`, caller recorded as winner |
+| `cancelMatch` | WAITING, P1 only | — | `localSecretKey` | P1 cancels before P2 joins, reclaim stake → `phase→COMPLETE` |
+
+> **Payout:** V3 records `winner`/`isDraw` in ledger state on resolution;
+> there is no separate `claimPayout` circuit in this revision (the old
+> draft listed one). Escrow settlement is driven off that recorded result.
 
 ### Witness shape change from V2
 
@@ -282,7 +300,7 @@ Composable.
 [Menu]
   │  ┌────────────────────────────────────────────────────────┐
   │  │ Buttons (top-to-bottom):                                │
-  │  │   RESUME MATCH   ← only if KicksSessionStore has a row  │
+  │  │   RESUME MATCH   ← only if MatchStore has a saved row   │
   │  │   CREATE MATCH                                          │
   │  │   JOIN MATCH                                            │
   │  │   PRACTICE VS AI ← dev affordance, PvAI legacy path     │
@@ -290,7 +308,7 @@ Composable.
   │
   ├─ CREATE MATCH ────► [Creating(address=null)]
   │                       ↓ MatchManager.deployMatch()
-  │                       ↓ KicksSessionStore.save({addr, P1, deadline})
+  │                       ↓ MatchStore.save({addr, P1, deadline}) (encrypted)
   │                     [Creating(address=<hex64>)]
   │                       • QR encodes "midnight://kicks?match=<addr>"
   │                       • COPY button → clipboard
@@ -305,7 +323,7 @@ Composable.
   │                       • Text field accepts 64-char hex contract addr
   │                       • JOIN MATCH enabled when regex matches
   │                       ↓ MatchManager.joinAsP2(address)
-  │                       ↓ KicksSessionStore.save({addr, P2, deadline})
+  │                       ↓ MatchStore.save({addr, P2, deadline}) (encrypted)
   │                     [MatchReady(addr, P2)]
   │
   ├─ midnight://kicks?match=<addr> (deep link from QR or share)
@@ -355,12 +373,13 @@ REVEALING — i.e. either COMPLETE or SD_COMMITTING):
       (p1Shoots, p1Keeps, p2Shoots, p2Keeps, p1Score, p2Score). The
       contract preserves these across `resetRoundState()`, so they're
       readable even on the post-tie SD snapshot.
-    – Trigger: UnityBridge.sendReplay(rounds=regulationRounds,
+    – Trigger: UnityBridge.playReplayCinematic(rounds=regulationRounds,
         p1Score, p2Score, winner=null /* unknown until SD resolves */)
-        → Unity cinematic.
-    – Compose-only fallback (current prototype): MatchReplayOverlay
-      renders a row-by-row scoreboard above Unity's surface. Used until
-      the Unity cinematic exists.
+        → Unity 3D cinematic (ShotManager.PlayReplay — built).
+    – Compose overlay (live): MatchReplayOverlay now renders a live
+      broadcast scoreboard + per-kick GOAL!/SAVED! flashes *over* the
+      running Unity cinematic, then the result/celebration end screen.
+      (Was a stop-gap row-by-row scoreboard before the cinematic landed.)
     – Unity sends replayComplete → KicksActivity dispatches:
         · phase == COMPLETE (decisive regulation) → winner announce
           beat → claim payout
@@ -378,7 +397,7 @@ After every SD round reveal (similar shape):
   • If stalemate → "SUDDEN DEATH — ROUND N+1" beat → next SD choicePhase
 
 On final result (MatchState → Resolved):
-  • sessionStore.clear() if PvP (RESUME MATCH disappears from menu)
+  • MatchStore.delete() if PvP (RESUME MATCH disappears from menu)
   • Winner announce beat (full-screen, opaque) — score + winner + payout
     claim CTA. Surfaces only after the relevant replay has played, never
     before.
@@ -396,22 +415,32 @@ On final result (MatchState → Resolved):
 - **Pause / mid-match exit** — Unity pause button hard-kills the process
   (workaround for shared-process ANR); user relaunches from launcher.
   Proper polish item, see PLAN Phase 5.
-- **Regulation replay** — Unity cinematic per `sendReplay` not built. The
-  current prototype is a Compose-only row-by-row scoreboard
-  (MatchReplayOverlay) rendered above Unity's surface. Unity cinematic
-  is the eventual end state. **Required** for the SD-gate per the
-  "regulation replay before SD" rule — players must not learn about SD
-  until the replay plays.
-- **SD transition + winner announce beats** — full-screen "SUDDEN DEATH
-  — ROUND N" and "YOU WON / YOU LOST" overlays still missing. Today
-  the HUD badge label changes but there's no full-screen moment, so
-  the SD picker re-appearing reads as "the game restarted".
+- ✅ **Regulation replay** — DONE. The Unity 3D cinematic is built
+  (`ShotManager.PlayReplay`: run-up → kick → keeper dive → ball flight),
+  triggered via `UnityBridge.playReplayCinematic`. The Compose
+  `MatchReplayOverlay` now sits *over* the live cinematic — a
+  broadcast-style live scoreboard plus per-kick GOAL!/SAVED! flashes —
+  rather than the old Compose-only stop-gap scoreboard. Still honors the
+  SD-gate per the "regulation replay before SD" rule. Caveat: the
+  per-kick `roundResult` emit is a C# change that needs a Unity
+  re-export to be live on the shipped binary (degrades cleanly if the
+  binary predates it; PLAN Phase 5).
+- **SD transition beat** — the full-screen "SUDDEN DEATH — ROUND N"
+  moment is still missing. Today the HUD badge label changes but there's
+  no full-screen beat, so the SD picker re-appearing can read as "the
+  game restarted". (The "YOU WON / YOU LOST" verdict is now covered —
+  the result EndScreen renders a verdict badge; see "Result display"
+  below.)
 - **SD round replay** — single-pairing cinematic between each SD round.
   Same Compose-fallback approach as regulation replay.
-- **Result screen + leaderboard** — PLAN Phase 4 step "Results screen +
-  leaderboard query" still pending. Payout claim CTA also lives here.
-- **Result screen + leaderboard** — PLAN Phase 4 step "Results screen +
-  leaderboard query" still pending.
+- ✅ **Result display** — DONE (no separate screen by design). The
+  post-match result/celebration renders as a 2D Compose overlay
+  (`MatchReplayOverlay`: ResultHud/EndScreen — verdict badge, final
+  score, per-shot shoot-out recap, REMATCH/MENU) drawn over Unity off
+  `MatchState.Resolved`. The payout claim CTA lives here. PLAN Phase 4
+  records this as "No separate results screen needed."
+- **Leaderboard** — still pending. No leaderboard code exists anywhere;
+  deferred to v1.1 (PLAN Phase 4).
 - **QR scanner** — JoinMatchScreen accepts hex paste / deep link only.
   Google Code Scanner is PLAN Phase 5 polish.
 
@@ -558,9 +587,16 @@ UaaL renders Unity full-screen as an Android Activity. Communication via `UnityS
 
 ---
 
-## 7. V2 → V3 migration
+## 7. V2 → V3 migration ✅ DONE (historical)
 
-V3 is a contract revision. Implementation order:
+> **Completed.** This migration has landed — V3 is the only contract in
+> the tree (commit 7370c7f) and is wired end to end. The plan below is
+> kept verbatim as a record of the work; it is no longer a TODO. (Note:
+> the as-built V3 circuit names are `commitRegulation`/`revealRegulation`
+> /`commitSuddenDeath`/`revealSuddenDeath`/`cancelMatch`, not the
+> `commitBatch`/`revealBatch` names sketched below — see §3.)
+
+V3 is a contract revision. Implementation order (as executed):
 
 1. **Contract (`penalty.compact`)**
    - Replace `BatchPreimage { c0..c4 }` with `RegulationBatch { shoots[5], keeps[5] }`.
@@ -608,5 +644,7 @@ V3 is a contract revision. Implementation order:
    - Add V3 contract redeploy + migration as a Phase 4 follow-up (after
      the current two-emulator E2E lands on V2).
 
-The V3 work can be done in isolation on a branch — V2 stays the canonical
-shipping target until V3's contract is tested end-to-end.
+> **Outcome:** the migration shipped — V3 is now the canonical (and
+> only) contract; V2 has been fully replaced. The original plan noted
+> this work could be branch-isolated with V2 as the interim shipping
+> target; that interim is over.
