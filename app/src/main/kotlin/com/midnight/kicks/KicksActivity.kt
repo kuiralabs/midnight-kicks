@@ -1,6 +1,7 @@
 package com.midnight.kicks
 
 import android.content.Context
+import android.app.PendingIntent
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
@@ -1530,7 +1531,26 @@ class KicksActivity : FragmentActivity() {
      */
     private suspend fun <T> withMatchForeground(block: suspend () -> T): T {
         val sdk = sdkProvider.sdk.value ?: return block()
-        return sdk.runForegroundOperation(MATCH_OP_LABEL) { block() }
+        return sdk.runForegroundOperation(MATCH_OP_LABEL, contentIntent = matchReturnIntent()) { block() }
+    }
+
+    /**
+     * Tap target for the match notification: return the user to the Unity MATCH, not the
+     * launcher. KicksActivity is `singleTask`, so a plain launcher tap would clear the task
+     * down to the lobby (destroying KicksMatchActivity + cancelling the match coroutine →
+     * the shootout is lost). FLAG_ACTIVITY_REORDER_TO_FRONT brings the existing Unity match
+     * activity forward (resuming it), which wakes the replay overlay's foreground gate (#268)
+     * so the shootout plays. If the OS already reclaimed it, NEW_TASK relaunches it.
+     */
+    private fun matchReturnIntent(): PendingIntent {
+        val intent = Intent(this, KicksMatchActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_NEW_TASK)
+        return PendingIntent.getActivity(
+            this,
+            MATCH_RETURN_REQUEST,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
     }
 
     companion object {
@@ -1544,6 +1564,9 @@ class KicksActivity : FragmentActivity() {
          * (commit/reveal proving + submit) survive backgrounding.
          */
         private const val MATCH_OP_LABEL = "Match in progress…"
+
+        /** PendingIntent request code for the match-notification return target. */
+        private const val MATCH_RETURN_REQUEST = 0xC5
 
         /** How long to wait for KicksMatchActivity (Unity host) to come up before sending the first bridge message. */
         private const val UNITY_BOOT_DELAY_MS = 2_000L
