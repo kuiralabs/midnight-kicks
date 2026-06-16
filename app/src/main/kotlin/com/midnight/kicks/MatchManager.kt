@@ -158,6 +158,12 @@ open class MatchManager(
      * This is the single writer of the operation stage; per-circuit sub-stages
      * (proving/balancing) stay on the in-game HUD ([stageReporter]) where the live screen
      * shows them — the background notification speaks in match phases, not tx internals.
+     *
+     * SCOPE: currently applied to the PvAI paths ([playAgainstAi] / [resumeAgainstAi]). The
+     * live PvP orchestrators ([playAsP1]/[playAsP2]/[resumePlayAsP1]/[resumePlayAsP2]) still run
+     * under the tracked operation (process survival + the base label intact) but don't yet drive
+     * the phase suffix — extending the mirror to PvP (where [MatchState.labelFor] already has the
+     * P2-perspective "your turn" text) is a tracked follow-up.
      */
     private suspend fun <T> withMatchNotification(block: suspend () -> T): T = coroutineScope {
         val notifyJob = launch {
@@ -2122,6 +2128,12 @@ open class MatchManager(
     )
 
     fun close() {
+        // Release the match-duration session hold explicitly: close() bypasses the setState sink
+        // that normally manages it, so a mid-match teardown (activity destroyed while Unity plays)
+        // would otherwise leak the process-singleton hold and permanently defer every auto-lock —
+        // leaving the decrypted seed un-wiped. AutoCloseable.close() is idempotent.
+        matchSessionHold?.close()
+        matchSessionHold = null
         managerScope.cancel()  // stops StatePoller and any in-flight observers
         pollerJob = null
         // Only close the SDK if we built it (standalone). When it came from the

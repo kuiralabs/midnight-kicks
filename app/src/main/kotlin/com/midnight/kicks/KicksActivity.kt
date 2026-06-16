@@ -221,8 +221,10 @@ class KicksActivity : FragmentActivity() {
      */
     private var replayAutoAdvanceJob: Job? = null
 
-    // POST_NOTIFICATIONS for the dust-sync Live Update (#235). Best-effort: if the
-    // user denies, the background sync still runs — just without a visible notification.
+    // POST_NOTIFICATIONS for the wallet foreground-operation + alert notifications (#261-264):
+    // ongoing match/sync progress, the completion push, and received-funds / "your turn" alerts.
+    // Best-effort: if the user denies, operations and sync still run — just without the visible
+    // notifications.
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best-effort */ }
 
@@ -1640,11 +1642,12 @@ class KicksActivity : FragmentActivity() {
 
         /**
          * Base label for the match foreground operation. Host-owned text (the SDK emits
-         * none). A NEUTRAL noun, not a status: the live phase is appended by the SDK as the
-         * operation stage (driven by the match state machine in
+         * none). A NEUTRAL noun, not a status: for PvAI the live phase is appended by the SDK as
+         * the operation stage (driven by the match state machine in
          * `MatchManager.withMatchNotification`), so the ongoing notification reads
          * "Penalty match · Sudden death round 2", and the dismissible completion push reads
-         * "Penalty match / Done" (or "/ Failed") — the same noun working in both places.
+         * "Penalty match / Done" (or "/ Failed") — the same noun working in both places. (PvP
+         * keeps the base label without the phase suffix today — see `withMatchNotification`.)
          *
          * Keeping the match wrapped in this operation makes the wallet's foreground service
          * come up while THIS activity is foreground, before the match hands off to Unity and
