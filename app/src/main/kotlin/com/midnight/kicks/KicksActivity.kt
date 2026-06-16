@@ -61,6 +61,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -1121,13 +1122,28 @@ class KicksActivity : FragmentActivity() {
             statusMessage.value = "Sudden death — round $round"
             MatchHud.showPicker(roles = roles, title = "Sudden death — round $round")
         }
-        return try {
-            deferred.await()
-        } finally {
-            // Clear regardless of outcome (complete / cancel / exception)
-            // so a stale deferred doesn't intercept the next regulation
-            // choicesLocked.
-            if (pendingSdPicks === deferred) pendingSdPicks = null
+        return coroutineScope {
+            // "Your turn" nudge (#264 inbound): the on-chain SD round can settle while the
+            // player is away, and SD picks happen in the Unity scene — so if no pick arrives
+            // promptly, summon them back with a heads-up. Launched as a child of THIS match op
+            // (inherits its context marker), so requestAttention tags the alert with the op's
+            // return-to-Unity intent; the SDK suppresses it if they're actually still looking.
+            // Cancelled the instant the pick lands, so an attentive player mid-pick never buzzes.
+            val nudge = launch {
+                delay(SD_NUDGE_DELAY_MS)
+                sdkProvider.sdk.value?.requestAttention(
+                    title = "Sudden death — round $round",
+                    body = "Your kick is waiting — tap to take it.",
+                )
+            }
+            try {
+                deferred.await()
+            } finally {
+                nudge.cancel()
+                // Clear regardless of outcome (complete / cancel / exception) so a stale
+                // deferred doesn't intercept the next regulation choicesLocked.
+                if (pendingSdPicks === deferred) pendingSdPicks = null
+            }
         }
     }
 
@@ -1625,6 +1641,14 @@ class KicksActivity : FragmentActivity() {
 
         /** How long to wait for KicksMatchActivity (Unity host) to come up before sending the first bridge message. */
         private const val UNITY_BOOT_DELAY_MS = 2_000L
+
+        /**
+         * Grace before a sudden-death pick that hasn't arrived fires a "your turn" heads-up
+         * (#264 inbound). Long enough that an attentive player picking in the Unity scene is
+         * never buzzed (the nudge is cancelled on their pick); short enough that a player who
+         * wandered off while the round settled gets summoned back promptly.
+         */
+        private const val SD_NUDGE_DELAY_MS = 12_000L
 
         /**
          * After a replay cinematic finishes, how long to wait for the user to
