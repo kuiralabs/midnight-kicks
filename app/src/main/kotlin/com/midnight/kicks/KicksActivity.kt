@@ -681,7 +681,9 @@ class KicksActivity : FragmentActivity() {
             lifecycleScope.launch {
                 try {
                     val manager = matchManager ?: return@launch
-                    withMatchForeground { manager.joinAsP2(address, isResume = isResume) }
+                    // Joining is a PRELUDE, not a finish — keep the process alive but fire NO
+                    // "done" push (the match's real completion comes from the gameplay op).
+                    withMatchForeground(notifyOnFinish = false) { manager.joinAsP2(address, isResume = isResume) }
                     Log.i(TAG, "Joined as P2: $address")
                     // MatchManager.joinAsP2 already saved the match
                     // record to [store]. Refresh the affordance flag +
@@ -1529,9 +1531,16 @@ class KicksActivity : FragmentActivity() {
      * is what keeps the process + its network alive through the match. Falls back to a
      * plain call if the SDK isn't built yet (degrades to per-call best-effort).
      */
-    private suspend fun <T> withMatchForeground(block: suspend () -> T): T {
+    private suspend fun <T> withMatchForeground(
+        notifyOnFinish: Boolean = true,
+        block: suspend () -> T,
+    ): T {
         val sdk = sdkProvider.sdk.value ?: return block()
-        return sdk.runForegroundOperation(MATCH_OP_LABEL, contentIntent = matchReturnIntent()) { block() }
+        return sdk.runForegroundOperation(
+            MATCH_OP_LABEL,
+            contentIntent = matchReturnIntent(),
+            notifyOnFinish = notifyOnFinish,
+        ) { block() }
     }
 
     /**
