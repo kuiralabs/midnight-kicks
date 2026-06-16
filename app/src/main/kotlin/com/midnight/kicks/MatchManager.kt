@@ -13,6 +13,8 @@ import com.midnight.kuira.core.compact.proving.ProvingKeyManager
 import com.midnight.kuira.core.network.MidnightNetwork
 import com.midnight.kuira.sdk.MidnightSdk
 import com.midnight.kuira.sdk.walletruntime.MidnightSdkProvider
+import com.midnight.kuira.sdk.walletruntime.SessionLock
+import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -124,6 +126,49 @@ open class MatchManager(
                 "SDK not ready — provider has no live SDK (network switch in flight?)"
             }
         } ?: requireNotNull(sdk) { "SDK not initialized — call initSdk first" }
+
+    /**
+     * Session lock, resolved lazily (null in non-Hilt / test hosts). #235 fix:
+     * hold off the auto-lock while an on-chain op runs, so backgrounding mid-match
+     * (Unity goes foreground → this main process is stopped → background grace
+     * expires) can't call `provider.close()` out from under a commit and crash it
+     * with "SDK not ready". Manual "lock now" is unaffected.
+     */
+    private val sessionLock: SessionLock? by lazy {
+        runCatching {
+            EntryPointAccessors.fromApplication(
+                context.applicationContext,
+                SessionLock.SessionLockEntryPoint::class.java,
+            ).sessionLock()
+        }.getOrNull()
+    }
+
+    /** Run [block] with the session lock held off (no-op if no lock is available). */
+    private suspend fun <T> holdingSession(block: suspend () -> T): T =
+        sessionLock?.withHold { block() } ?: block()
+
+    // Match-duration session hold (#251/#235 fix). A per-op hold only protects an
+    // op already in flight; it can't help one that STARTS after the SDK was already
+    // dropped. During a Kicks match the main process is backgrounded (Unity is
+    // foreground), so the idle/background auto-lock fires DURING gameplay and closes
+    // the SDK — then submitP1Picks runs and finds it gone ("SDK not ready"). So we
+    // hold the session open for the ENTIRE active match (acquire on the first active
+    // state, release on Idle/Resolved/Failed), keeping the SDK alive until the match
+    // ends. Managed at the single setState sink so it can't leak.
+    private var matchSessionHold: AutoCloseable? = null
+
+    private fun updateMatchSessionHold(state: MatchState) {
+        val activeMatch = state !is MatchState.Idle &&
+            state !is MatchState.InitializingSdk &&
+            state !is MatchState.Resolved &&
+            state !is MatchState.Failed
+        if (activeMatch && matchSessionHold == null) {
+            matchSessionHold = sessionLock?.acquireHold()
+        } else if (!activeMatch && matchSessionHold != null) {
+            matchSessionHold?.close()
+            matchSessionHold = null
+        }
+    }
 
     /**
      * Scope owning the poll-loop coroutine. SupervisorJob so a poller crash
@@ -692,11 +737,11 @@ open class MatchManager(
      * Tests override to return a stub address without standing up the
      * SDK or hitting a chain.
      */
-    internal open suspend fun executeDeploy(secretKey: ByteArray): String {
+    internal open suspend fun executeDeploy(secretKey: ByteArray): String = holdingSession {
         val verifierKeys = loadVerifierKeys()
         val contract = createContractHandle(secretKey, address = null, verifierKeys = verifierKeys)
         val deploy = contract.deploy(onProgress = stageReporter("deploy"))
-        return deploy.contractAddress
+        deploy.contractAddress
     }
 
     /**
@@ -1692,34 +1737,69 @@ open class MatchManager(
         playerKeeps: IntArray,
         getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
     ): MatchResult {
-        val aiShoots = generateAiPicks()
-        val aiKeeps  = generateAiPicks()
-        Log.i(TAG, "AI shoots: ${aiShoots.map(::dirLabel)}")
-        Log.i(TAG, "AI keeps:  ${aiKeeps.map(::dirLabel)}")
-
         if (state.value is MatchState.Idle) initSdk()
         deployMatch()
         aiJoin()
-        submitP1Picks(playerShoots, playerKeeps)
-        submitP2Picks(aiShoots, aiKeeps)
-        revealP1()
-        var result: MatchResult? = revealP2()
-        // Sudden-death loop — repeats until decisive. The AI uses fresh
-        // random L/C/R picks each round; the human's picks come from
-        // [getSdPicks], which the caller wires to its choice UI
-        // (KicksActivity sends a Unity SD `choicePhase` and suspends on
-        // the returned `choicesLocked`).
-        while (result == null) {
-            val round = currentSdRoundOrError()
-            val (pShoot, pKeep) = getSdPicks(round)
-            val aiShoot = random.nextInt(DIRECTION_COUNT)
-            val aiKeep  = random.nextInt(DIRECTION_COUNT)
-            submitP1SdPick(pShoot, pKeep)
-            submitP2SdPick(aiShoot, aiKeep)
-            revealP1Sd()
-            result = revealP2Sd()
+        return runAiSaga(playerShoots, playerKeeps, getSdPicks)
+    }
+
+    /**
+     * The PvAI match as a durable [MidnightSdk.runProtocol] saga (#253): the whole local
+     * sequence (player + AI commits, reveals, sudden-death rounds) runs as ONE foreground
+     * operation, so a player can start the match and leave — it finishes in the background
+     * with one progress notification + a finalization push, instead of dying when the app
+     * is backgrounded. Each step is gated on the chain-derived [MatchState.protocolRank]
+     * (`doneWhen`), so re-running after process death skips every already-landed step and
+     * resumes from the first not-done one — the ledger is the journal, no double-submit.
+     * This unifies the former fresh ([playAgainstAi]) and resume ([resumeAgainstAi]) paths
+     * into one definition.
+     */
+    private suspend fun runAiSaga(
+        playerShoots: IntArray,
+        playerKeeps: IntArray,
+        getSdPicks: suspend (round: Int) -> Pair<Int, Int>,
+    ): MatchResult {
+        val matchId = state.value.address ?: error("runAiSaga: no active match address")
+        val aiShoots = generateAiPicks()
+        val aiKeeps = generateAiPicks()
+        Log.i(TAG, "AI shoots: ${aiShoots.map(::dirLabel)}")
+        Log.i(TAG, "AI keeps:  ${aiKeeps.map(::dirLabel)}")
+
+        var result: MatchResult? = null
+        requireSdk.runProtocol(id = "$AI_PROTOCOL_PREFIX$matchId", label = AI_MATCH_OP_LABEL) {
+            step("p1-commit", doneWhen = { state.value.protocolRank >= PhaseRank.P1_COMMITTED }) {
+                submitP1Picks(playerShoots, playerKeeps)
+            }
+            step("p2-commit", doneWhen = { state.value.protocolRank >= PhaseRank.BOTH_COMMITTED }) {
+                submitP2Picks(aiShoots, aiKeeps)
+            }
+            step("p1-reveal", doneWhen = { state.value.protocolRank >= PhaseRank.P1_REVEALED }) {
+                revealP1()
+            }
+            step("p2-reveal", doneWhen = { state.value is MatchState.Resolved || state.value is MatchState.SdRoundOpen }) {
+                result = revealP2()
+            }
+            // Sudden death — driven locally for both sides, round by round, until decisive.
+            while (result == null && state.value !is MatchState.Resolved) {
+                val round = currentSdRoundOrError()
+                step("p1-sd$round", doneWhen = { state.value.protocolRank >= PhaseRank.sdP1CommittedAt(round) }) {
+                    val (pShoot, pKeep) = getSdPicks(round)
+                    submitP1SdPick(pShoot, pKeep)
+                }
+                step("p2-sd$round", doneWhen = { state.value.protocolRank >= PhaseRank.sdBothCommittedAt(round) }) {
+                    submitP2SdPick(random.nextInt(DIRECTION_COUNT), random.nextInt(DIRECTION_COUNT))
+                }
+                step("p1-sdreveal$round", doneWhen = { state.value.protocolRank >= PhaseRank.sdP1RevealedAt(round) }) {
+                    revealP1Sd()
+                }
+                step("p2-sdreveal$round", doneWhen = { state.value.protocolRank > PhaseRank.sdP1RevealedAt(round) }) {
+                    result = revealP2Sd()
+                }
+            }
         }
-        return result
+        // On a resume where the closing reveal already landed, every step was skipped and
+        // `result` is null — read the resolved result straight from the chain.
+        return result ?: buildMatchResult(matchId)
     }
 
     /**
@@ -1931,40 +2011,11 @@ open class MatchManager(
             )
         }
         Log.i(TAG, "resumeAgainstAi: starting from ${current::class.simpleName}")
-
-        // Regulation — each `if` re-reads state.value so we fall through.
-        if (state.value is MatchState.P1Committed) {
-            // P1 committed, AI hasn't (else the chain state would be further on).
-            // Fresh AI picks are valid — nothing of the AI's is on chain yet.
-            submitP2Picks(generateAiPicks(), generateAiPicks())
-        }
-        if (state.value is MatchState.BothCommitted) revealP1()
-        // The reported hang: P1 revealed, AI hadn't — DRIVE the AI's reveal with
-        // its rehydrated key/picks/nonce (revealP2), instead of waitForP2Revealed.
-        var result: MatchResult? =
-            if (state.value is MatchState.P1Revealed) revealP2() else null
-
-        // Sudden-death — drive both sides locally, same shape as playAgainstAi.
-        while (result == null) {
-            val round = currentSdRoundOrError()
-            if (state.value is MatchState.SdRoundOpen) {
-                val (pShoot, pKeep) = getSdPicks(round)
-                submitP1SdPick(pShoot, pKeep)
-            }
-            if (state.value is MatchState.P1SdCommitted) {
-                // AI hasn't committed this SD round yet → fresh random pick.
-                submitP2SdPick(random.nextInt(DIRECTION_COUNT), random.nextInt(DIRECTION_COUNT))
-            }
-            if (state.value is MatchState.BothSdCommitted) revealP1Sd()
-            if (state.value is MatchState.P1SdRevealed) {
-                result = revealP2Sd()
-            } else {
-                throw IllegalStateException(
-                    "resumeAgainstAi SD loop stalled at ${state.value::class.simpleName} for round $round",
-                )
-            }
-        }
-        return result
+        // P1's picks are already committed on chain (rehydrated witnesses cover the
+        // reveal); [runAiSaga]'s doneWhen gates skip every already-landed step, so the
+        // placeholder picks for the (skipped) p1-commit step are never used. The shared
+        // saga drives the AI's not-yet-landed commits/reveals forward exactly as before.
+        return runAiSaga(p1Shoots ?: IntArray(0), p1Keeps ?: IntArray(0), getSdPicks)
     }
 
     /**
@@ -2189,6 +2240,8 @@ open class MatchManager(
     private fun setState(newState: MatchState) {
         val prev = _state.value
         _state.value = newState
+        // Hold the session open while a match is live; release on terminal/idle.
+        updateMatchSessionHold(newState)
         // Log uses the role-aware label so logcat reads as what the
         // user actually saw on screen — same string the HUD publishes.
         val displayedLabel = newState.labelFor(localRole)
@@ -2448,7 +2501,7 @@ open class MatchManager(
         address: String,
         circuitName: String,
         args: Array<Any?> = emptyArray(),
-    ) {
+    ) = holdingSession {
         val contract = createContractHandle(secretKey, address)
         contract.call(circuitName, *args, onProgress = stageReporter(circuitName))
     }
@@ -2459,7 +2512,7 @@ open class MatchManager(
         shoots: IntArray,
         keeps: IntArray,
         nonce: ByteArray,
-    ) {
+    ) = holdingSession {
         val contract = createContractHandle(
             secretKey, address, shoots = shoots, keeps = keeps, nonce = nonce,
         )
@@ -2472,7 +2525,7 @@ open class MatchManager(
         shoots: IntArray,
         keeps: IntArray,
         nonce: ByteArray,
-    ) {
+    ) = holdingSession {
         val contract = createContractHandle(
             secretKey, address, shoots = shoots, keeps = keeps, nonce = nonce,
         )
@@ -2485,7 +2538,7 @@ open class MatchManager(
         sdShoot: Int,
         sdKeep: Int,
         nonce: ByteArray,
-    ) {
+    ) = holdingSession {
         val contract = createContractHandle(
             secretKey, address, sdShoot = sdShoot, sdKeep = sdKeep, nonce = nonce,
         )
@@ -2498,7 +2551,7 @@ open class MatchManager(
         sdShoot: Int,
         sdKeep: Int,
         nonce: ByteArray,
-    ) {
+    ) = holdingSession {
         val contract = createContractHandle(
             secretKey, address, sdShoot = sdShoot, sdKeep = sdKeep, nonce = nonce,
         )
@@ -2516,13 +2569,18 @@ open class MatchManager(
      * multiple operations and we want to know which circuit emitted a
      * stage in the logs.
      */
-    private fun stageReporter(circuitName: String): (ContractCallStage) -> Unit = { stage ->
+    private fun stageReporter(circuitName: String): suspend (ContractCallStage) -> Unit = { stage ->
         Log.d(TAG, "$circuitName: ${stage.javaClass.simpleName}")
         MatchHud.publishSecondary(
             stage.defaultLabel(),
             stage.progressFraction(),
             submissionAccentArgb(circuitName),
         )
+        // Drive the wallet foreground-service notification + status-bar chip with the live
+        // match state (e.g. "Match in progress · Finalizing", chip "Kuira · Finalizing") so a
+        // backgrounded user sees what's happening, not just "ongoing". `defaultLabel()` is the
+        // same friendly text the HUD shows. No-op unless inside a tracked operation.
+        sdkProvider?.sdk?.value?.updateOperationStage(stage.defaultLabel())
     }
 
     /**
@@ -2687,6 +2745,12 @@ open class MatchManager(
         /** Retry budget for indexer-not-ready errors when joining. */
         private const val JOIN_RETRY_LIMIT = 10
         private const val JOIN_RETRY_DELAY_MS = 2_000L
+
+        /** Stable per-match id prefix for the PvAI [MidnightSdk.runProtocol] saga (#253). */
+        private const val AI_PROTOCOL_PREFIX = "kicks-ai-"
+
+        /** Host-owned notification label for the PvAI match operation (the SDK emits no text). */
+        private const val AI_MATCH_OP_LABEL = "Playing your match…"
 
         /**
          * How long a single opponent-wait polls before giving up. This is a

@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.FragmentActivity
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -50,7 +51,10 @@ import com.midnight.kuira.dapp.PanelBar
 import com.midnight.kuira.core.identity.backup.SigilRequiredException
 import com.midnight.kuira.core.network.MidnightNetwork
 import com.midnight.kuira.core.identity.sigil.SigilStateStore
+import com.midnight.kuira.sdk.walletruntime.DustSyncNotifications
 import com.midnight.kuira.sdk.walletruntime.MidnightSdkProvider
+import com.midnight.kuira.dapp.lock.SessionLockGate
+import com.midnight.kuira.sdk.walletruntime.SessionLock
 import com.midnight.kuira.sdk.walletruntime.WalletConfig
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -133,6 +137,9 @@ class KicksActivity : FragmentActivity() {
      */
     @Inject lateinit var sdkProvider: MidnightSdkProvider
 
+    /** Session auto-lock (#14) — onUserInteraction resets its foreground idle timer. */
+    @Inject lateinit var sessionLock: SessionLock
+
     /** Used to gate create/join on a forged sigil — without one, the wallet
      *  bootstrap can't run and the flow would otherwise hang on a spinner. */
     @Inject lateinit var sigilStateStore: SigilStateStore
@@ -197,6 +204,11 @@ class KicksActivity : FragmentActivity() {
      */
     private var replayAutoAdvanceJob: Job? = null
 
+    // POST_NOTIFICATIONS for the dust-sync Live Update (#235). Best-effort: if the
+    // user denies, the background sync still runs — just without a visible notification.
+    private val notifPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best-effort */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Edge-to-edge per Android HIG: the menu's stadium backdrop draws behind
         // the system bars while content claims the safe area via window insets
@@ -204,6 +216,10 @@ class KicksActivity : FragmentActivity() {
         // older versions match.
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+
+        if (DustSyncNotifications.shouldRequest(this)) {
+            notifPermission.launch(DustSyncNotifications.PERMISSION)
+        }
 
         // Register for Unity bridge messages. Post-split these arrive relayed
         // from :unity via MatchBridge → mainInbox → UnityBridge.onMessageFromUnity,
@@ -226,6 +242,11 @@ class KicksActivity : FragmentActivity() {
         handleDeepLink(intent)
 
         setContent {
+            // Whole-app session lock (#14): gate the entire menu surface — the
+            // wallet pill + sigil live here. The Unity match (KicksMatchActivity)
+            // is a separate process and a GameActivity (not a FragmentActivity, so
+            // it can't host the unlock biometric); it is intentionally not gated.
+            SessionLockGate {
             // Adaptive WindowSizeClass for the whole UI tree; recomputes on
             // rotation (observes Configuration) under this activity's configChanges.
             ProvideWindowSizeClass(this@KicksActivity) {
@@ -369,6 +390,7 @@ class KicksActivity : FragmentActivity() {
                 )
             }
             } // ProvideWindowSizeClass
+            } // SessionLockGate
         }
     }
 
@@ -658,7 +680,7 @@ class KicksActivity : FragmentActivity() {
             lifecycleScope.launch {
                 try {
                     val manager = matchManager ?: return@launch
-                    manager.joinAsP2(address, isResume = isResume)
+                    withMatchForeground { manager.joinAsP2(address, isResume = isResume) }
                     Log.i(TAG, "Joined as P2: $address")
                     // MatchManager.joinAsP2 already saved the match
                     // record to [store]. Refresh the affordance flag +
@@ -697,6 +719,12 @@ class KicksActivity : FragmentActivity() {
                 }
             }
         }
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        // Reset the session idle-lock timer on any touch (#14).
+        sessionLock.onUserActivity()
     }
 
     override fun onResume() {
@@ -1270,10 +1298,12 @@ class KicksActivity : FragmentActivity() {
                 val (shoots, keeps) = bucketRolePicks(choiceList.toIntArray(), currentChoiceRoles)
                 Log.i(TAG, "choicesLocked-OUT: shoots=${shoots.toList()} keeps=${keeps.toList()}")
 
-                val result = when (currentRole) {
-                    null -> manager.playAgainstAi(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
-                    Player.P1 -> manager.playAsP1(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
-                    Player.P2 -> manager.playAsP2(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
+                val result = withMatchForeground {
+                    when (currentRole) {
+                        null -> manager.playAgainstAi(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
+                        Player.P1 -> manager.playAsP1(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
+                        Player.P2 -> manager.playAsP2(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
+                    }
                 }
                 handleMatchResult(result, deviceLabels = labels)
             } catch (e: CancellationException) {
@@ -1397,12 +1427,14 @@ class KicksActivity : FragmentActivity() {
                     return@launch
                 }
                 try {
-                    val result = when {
-                        // PvAI (role is P1 but the AI is local) — drive both
-                        // sides, don't wait for a non-existent remote P2.
-                        manager.isVsAi -> manager.resumeAgainstAi(getSdPicks = ::gatherSdPicksFromUi)
-                        role == Player.P1 -> manager.resumePlayAsP1(getSdPicks = ::gatherSdPicksFromUi)
-                        else -> manager.resumePlayAsP2(getSdPicks = ::gatherSdPicksFromUi)
+                    val result = withMatchForeground {
+                        when {
+                            // PvAI (role is P1 but the AI is local) — drive both
+                            // sides, don't wait for a non-existent remote P2.
+                            manager.isVsAi -> manager.resumeAgainstAi(getSdPicks = ::gatherSdPicksFromUi)
+                            role == Player.P1 -> manager.resumePlayAsP1(getSdPicks = ::gatherSdPicksFromUi)
+                            else -> manager.resumePlayAsP2(getSdPicks = ::gatherSdPicksFromUi)
+                        }
                     }
                     // Device's own pick labels for the bottom-of-screen
                     // recap — read from the rehydrated picks in result.
@@ -1488,8 +1520,30 @@ class KicksActivity : FragmentActivity() {
         }
     }
 
+    /**
+     * Run a match-orchestration [block] as a foreground operation so the wallet's
+     * foreground service starts WHILE this (foreground) activity initiates the match —
+     * before it hands off to Unity and backgrounds the main process. Android 12+ can't
+     * start a foreground service from the background, so starting it here (foreground)
+     * is what keeps the process + its network alive through the match. Falls back to a
+     * plain call if the SDK isn't built yet (degrades to per-call best-effort).
+     */
+    private suspend fun <T> withMatchForeground(block: suspend () -> T): T {
+        val sdk = sdkProvider.sdk.value ?: return block()
+        return sdk.runForegroundOperation(MATCH_OP_LABEL) { block() }
+    }
+
     companion object {
         private const val TAG = "Kicks"
+
+        /**
+         * Notification label for the match foreground operation. Host-owned text (the SDK
+         * emits none). Keeping the match wrapped in this operation makes the wallet's
+         * foreground service come up while THIS activity is foreground, before the match
+         * hands off to Unity and backgrounds the main process — so the on-chain steps
+         * (commit/reveal proving + submit) survive backgrounding.
+         */
+        private const val MATCH_OP_LABEL = "Match in progress…"
 
         /** How long to wait for KicksMatchActivity (Unity host) to come up before sending the first bridge message. */
         private const val UNITY_BOOT_DELAY_MS = 2_000L
