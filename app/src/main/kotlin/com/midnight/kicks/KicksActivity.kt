@@ -94,6 +94,10 @@ class KicksActivity : FragmentActivity() {
     // setContent { } block switches on it.
     private val screen = mutableStateOf<KicksScreen>(KicksScreen.Menu)
 
+    // Bumped by [handleWalletShortcut] when a "received NIGHT" notification is tapped, to pop
+    // the wallet panel open on the menu (the pill's home). A counter so each tap re-opens.
+    private val walletOpenSignal = mutableStateOf(0)
+
     // Cold-start Kuira Labs brand splash. Shown once (this field is set false
     // when the splash finishes; it isn't reset on return-from-match, since the
     // activity isn't recreated then). Gates the lobby music too — see onResume.
@@ -253,6 +257,7 @@ class KicksActivity : FragmentActivity() {
         playerProfile.value = PlayerProfileStore.load(this)
 
         handleDeepLink(intent)
+        handleWalletShortcut(intent)
 
         setContent {
             // Whole-app session lock (#14): gate the entire menu surface — the
@@ -276,6 +281,7 @@ class KicksActivity : FragmentActivity() {
                     lastChoices = lastChoices.value,
                     hasActiveSession = hasActiveSession.value,
                     network = NetworkPref.load(this),
+                    openWalletSignal = walletOpenSignal.value,
                     onNetworkChange = { NetworkPref.save(this, it) },
                     onCreateMatch = {
                         clearMenuStatus()
@@ -410,6 +416,7 @@ class KicksActivity : FragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleDeepLink(intent)
+        handleWalletShortcut(intent)
     }
 
     /**
@@ -1560,6 +1567,19 @@ class KicksActivity : FragmentActivity() {
      * Called from both `onCreate` (cold start via tap) and `onNewIntent`
      * (warm hit when the activity is already foreground).
      */
+    /**
+     * Received-funds shortcut: a "received N NIGHT" alert taps here (carrying
+     * [EXTRA_SHOW_WALLET]). Land on the menu — the wallet pill's home — and bump
+     * [walletOpenSignal] so the panel pops open. The alert only fires while idle + backgrounded
+     * (the SDK suppresses it during an op / when foreground), so interrupting to the menu is safe.
+     */
+    private fun handleWalletShortcut(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_SHOW_WALLET, false) == true) {
+            screen.value = KicksScreen.Menu
+            walletOpenSignal.value += 1
+        }
+    }
+
     private fun handleDeepLink(intent: Intent?) {
         val uri = intent?.data ?: return
         if (uri.scheme == "midnight" && uri.host == "kicks") {
@@ -1639,6 +1659,9 @@ class KicksActivity : FragmentActivity() {
         /** PendingIntent request code for the match-notification return target. */
         private const val MATCH_RETURN_REQUEST = 0xC5
 
+        /** Intent extra (set by [KicksApplication]'s received-funds tap target) → open the wallet panel. */
+        const val EXTRA_SHOW_WALLET = "com.midnight.kicks.SHOW_WALLET"
+
         /** How long to wait for KicksMatchActivity (Unity host) to come up before sending the first bridge message. */
         private const val UNITY_BOOT_DELAY_MS = 2_000L
 
@@ -1700,6 +1723,7 @@ fun KicksApp(
     onResumeMatch: () -> Unit,
     onQuickPractice: () -> Unit,
     onPracticeVsAi: () -> Unit,
+    openWalletSignal: Int = 0,
 ) {
     // Landscape (short height): scroll the menu + tighten spacers so every button
     // stays reachable; portrait keeps the centered layout.
@@ -1750,7 +1774,7 @@ fun KicksApp(
             // PanelBar already clears the status bar; the content below only
             // needs the side + bottom safe insets (landscape nav bar / cutout).
             Column(modifier = Modifier.fillMaxSize()) {
-                PanelBar(network = network, onNetworkChange = onNetworkChange)
+                PanelBar(network = network, onNetworkChange = onNetworkChange, openWalletSignal = openWalletSignal)
 
                 val contentInsets = Modifier.windowInsetsPadding(
                     WindowInsets.safeDrawing.only(
