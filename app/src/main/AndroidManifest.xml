@@ -13,10 +13,12 @@
         android:name=".KicksApplication"
         android:allowBackup="false"
         android:appCategory="social"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="Midnight Kicks"
         android:supportsRtl="true"
         android:theme="@style/Theme.MidnightKicks"
-        tools:replace="android:appCategory">
+        tools:replace="android:appCategory,android:icon,android:roundIcon">
 
         <!-- Our Kotlin launcher activity -->
         <activity
