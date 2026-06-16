@@ -16,6 +16,11 @@ node_modules/
 dist/
 contract/src/managed/
 contract/midnight-level-db/
+# Wallet proving keys (#256) — downloaded + staged by provisionWalletKeys when
+# bundleWalletKeys is on. ~33MB of regenerable bytes — sourced, not stored
+# (unlike the small contract keys under assets/keys/, which ARE tracked here
+# because the contract source above is gitignored).
+app/src/main/assets/wallet-keys/
 
 # Unity generated (only Assets/, Packages/, ProjectSettings/ are source)
 unity/Library/

@@ -11,3 +11,6 @@ plugins {
     id 'com.google.dagger.hilt.android' version '2.58' apply false
     id 'com.google.devtools.ksp' version '2.3.6' apply false
 }
+
+// Localnet adb-reverse on physical-device installs is provided by the SDK's
+// `io.github.kuiralabs.localnet` plugin, applied in app/build.gradle.kts.
