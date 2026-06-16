@@ -681,9 +681,13 @@ class KicksActivity : FragmentActivity() {
             lifecycleScope.launch {
                 try {
                     val manager = matchManager ?: return@launch
-                    // Joining is a PRELUDE, not a finish — keep the process alive but fire NO
-                    // "done" push (the match's real completion comes from the gameplay op).
-                    withMatchForeground(notifyOnFinish = false) { manager.joinAsP2(address, isResume = isResume) }
+                    // Joining is the START of play, not the match's end — its completion push
+                    // says "Joined the match" (not the misleading "Penalty match / Done") and
+                    // taps back to the APP to take kicks. The match's real "done" still comes
+                    // from the gameplay operation.
+                    withMatchForeground(completionLabel = JOIN_DONE_LABEL, returnToMatch = false) {
+                        manager.joinAsP2(address, isResume = isResume)
+                    }
                     Log.i(TAG, "Joined as P2: $address")
                     // MatchManager.joinAsP2 already saved the match
                     // record to [store]. Refresh the affordance flag +
@@ -1532,14 +1536,18 @@ class KicksActivity : FragmentActivity() {
      * plain call if the SDK isn't built yet (degrades to per-call best-effort).
      */
     private suspend fun <T> withMatchForeground(
-        notifyOnFinish: Boolean = true,
+        completionLabel: String? = null,
+        returnToMatch: Boolean = true,
         block: suspend () -> T,
     ): T {
         val sdk = sdkProvider.sdk.value ?: return block()
         return sdk.runForegroundOperation(
             MATCH_OP_LABEL,
-            contentIntent = matchReturnIntent(),
-            notifyOnFinish = notifyOnFinish,
+            completionLabel = completionLabel,
+            // Gameplay returns to the Unity match so the shootout plays (#268); a JOIN returns
+            // to the APP (lobby/MatchReady to pick) since the Unity match isn't running yet —
+            // a Unity content-intent would cold-launch it into a non-playable state.
+            contentIntent = if (returnToMatch) matchReturnIntent() else null,
         ) { block() }
     }
 
@@ -1579,6 +1587,9 @@ class KicksActivity : FragmentActivity() {
          * submit) survive backgrounding.
          */
         private const val MATCH_OP_LABEL = "Penalty match"
+
+        /** Completion-push title for a successful JOIN — accurate "joined", not the match's "done". */
+        private const val JOIN_DONE_LABEL = "Joined the match"
 
         /** PendingIntent request code for the match-notification return target. */
         private const val MATCH_RETURN_REQUEST = 0xC5
