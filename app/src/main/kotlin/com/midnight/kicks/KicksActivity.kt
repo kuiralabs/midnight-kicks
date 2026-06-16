@@ -187,6 +187,17 @@ class KicksActivity : FragmentActivity() {
     private var pendingSdPicks: CompletableDeferred<Pair<Int, Int>>? = null
 
     /**
+     * When non-null, a match operation is already running (started in
+     * [launchUnityChoicePhase] while THIS activity was foreground, so its foreground
+     * service could come up — Android 12+ forbids starting one once we've handed to the
+     * Unity process). It's parked on this deferred awaiting the player's regulation picks;
+     * [handleChoicesLocked] completes it (instead of launching a fresh orchestrator) so the
+     * SAME operation runs the gameplay, keeping the live notification + process alive across
+     * backgrounding. Mirrors [pendingSdPicks]. Cleared when the orchestrator coroutine ends.
+     */
+    private var pendingRegulationPicks: CompletableDeferred<List<Int>>? = null
+
+    /**
      * The in-flight match orchestrator coroutine (regulation play, or a
      * resume). Tracked so [handleMatchPaused] can cancel it when the user
      * leaves mid-match — otherwise it keeps polling the indexer / waiting on
@@ -890,6 +901,31 @@ class KicksActivity : FragmentActivity() {
             statusMessage.value = "Pick your 5 directions!"
             Log.i(TAG, "Launching Unity for choice phase...")
 
+            // Start the match foreground operation NOW, while THIS activity (main) is
+            // foreground. Android 12+ forbids starting a foreground service once we've
+            // handed off to the Unity process (main is then backgrounded the whole match),
+            // so the op must enroll here to bring the FGS up. It parks on
+            // [pendingRegulationPicks] until the player's picks return, then runs the
+            // gameplay — so the live progress notification + process-keep-alive span the
+            // ENTIRE match, surviving the app being backgrounded.
+            val picksDeferred = CompletableDeferred<List<Int>>()
+            pendingRegulationPicks = picksDeferred
+            orchestratorJob = lifecycleScope.launch {
+                try {
+                    withMatchForeground {
+                        val choiceList = picksDeferred.await()
+                        runOnChainMatch(choiceList)
+                    }
+                } catch (e: CancellationException) {
+                    throw e // user paused out (handleMatchPaused) — unwind cleanly
+                } catch (e: Exception) {
+                    Log.e(TAG, "Match failed", e)
+                    statusMessage.value = "Match failed: ${e.message}"
+                } finally {
+                    if (pendingRegulationPicks === picksDeferred) pendingRegulationPicks = null
+                }
+            }
+
             // Launch our subclass [KicksMatchActivity], not Unity's
             // default activity directly — the subclass attaches the
             // MatchHudOverlay ComposeView on top of Unity's surface so
@@ -922,6 +958,33 @@ class KicksActivity : FragmentActivity() {
                 MatchHud.showPicker(roles = roles, title = "Regulation")
             }
         }
+    }
+
+    /**
+     * Run the on-chain match from the player's raw [choiceList] (Unity's 10 interleaved
+     * picks). Buckets them into shoots[5] + keeps[5] by the role array, drives the role-
+     * appropriate orchestrator (PvAI / P1 / P2), and renders the result. Called INSIDE the
+     * match foreground operation started by [launchUnityChoicePhase] (after the picks
+     * arrive), so all the on-chain work + the SD loop run under one held-up FGS.
+     */
+    private suspend fun runOnChainMatch(choiceList: List<Int>) {
+        // Guard against a race where Unity returns choicesLocked before ensureSdkReady
+        // finished assigning matchManager.
+        val manager = matchManager ?: run {
+            Log.e(TAG, "choicesLocked received before MatchManager was ready")
+            statusMessage.value = "Not ready yet — try again"
+            return
+        }
+        val labels = choiceList.map(::directionLabel)
+        Log.i(TAG, "choicesLocked-IN: role=${currentRole ?: "PvAI"} picks=$choiceList roles=$currentChoiceRoles")
+        val (shoots, keeps) = bucketRolePicks(choiceList.toIntArray(), currentChoiceRoles)
+        Log.i(TAG, "choicesLocked-OUT: shoots=${shoots.toList()} keeps=${keeps.toList()}")
+        val result = when (currentRole) {
+            null -> manager.playAgainstAi(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
+            Player.P1 -> manager.playAsP1(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
+            Player.P2 -> manager.playAsP2(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
+        }
+        handleMatchResult(result, deviceLabels = labels)
     }
 
     /**
@@ -1276,51 +1339,28 @@ class KicksActivity : FragmentActivity() {
             return
         }
 
-        // No progress callback needed — `manager.state` is already bound
-        // to statusMessage via the state collector in ensureSdkReady().
-        orchestratorJob = lifecycleScope.launch {
-            // Guard against a race where Unity returns choicesLocked
-            // before ensureSdkReady has finished assigning matchManager.
-            val manager = matchManager ?: run {
-                Log.e(TAG, "choicesLocked received before MatchManager was ready")
-                statusMessage.value = "Not ready yet — try again"
-                return@launch
-            }
-
-            try {
-                // Bucket Unity's 10 picks into shoots[5] + keeps[5] using
-                // the per-index role array we sent on the way out. Walk
-                // both in lockstep: role[i] == "shoot" means picks[i] is
-                // the next shoots[] entry; "keep" → keeps[].
-                //
-                // Legacy fallback: if Unity returns only 5 picks, this
-                // device is running a pre-V3 export of the Unity APK that
-                // hardcoded 5-pick gathering. Re-use the 5 picks as both
-                // shoots and keeps (degenerate but lets PvAI still run
-                // end-to-end) and log the mismatch so we know to re-export.
-                // Diagnostic — log the raw inputs so a tie pattern can be traced
-                // back to overlapping human picks, a legacy 5-pick Unity APK, or
-                // a role-mismatch. Public game inputs, no secret material.
-                Log.i(TAG, "choicesLocked-IN: role=${currentRole ?: "PvAI"} picks=${choiceList} roles=$currentChoiceRoles")
-                val (shoots, keeps) = bucketRolePicks(choiceList.toIntArray(), currentChoiceRoles)
-                Log.i(TAG, "choicesLocked-OUT: shoots=${shoots.toList()} keeps=${keeps.toList()}")
-
-                val result = withMatchForeground {
-                    when (currentRole) {
-                        null -> manager.playAgainstAi(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
-                        Player.P1 -> manager.playAsP1(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
-                        Player.P2 -> manager.playAsP2(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
-                    }
+        // On-chain regulation. The match operation is ALREADY running — started in
+        // launchUnityChoicePhase while main was foreground, so its foreground service is up
+        // and survives the rest of the match in the background. Hand it the picks; it runs
+        // the gameplay + renders the result under that same op (no progress callback needed —
+        // `manager.state` is bound to statusMessage via the collector in ensureSdkReady).
+        val regDeferred = pendingRegulationPicks
+        if (regDeferred != null) {
+            regDeferred.complete(choiceList)
+        } else {
+            // No pending op — shouldn't happen for an on-chain entry (every such entry goes
+            // through launchUnityChoicePhase). Fall back to running inline so a stray
+            // choicesLocked still plays the match, just without the early-FGS guarantee.
+            Log.w(TAG, "choicesLocked with no pending match op — running inline (FGS may not start while backgrounded)")
+            orchestratorJob = lifecycleScope.launch {
+                try {
+                    withMatchForeground { runOnChainMatch(choiceList) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Match failed", e)
+                    statusMessage.value = "Match failed: ${e.message}"
                 }
-                handleMatchResult(result, deviceLabels = labels)
-            } catch (e: CancellationException) {
-                // Deliberate: the user paused out (handleMatchPaused cancelled
-                // us). Don't surface it as a failure — rethrow so structured
-                // concurrency unwinds cleanly.
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Match failed", e)
-                statusMessage.value = "Match failed: ${e.message}"
             }
         }
     }
@@ -1409,51 +1449,37 @@ class KicksActivity : FragmentActivity() {
         quickPracticeMode = false // on-chain resume — never a practice match
         ensureSdkReady {
             statusMessage.value = "Resuming match…"
-            val intent = Intent(this@KicksActivity, KicksMatchActivity::class.java)
-            startActivity(intent)
-
+            // Enroll the match operation while THIS activity (main) is foreground so its
+            // foreground service can come up BEFORE we hand to the Unity process — Android
+            // 12+ forbids starting one from the background, which main becomes the moment
+            // Unity launches. The op then boots Unity + drives the resume under the held-up
+            // FGS (same fix as [launchUnityChoicePhase]).
             orchestratorJob = lifecycleScope.launch {
-                // The role array must be set BEFORE any SD pick comes
-                // back — handleSdChoicesLocked reads it to bucket the
-                // returned picks. Same value the live path computes.
-                currentChoiceRoles = rolesForCurrentDevice()
-
-                // Let Unity's IL2CPP/GameController boot the 3D scene before
-                // the picker overlay appears, so the user sees the pitch behind
-                // it rather than a black surface. The picker itself is race-safe
-                // regardless (MatchHud.showPicker is re-pushed to :unity on bind
-                // via resendCurrent), so this delay is purely cosmetic now.
-                // [launchUnityChoicePhase] pays the same cost for the
-                // fresh-match path.
-                delay(UNITY_BOOT_DELAY_MS)
-                sendPlayerAppearanceToUnity()
-
-                val manager = matchManager ?: run {
-                    Log.e(TAG, "resumeOrchestrator: manager not ready")
-                    statusMessage.value = "Not ready yet — try again"
-                    return@launch
-                }
                 try {
-                    val result = withMatchForeground {
-                        when {
-                            // PvAI (role is P1 but the AI is local) — drive both
-                            // sides, don't wait for a non-existent remote P2.
+                    withMatchForeground {
+                        // The role array must be set BEFORE any SD pick comes back —
+                        // handleSdChoicesLocked reads it to bucket the returned picks.
+                        currentChoiceRoles = rolesForCurrentDevice()
+                        // Let Unity boot the 3D scene before the picker overlay appears
+                        // (cosmetic — showPicker is race-safe via resendCurrent on bind).
+                        delay(UNITY_BOOT_DELAY_MS)
+                        sendPlayerAppearanceToUnity()
+                        val manager = matchManager ?: error("resumeOrchestrator: manager not ready")
+                        val result = when {
+                            // PvAI (role is P1 but the AI is local) — drive both sides,
+                            // don't wait for a non-existent remote P2.
                             manager.isVsAi -> manager.resumeAgainstAi(getSdPicks = ::gatherSdPicksFromUi)
                             role == Player.P1 -> manager.resumePlayAsP1(getSdPicks = ::gatherSdPicksFromUi)
                             else -> manager.resumePlayAsP2(getSdPicks = ::gatherSdPicksFromUi)
                         }
+                        // Device's own pick labels for the bottom-of-screen recap.
+                        val deviceShoots = if (role == Player.P2) result.p2Shoots else result.p1Shoots
+                        handleMatchResult(result, deviceLabels = deviceShoots.map(::directionLabel))
                     }
-                    // Device's own pick labels for the bottom-of-screen
-                    // recap — read from the rehydrated picks in result.
-                    val deviceShoots = if (role == Player.P2) result.p2Shoots else result.p1Shoots
-                    handleMatchResult(result, deviceLabels = deviceShoots.map(::directionLabel))
                 } catch (e: NeedFreshPicksException) {
-                    // State machine isn't past the role's commit yet —
-                    // the user needs to pick fresh picks via Unity. The
-                    // CONTINUE gate normally routes these via
-                    // [launchUnityChoicePhase] directly, but a race
-                    // between resume and chain-state read can land us
-                    // here. Re-route.
+                    // State machine isn't past the role's commit yet — the user needs to pick
+                    // fresh via Unity. The CONTINUE gate normally routes these via
+                    // [launchUnityChoicePhase]; a resume-vs-chain-read race can still land here.
                     Log.i(TAG, "resumeOrchestrator: ${e.message} — routing to fresh-picks flow")
                     launchUnityChoicePhase()
                 } catch (e: NoActiveMatchException) {
@@ -1468,6 +1494,9 @@ class KicksActivity : FragmentActivity() {
                     statusMessage.value = "Resume failed: ${e.message}"
                 }
             }
+            // Boot Unity AFTER the op enrolled (the launch above runs inline up to the
+            // delay, so the FGS observer still sees main foreground when it reacts).
+            startActivity(Intent(this@KicksActivity, KicksMatchActivity::class.java))
         }
     }
 
