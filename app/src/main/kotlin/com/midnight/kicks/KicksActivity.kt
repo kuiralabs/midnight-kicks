@@ -1557,13 +1557,19 @@ class KicksActivity : FragmentActivity() {
         private const val TAG = "Kicks"
 
         /**
-         * Notification label for the match foreground operation. Host-owned text (the SDK
-         * emits none). Keeping the match wrapped in this operation makes the wallet's
-         * foreground service come up while THIS activity is foreground, before the match
-         * hands off to Unity and backgrounds the main process — so the on-chain steps
-         * (commit/reveal proving + submit) survive backgrounding.
+         * Base label for the match foreground operation. Host-owned text (the SDK emits
+         * none). A NEUTRAL noun, not a status: the live phase is appended by the SDK as the
+         * operation stage (driven by the match state machine in
+         * `MatchManager.withMatchNotification`), so the ongoing notification reads
+         * "Penalty match · Sudden death round 2", and the dismissible completion push reads
+         * "Penalty match / Done" (or "/ Failed") — the same noun working in both places.
+         *
+         * Keeping the match wrapped in this operation makes the wallet's foreground service
+         * come up while THIS activity is foreground, before the match hands off to Unity and
+         * backgrounds the main process — so the on-chain steps (commit/reveal proving +
+         * submit) survive backgrounding.
          */
-        private const val MATCH_OP_LABEL = "Match in progress…"
+        private const val MATCH_OP_LABEL = "Penalty match"
 
         /** PendingIntent request code for the match-notification return target. */
         private const val MATCH_RETURN_REQUEST = 0xC5

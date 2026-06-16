@@ -147,6 +147,31 @@ open class MatchManager(
     private suspend fun <T> holdingSession(block: suspend () -> T): T =
         sessionLock?.withHold { block() } ?: block()
 
+    /**
+     * Run [block] while mirroring the match STATE MACHINE into the foreground-operation
+     * notification, so a backgrounded player reads the real phase — "Sudden death round 2",
+     * "Revealing your picks…" — and knows to tap back into the (Unity) game, instead of a
+     * generic "in progress". The collector is a child of the tracked operation's coroutine,
+     * so [MidnightSdk.updateOperationStage] targets THIS match's op (via the context marker)
+     * and stops the moment [block] ends. No-op outside a tracked operation (e.g. tests).
+     *
+     * This is the single writer of the operation stage; per-circuit sub-stages
+     * (proving/balancing) stay on the in-game HUD ([stageReporter]) where the live screen
+     * shows them — the background notification speaks in match phases, not tx internals.
+     */
+    private suspend fun <T> withMatchNotification(block: suspend () -> T): T = coroutineScope {
+        val notifyJob = launch {
+            state.collect { st ->
+                sdkProvider?.sdk?.value?.updateOperationStage(st.labelFor(localRole))
+            }
+        }
+        try {
+            block()
+        } finally {
+            notifyJob.cancel()
+        }
+    }
+
     // Match-duration session hold (#251/#235 fix). A per-op hold only protects an
     // op already in flight; it can't help one that STARTS after the SDK was already
     // dropped. During a Kicks match the main process is backgrounded (Unity is
@@ -1736,11 +1761,11 @@ open class MatchManager(
         playerShoots: IntArray,
         playerKeeps: IntArray,
         getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
-    ): MatchResult {
+    ): MatchResult = withMatchNotification {
         if (state.value is MatchState.Idle) initSdk()
         deployMatch()
         aiJoin()
-        return runAiSaga(playerShoots, playerKeeps, getSdPicks)
+        runAiSaga(playerShoots, playerKeeps, getSdPicks)
     }
 
     /**
@@ -2015,7 +2040,9 @@ open class MatchManager(
         // reveal); [runAiSaga]'s doneWhen gates skip every already-landed step, so the
         // placeholder picks for the (skipped) p1-commit step are never used. The shared
         // saga drives the AI's not-yet-landed commits/reveals forward exactly as before.
-        return runAiSaga(p1Shoots ?: IntArray(0), p1Keeps ?: IntArray(0), getSdPicks)
+        return withMatchNotification {
+            runAiSaga(p1Shoots ?: IntArray(0), p1Keeps ?: IntArray(0), getSdPicks)
+        }
     }
 
     /**
@@ -2576,11 +2603,11 @@ open class MatchManager(
             stage.progressFraction(),
             submissionAccentArgb(circuitName),
         )
-        // Drive the wallet foreground-service notification + status-bar chip with the live
-        // match state (e.g. "Match in progress · Finalizing", chip "Kuira · Finalizing") so a
-        // backgrounded user sees what's happening, not just "ongoing". `defaultLabel()` is the
-        // same friendly text the HUD shows. No-op unless inside a tracked operation.
-        sdkProvider?.sdk?.value?.updateOperationStage(stage.defaultLabel())
+        // The background notification speaks in MATCH PHASES, not tx internals: the operation
+        // stage is driven by the state machine in [withMatchNotification] (so a backgrounded
+        // player reads "Sudden death round 2" and taps back into the game). The per-circuit
+        // proving/balancing sub-stage stays on the in-game HUD above, where the live screen
+        // shows it — pushing it to the notification too would just overwrite the phase.
     }
 
     /**
