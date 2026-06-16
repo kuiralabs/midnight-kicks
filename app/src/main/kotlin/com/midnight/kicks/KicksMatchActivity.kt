@@ -23,7 +23,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import com.midnight.kuira.sdk.walletruntime.SessionLock
 import com.unity3d.player.UnityPlayerGameActivity
+import dagger.hilt.android.EntryPointAccessors
 
 /**
  * Kicks-specific Unity host. Extends [com.unity3d.player.UnityPlayerGameActivity]
@@ -66,6 +68,18 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
 
     private companion object {
         const val TAG = "KicksMatchActivity"
+    }
+
+    /**
+     * Session auto-lock (#14). This Unity activity runs in the `:unity` process,
+     * which has its own Hilt graph — not @AndroidEntryPoint, so resolve the
+     * process-local SessionLock singleton via the entry point. onUserInteraction
+     * resets its foreground idle timer so an active match never idle-locks.
+     */
+    private val sessionLock by lazy {
+        EntryPointAccessors
+            .fromApplication(application, SessionLock.SessionLockEntryPoint::class.java)
+            .sessionLock()
     }
 
     /** main's inbox, obtained on bind; null until [conn] connects / after disconnect. */
@@ -328,6 +342,13 @@ class KicksMatchActivity : UnityPlayerGameActivity() {
 
     private fun isSystemAutoRotateOn(): Boolean =
         Settings.System.getInt(contentResolver, Settings.System.ACCELEROMETER_ROTATION, 0) == 1
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        // Reset the :unity-process idle-lock timer on any touch (#14) so an
+        // active match never idle-locks mid-play.
+        sessionLock.onUserActivity()
+    }
 
     override fun onDestroy() {
         // Clear the `:unity`-side relays so a stale lambda can't fire after
