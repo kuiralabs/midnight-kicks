@@ -51,6 +51,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 
@@ -115,17 +117,22 @@ private fun ReplayBody(
     // clean rather than re-using the previous show's "done" state.
     var cinematicDone by remember(hudReplay.publishedAtMs) { mutableStateOf(false) }
     var firedAtMs by remember(hudReplay.publishedAtMs) { mutableLongStateOf(0L) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(hudReplay.publishedAtMs) {
         cinematicDone = false
-        firedAtMs = System.currentTimeMillis()
-        // Kick off the 3D cinematic the instant the replay appears. The kicks
-        // are the whole show — only a small live score chip + a brief per-kick
-        // GOAL!/SAVED! flash sit over them (see below), never the result itself.
         val winner = when {
             replay.p1Score > replay.p2Score -> "P1"
             replay.p2Score > replay.p1Score -> "P2"
             else -> null
         }
+        // #268: the shootout is the whole show — never play it unwatched. If the match
+        // resolved while the app was backgrounded, HOLD the cinematic here until the user
+        // is actually watching (the activity is RESUMED), then fire it. Stamping firedAtMs
+        // AFTER the wait keeps the per-kick correlation fresh.
+        lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
+        firedAtMs = System.currentTimeMillis()
+        // Kick off the 3D cinematic. The kicks are the whole show — only a small live
+        // score chip + a brief per-kick GOAL!/SAVED! flash sit over them, never the result.
         UnityBridge.playReplayCinematic(
             replay.rounds, replay.p1Score, replay.p2Score, winner,
             // Which side this device is, so Unity dresses the shooter in the
