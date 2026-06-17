@@ -7,8 +7,10 @@ package com.midnight.kicks
  *
  * - [Menu] — main menu (CREATE / JOIN / RESUME if any active matches /
  *   dev-only PRACTICE vs AI)
- * - [Creating] — P1 side: contract is being deployed, then the address +
- *   QR are shown for the opponent. `address == null` while deploying.
+ * - [Creating] — P1 side: first the player customizes (no chain activity),
+ *   then taps CREATE MATCH → the contract deploys (`deploying == true`), then
+ *   the address + QR are shown for the opponent. `address == null && !deploying`
+ *   is the customize step; `address == null && deploying` is the deploy spinner.
  * - [Joining] — P2 side: opponent address entry. `prefilledAddress` is
  *   set when reached via `midnight://kicks?match=…` deep link.
  * - [MatchReady] — both players are in the contract; tap to launch Unity.
@@ -23,7 +25,11 @@ package com.midnight.kicks
  */
 sealed class KicksScreen {
     data object Menu : KicksScreen()
-    data class Creating(val address: String? = null) : KicksScreen()
+    data class Creating(
+        val address: String? = null,
+        /** True only while the deploy tx is in flight (after the user taps CREATE MATCH). */
+        val deploying: Boolean = false,
+    ) : KicksScreen()
     data class Joining(
         val prefilledAddress: String? = null,
         /** True while the joinMatch circuit is in flight. */

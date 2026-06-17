@@ -2,6 +2,7 @@ package com.midnight.kicks
 
 import com.midnight.kicks.MatchState as S
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -155,6 +156,59 @@ class MatchProtocolRankTest {
         val previous = S.P1SdCommitted(ADDR, round = 4)
         val failed = S.Failed(previous = previous, error = RuntimeException("test"))
         assertEquals(4, failed.sdRound)
+    }
+
+    // ── isTxInFlight — gates [MatchManager.settleInFlightState], the
+    //    black-screen-on-CONTINUE fix. The resume step-ladders branch only on
+    //    STABLE states, so a transient must be flagged in-flight (waited out /
+    //    reconciled) and a stable state must NOT be (settle is a no-op). The
+    //    exact bug: resume re-entered at P1SdRevealing and the ladder threw.
+
+    @Test
+    fun `transient submit states are tx-in-flight`() {
+        val a = ADDR
+        listOf(
+            S.Deploying,
+            S.JoiningAsP2(a),
+            S.P1Committing(a),
+            S.P2Committing(a),
+            S.P1Revealing(a),
+            S.P2Revealing(a),
+            S.P1SdCommitting(a, round = 1),
+            S.P2SdCommitting(a, round = 1),
+            S.P1SdRevealing(a, round = 1), // ← the state that black-screened
+            S.P2SdRevealing(a, round = 1),
+        ).forEach { state ->
+            assertTrue("$state should be tx-in-flight", state.isTxInFlight)
+        }
+    }
+
+    @Test
+    fun `stable states the resume ladder acts on are not tx-in-flight`() {
+        val a = ADDR
+        listOf(
+            S.Idle, S.SdkReady, S.Deployed(a), S.Joined(a),
+            S.P1Committed(a), S.BothCommitted(a), S.P1Revealed(a),
+            S.SdRoundOpen(a, round = 1),
+            S.P1SdCommitted(a, round = 1),
+            S.BothSdCommitted(a, round = 1),
+            S.P1SdRevealed(a, round = 1),
+            S.Resolved(STUB_RESULT),
+        ).forEach { state ->
+            assertFalse("$state should NOT be tx-in-flight", state.isTxInFlight)
+        }
+    }
+
+    @Test
+    fun `isTxInFlight on Failed delegates to previous`() {
+        // A submission that threw mid-flight wraps the transient in Failed;
+        // settleInFlightState unwraps first, so the flag must follow through.
+        assertTrue(
+            S.Failed(previous = S.P1SdRevealing(ADDR, round = 1), error = RuntimeException("x")).isTxInFlight,
+        )
+        assertFalse(
+            S.Failed(previous = S.BothSdCommitted(ADDR, round = 1), error = RuntimeException("x")).isTxInFlight,
+        )
     }
 
     companion object {

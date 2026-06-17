@@ -40,25 +40,26 @@ import androidx.compose.ui.unit.sp
 import com.midnight.kuira.dapp.wallet.QrCode
 
 /**
- * P1's matchmaking screen. Two visual states, driven by [address]:
+ * P1's matchmaking screen. Three steps, driven by [address] + [deploying]:
  *
- *  - `address == null` → deploying spinner
- *  - `address != null` → QR + truncated address + tap-to-copy + "waiting
- *    for opponent…" label. The opponent scans / receives the deep link
+ *  - `address == null && !deploying` → **customize step**: the player picks their
+ *    name / nation / kit and taps **CREATE MATCH** to deploy. No chain activity
+ *    happens until that tap — the match (a contract deploy that spends dust) is
+ *    the user's decision, not an on-entry side effect.
+ *  - `address == null && deploying` → deploy spinner (after the tap).
+ *  - `address != null` → QR + truncated address + tap-to-copy + CHECK STATUS /
+ *    CANCEL. The opponent scans / receives the deep link
  *    `midnight://kicks?match=<address>` and lands on [JoinMatchScreen].
- *
- * The "wait for opponent to actually join on chain" step is Phase 4 step 2
- * (`MatchManager.awaitOpponentJoin`). For now the waiting label is purely
- * informational — once that orchestrator lands, this screen will hand off
- * into the Unity choice phase the same way PvAI does today.
  */
 @Composable
 fun CreateMatchScreen(
     address: String?,
+    deploying: Boolean = false,
     checking: Boolean = false,
     statusMessage: String? = null,
     profile: PlayerProfile,
     onProfileChange: (PlayerProfile) -> Unit,
+    onCreateMatch: () -> Unit = {},
     onBack: () -> Unit,
     onCheckStatus: () -> Unit = {},
     onCancel: () -> Unit = {},
@@ -69,9 +70,6 @@ fun CreateMatchScreen(
     // so it's a two-tap confirm rather than a single tap that could fire by
     // accident while the user is fiddling with the QR / copy.
     var confirmingCancel by remember { mutableStateOf(false) }
-    // Deploy finishing must not yank the user out of customizing; they tap
-    // CONTINUE when ready.
-    var proceed by remember { mutableStateOf(false) }
 
     Surface(modifier = Modifier.fillMaxSize(), color = KicksColors.Background) {
         Column(
@@ -85,10 +83,15 @@ fun CreateMatchScreen(
         ) {
             TopBackBar(label = "CREATE MATCH", onBack = onBack)
 
-            Spacer(modifier = Modifier.height(48.dp))
+            Spacer(modifier = Modifier.height(40.dp))
 
-            if (!proceed) {
-                if (address == null) {
+            if (address == null) {
+                // ── Customize step — build your player FIRST, then commit ──
+                PlayerCustomizeCard(profile = profile, onProfileChange = onProfileChange)
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                if (deploying) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
@@ -97,22 +100,32 @@ fun CreateMatchScreen(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            "Deploying contract…",
+                            "Deploying match…",
                             color = Color.White.copy(alpha = 0.7f),
                             fontSize = 13.sp,
                             letterSpacing = 2.sp,
                         )
                     }
                 } else {
-                    DeployedBanner()
+                    // The explicit commit — nothing hits the chain before this.
+                    KicksButton(label = "CREATE MATCH", onClick = onCreateMatch)
+                    if (statusMessage != null) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            statusMessage,
+                            color = KicksColors.Danger,
+                            fontSize = 12.sp,
+                            letterSpacing = 1.sp,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
                 }
+            } else {
+                // ── Deployed — share with the opponent + wait for the join ──
+                DeployedBanner()
+
                 Spacer(modifier = Modifier.height(28.dp))
-                PlayerCustomizeCard(profile = profile, onProfileChange = onProfileChange)
-                if (address != null) {
-                    Spacer(modifier = Modifier.height(28.dp))
-                    KicksButton(label = "CONTINUE", onClick = { proceed = true })
-                }
-            } else if (address != null) {
+
                 Text(
                     "SHARE WITH OPPONENT",
                     color = Color.White.copy(alpha = 0.5f),

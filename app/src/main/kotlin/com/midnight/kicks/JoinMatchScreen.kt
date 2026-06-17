@@ -37,7 +37,12 @@ fun JoinMatchScreen(
     onBack: () -> Unit,
     onJoin: (String) -> Unit,
 ) {
-    var address by remember { mutableStateOf(prefilledAddress.orEmpty()) }
+    // Keyed on prefilledAddress so a scanned/deep-linked address actually populates
+    // the field: an unkeyed remember captures the value only once, so arriving on an
+    // already-composed Join screen (or a Joining(null) → Joining(addr) transition from
+    // the QR deep link) would leave the field empty. Re-seeding when the prefill
+    // changes fixes that; plain typing (prefill unchanged) is preserved across recompose.
+    var address by remember(prefilledAddress) { mutableStateOf(prefilledAddress.orEmpty()) }
 
     KicksScreenScaffold {
             TopBackBar(label = "JOIN MATCH", onBack = onBack)

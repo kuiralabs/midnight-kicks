@@ -166,6 +166,30 @@ sealed class MatchState {
         else -> null
     }
 
+    /**
+     * True while a transaction THIS device submitted is mid-flight — the
+     * transient `*Committing` / `*Revealing` states that [transitionFrom]
+     * sets via its `inProgress` callback before proving + submit + confirm
+     * complete (plus [Deploying] / [JoiningAsP2]).
+     *
+     * These are LOCAL, in-memory states: the chain only ever holds settled
+     * commits/reveals, so a chain-derived (cold) resume never produces one —
+     * they appear only when a resume re-enters a process whose submission is
+     * still in flight. The resume step-ladders branch only on stable states,
+     * so they must wait one of these out rather than hit their `else` and
+     * throw "SD loop stalled at P1SdRevealing" (which surfaced as a black
+     * Unity screen). See `MatchManager.settleInFlightState`.
+     */
+    val isTxInFlight: Boolean get() = when (this) {
+        is Deploying, is JoiningAsP2,
+        is P1Committing, is P2Committing,
+        is P1Revealing, is P2Revealing,
+        is P1SdCommitting, is P2SdCommitting,
+        is P1SdRevealing, is P2SdRevealing -> true
+        is Failed -> previous.isTxInFlight
+        else -> false
+    }
+
     fun labelFor(role: Player?): String {
         // PvAI / unknown — fall back to P1-perspective text (the
         // human is always P1 in PvAI).

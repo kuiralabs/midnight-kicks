@@ -96,8 +96,39 @@ class ResumeRoutingTest {
         assertEquals(KicksScreen.MatchReady(ADDR, Player.P2), routed)
     }
 
+    @Test
+    fun `finished or failed match goes to the menu, not a dead MatchReady continue`() {
+        // Regression: a Resolved match was routed to MatchReady, leaving a dead
+        // CONTINUE that re-ran resumePlayAsP1 from Resolved in a loop (observed on
+        // 5554). A finished/failed match has nowhere to continue — it must land on
+        // the menu (which surfaces the result), for every role.
+        val resolved = MatchState.Resolved(SAMPLE_RESULT)
+        val failed = MatchState.Failed(MatchState.BothCommitted(ADDR), RuntimeException("boom"))
+        listOf(Player.P1, Player.P2, null).forEach { role ->
+            assertEquals(
+                "Resolved + role=$role should go to Menu",
+                KicksScreen.Menu,
+                chooseResumeScreen(ADDR, role, resolved),
+            )
+            assertEquals(
+                "Failed + role=$role should go to Menu",
+                KicksScreen.Menu,
+                chooseResumeScreen(ADDR, role, failed),
+            )
+        }
+    }
+
     companion object {
         private const val ADDR =
             "037b7a20bdc1f64cbdf1292a56cb418d7c845fc78fe420d31e67f1cac9b429a1"
+
+        private val SAMPLE_RESULT = MatchResult(
+            p1Shoots = intArrayOf(0, 1, 2, 1, 0),
+            p1Keeps = intArrayOf(2, 1, 0, 1, 2),
+            p2Shoots = intArrayOf(2, 0, 1, 2, 0),
+            p2Keeps = intArrayOf(0, 2, 1, 0, 2),
+            sdRounds = emptyList(),
+            contractAddress = ADDR,
+        )
     }
 }

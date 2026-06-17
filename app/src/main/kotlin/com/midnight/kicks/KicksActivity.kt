@@ -34,6 +34,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,7 +55,7 @@ import com.midnight.kuira.dapp.PanelBar
 import com.midnight.kuira.core.identity.backup.SigilRequiredException
 import com.midnight.kuira.core.network.MidnightNetwork
 import com.midnight.kuira.core.identity.sigil.SigilStateStore
-import com.midnight.kuira.sdk.walletruntime.DustSyncNotifications
+import com.midnight.kuira.sdk.walletruntime.WalletNotifications
 import com.midnight.kuira.sdk.walletruntime.MidnightSdkProvider
 import com.midnight.kuira.dapp.lock.SessionLockGate
 import com.midnight.kuira.sdk.walletruntime.SessionLock
@@ -89,6 +92,10 @@ class KicksActivity : FragmentActivity() {
 
     private val statusMessage = mutableStateOf<String?>(null)
     private val lastChoices = mutableStateOf<String?>(null)
+    // The finished-match result card ([LastMatchCard]). Kept separate from
+    // [statusMessage] (transient errors/warnings/progress) so a win celebrates
+    // in its own surface and an error still warns. Cleared by [clearMenuStatus].
+    private val lastMatch = mutableStateOf<LastMatchSummary?>(null)
     // Top-level nav. State-based so we don't need Navigation-Compose for
     // three screens. handleDeepLink() / button onClicks mutate this; the
     // setContent { } block switches on it.
@@ -236,8 +243,8 @@ class KicksActivity : FragmentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
-        if (DustSyncNotifications.shouldRequest(this)) {
-            notifPermission.launch(DustSyncNotifications.PERMISSION)
+        if (WalletNotifications.shouldRequest(this)) {
+            notifPermission.launch(WalletNotifications.PERMISSION)
         }
 
         // Register for Unity bridge messages. Post-split these arrive relayed
@@ -281,6 +288,8 @@ class KicksActivity : FragmentActivity() {
                 KicksScreen.Menu -> KicksApp(
                     statusMessage = statusMessage.value,
                     lastChoices = lastChoices.value,
+                    lastMatch = lastMatch.value,
+                    onDismissLastMatch = { lastMatch.value = null },
                     hasActiveSession = hasActiveSession.value,
                     network = NetworkPref.load(this),
                     openWalletSignal = walletOpenSignal.value,
@@ -309,10 +318,12 @@ class KicksActivity : FragmentActivity() {
                 )
                 is KicksScreen.Creating -> CreateMatchScreen(
                     address = s.address,
+                    deploying = s.deploying,
                     checking = creatingChecking.value,
                     statusMessage = creatingStatus.value,
                     profile = playerProfile.value,
                     onProfileChange = ::updatePlayerProfile,
+                    onCreateMatch = ::deployCreateMatch,
                     onBack = { screen.value = KicksScreen.Menu },
                     onCheckStatus = ::checkCreateStatus,
                     onCancel = ::cancelCreateMatch,
@@ -449,10 +460,28 @@ class KicksActivity : FragmentActivity() {
         return false
     }
 
+    /**
+     * Open the create-match screen on its CUSTOMIZE step — NO chain activity. The
+     * user picks their player/nation first and then taps CREATE MATCH
+     * ([deployCreateMatch]) to actually deploy the contract. Deploying on entry
+     * used to spend dust + create a contract before the user committed to anything.
+     */
     private fun startCreateMatch() {
         if (sigilMissing()) return
-        screen.value = KicksScreen.Creating(address = null)
         creatingStatus.value = null
+        screen.value = KicksScreen.Creating(address = null, deploying = false)
+    }
+
+    /**
+     * Deploy the match contract — triggered by the CREATE MATCH button after the
+     * user has customized their player. Shows the deploy spinner; on success the
+     * address + QR; on failure returns to the customize step with a status hint
+     * so the user can retry without losing their customization.
+     */
+    private fun deployCreateMatch() {
+        if (sigilMissing()) return
+        creatingStatus.value = null
+        screen.value = KicksScreen.Creating(address = null, deploying = true)
         ensureSdkReady {
             lifecycleScope.launch {
                 try {
@@ -466,8 +495,10 @@ class KicksActivity : FragmentActivity() {
                     screen.value = KicksScreen.Creating(address = address)
                 } catch (e: Exception) {
                     Log.e(TAG, "Create-match flow failed", e)
-                    statusMessage.value = "Create failed: ${e.message}"
-                    screen.value = KicksScreen.Menu
+                    creatingStatus.value = "Create failed: ${e.message}"
+                    // Back to the customize step (not the menu) so the user keeps
+                    // their player + can tap CREATE MATCH again.
+                    screen.value = KicksScreen.Creating(address = null, deploying = false)
                 }
             }
         }
@@ -630,18 +661,7 @@ class KicksActivity : FragmentActivity() {
                     // was already COMPLETE on chain — surface the
                     // priorMatchFinished banner if available.
                     manager.consumePriorMatchFinished()?.let { finished ->
-                        val (you, them) = when (finished.role) {
-                            Player.P1 -> finished.p1Score to finished.p2Score
-                            Player.P2 -> finished.p2Score to finished.p1Score
-                        }
-                        statusMessage.value = when (finished.outcome) {
-                            PriorMatchFinished.Outcome.Win ->
-                                "Match already finished — YOU WIN $you – $them"
-                            PriorMatchFinished.Outcome.Loss ->
-                                "Match already finished — you lost $you – $them"
-                            PriorMatchFinished.Outcome.Draw ->
-                                "Match already finished — drawn $you – $them"
-                        }
+                        lastMatch.value = priorMatchSummary(finished)
                     }
                     hasActiveSession.value = store.loadAll().isNotEmpty()
                     screen.value = KicksScreen.Menu
@@ -823,7 +843,23 @@ class KicksActivity : FragmentActivity() {
                     // is the canonical way to surface progress in a Kuira dApp.
                     // One StateFlow drives every label the user sees.
                     lifecycleScope.launch {
-                        manager.state.collect { statusMessage.value = it.label }
+                        manager.state.collect { st ->
+                            statusMessage.value = st.label
+                            // A match that RESOLVED while the user was in the Unity
+                            // match (a live resolve) has no "continue" target. Route the
+                            // backgrounded menu off any match-setup screen so the user
+                            // returns from Unity to the menu (which surfaces the result),
+                            // not a dead MATCH READY whose CONTINUE re-runs a finished
+                            // orchestrator. (Bootstrap resume → [chooseResumeScreen].)
+                            if (st is MatchState.Resolved) {
+                                when (screen.value) {
+                                    is KicksScreen.MatchReady,
+                                    is KicksScreen.Creating,
+                                    is KicksScreen.Joining -> screen.value = KicksScreen.Menu
+                                    else -> Unit
+                                }
+                            }
+                        }
                     }
                     // Observe on-chain state — demonstrates the same
                     // collect-StateFlow pattern that BlockStore snapshots
@@ -868,19 +904,8 @@ class KicksActivity : FragmentActivity() {
                     // manager populates [priorMatchFinished]; we
                     // consume it once and write a friendly status line.
                     manager.consumePriorMatchFinished()?.let { finished ->
-                        val (you, them) = when (finished.role) {
-                            Player.P1 -> finished.p1Score to finished.p2Score
-                            Player.P2 -> finished.p2Score to finished.p1Score
-                        }
-                        statusMessage.value = when (finished.outcome) {
-                            PriorMatchFinished.Outcome.Win ->
-                                "Your previous match finished — YOU WIN $you – $them"
-                            PriorMatchFinished.Outcome.Loss ->
-                                "Your previous match finished — you lost $you – $them"
-                            PriorMatchFinished.Outcome.Draw ->
-                                "Your previous match finished — drawn $you – $them"
-                        }
-                        Log.i(TAG, "Prior match finished banner: ${statusMessage.value}")
+                        lastMatch.value = priorMatchSummary(finished)
+                        Log.i(TAG, "Prior match finished card: ${finished.outcome} ${finished.p1Score}-${finished.p2Score}")
                     }
                     matchManager = manager
                 }
@@ -1228,6 +1253,33 @@ class KicksActivity : FragmentActivity() {
     private fun clearMenuStatus() {
         statusMessage.value = null
         lastChoices.value = null
+        lastMatch.value = null
+    }
+
+    /**
+     * Map a bootstrap/resume [PriorMatchFinished] (chain says the match already
+     * COMPLETE — we only know the scoreline, not the per-kick picks) into the
+     * menu's [LastMatchSummary] card. Shared by the two consume sites so the
+     * win/loss/draw mapping lives in one place.
+     */
+    private fun priorMatchSummary(finished: PriorMatchFinished): LastMatchSummary {
+        val (you, them) = when (finished.role) {
+            Player.P1 -> finished.p1Score to finished.p2Score
+            Player.P2 -> finished.p2Score to finished.p1Score
+        }
+        return LastMatchSummary(
+            outcome = when (finished.outcome) {
+                PriorMatchFinished.Outcome.Win -> LastMatchSummary.Outcome.WIN
+                PriorMatchFinished.Outcome.Loss -> LastMatchSummary.Outcome.LOSS
+                PriorMatchFinished.Outcome.Draw -> LastMatchSummary.Outcome.DRAW
+            },
+            myScore = you,
+            theirScore = them,
+            myName = playerProfile.value.name.ifBlank { "You" },
+            theirName = "Opponent",
+            myPicks = emptyList(),
+            theirPicks = emptyList(),
+        )
     }
 
     /** Persist + reflect a player-profile edit from the customize card. */
@@ -1420,21 +1472,34 @@ class KicksActivity : FragmentActivity() {
         // Win-text flourish from THIS device's perspective (P2's "mine" is the
         // chain's p2Score). Moved here from handleReplayComplete — see below.
         val (mine, theirs) = if (currentRole == Player.P2) p2Score to p1Score else p1Score to p2Score
-        val themName = if (currentRole == null) "AI" else "OPPONENT"
-        statusMessage.value = when {
-            mine > theirs -> "YOU WIN!  $mine – $theirs"
-            theirs > mine -> "$themName WINS  $mine – $theirs"
-            else -> "DRAW  $mine – $theirs"
-        }
-
-        // Opponent's regulation shoots — whichever side this device is,
-        // the *other* player's picks form the line we show.
-        val opponentShoots = if (currentRole == Player.P2) result.p1Shoots else result.p2Shoots
-        val opponentLabels = opponentShoots.map(::directionLabel)
         val youLabel = playerProfile.value.name.ifBlank { "You" }
         val themLabel = if (currentRole == null) "AI" else "Opponent"
-        lastChoices.value =
-            "$youLabel: ${deviceLabels.joinToString(" ")}  $themLabel: ${opponentLabels.joinToString(" ")}"
+        // Opponent's regulation shoots — whichever side this device is,
+        // the *other* player's picks form the recap's second line.
+        val opponentShoots = if (currentRole == Player.P2) result.p1Shoots else result.p2Shoots
+        val earlyEnd = result.endedEarly
+        val outcome = when {
+            earlyEnd == EarlyOutcome.WON_BY_FORFEIT -> LastMatchSummary.Outcome.FORFEIT_WIN
+            earlyEnd == EarlyOutcome.CANCELLED_REFUND -> LastMatchSummary.Outcome.CANCELLED_REFUND
+            mine > theirs -> LastMatchSummary.Outcome.WIN
+            theirs > mine -> LastMatchSummary.Outcome.LOSS
+            else -> LastMatchSummary.Outcome.DRAW
+        }
+        // The result now lives in its own card ([LastMatchCard]). Clear the
+        // transient lines so neither a stale "Resuming…" nor a "You picked…"
+        // confirmation lingers beneath it.
+        statusMessage.value = null
+        lastChoices.value = null
+        lastMatch.value = LastMatchSummary(
+            outcome = outcome,
+            myScore = mine,
+            theirScore = theirs,
+            myName = youLabel,
+            theirName = themLabel,
+            // No per-kick replay for an early-ended (forfeit / cancel) match.
+            myPicks = if (earlyEnd != null) emptyList() else deviceLabels,
+            theirPicks = if (earlyEnd != null) emptyList() else opponentShoots.map(::directionLabel),
+        )
 
         // Match is resolved on chain — MatchManager already deleted this
         // specific match from [store] when its setState fired
@@ -1472,6 +1537,18 @@ class KicksActivity : FragmentActivity() {
      */
     private fun resumeOrchestrator(role: Player) {
         quickPracticeMode = false // on-chain resume — never a practice match
+        // Re-entrancy guard: an orchestrator may already be driving this match
+        // (e.g. the user backgrounded mid-reveal and the proving tx is still in
+        // flight, leaving a *Revealing transient). Starting a SECOND orchestrator
+        // races the first and crashes its step-ladder on the transient state
+        // (observed: "resumePlayAsP1 SD loop stalled at P1SdRevealing" → black
+        // Unity screen). Just bring the existing match forward; the running
+        // orchestrator keeps driving and Unity re-binds to the current phase.
+        if (orchestratorJob?.isActive == true) {
+            Log.i(TAG, "resumeOrchestrator: match already being driven — bringing Unity forward, not re-launching")
+            startActivity(Intent(this@KicksActivity, KicksMatchActivity::class.java))
+            return
+        }
         ensureSdkReady {
             statusMessage.value = "Resuming match…"
             // Enroll the match operation while THIS activity (main) is foreground so its
@@ -1642,12 +1719,12 @@ class KicksActivity : FragmentActivity() {
 
         /**
          * Base label for the match foreground operation. Host-owned text (the SDK emits
-         * none). A NEUTRAL noun, not a status: for PvAI the live phase is appended by the SDK as
+         * none). A NEUTRAL noun, not a status: the live phase is appended by the SDK as
          * the operation stage (driven by the match state machine in
          * `MatchManager.withMatchNotification`), so the ongoing notification reads
          * "Penalty match · Sudden death round 2", and the dismissible completion push reads
-         * "Penalty match / Done" (or "/ Failed") — the same noun working in both places. (PvP
-         * keeps the base label without the phase suffix today — see `withMatchNotification`.)
+         * "Penalty match / Done" (or "/ Failed") — the same noun working in both places, for
+         * PvP and PvAI alike (PvP is role-aware via `MatchManager.withMatchNotification`).
          *
          * Keeping the match wrapped in this operation makes the wallet's foreground service
          * come up while THIS activity is foreground, before the match hands off to Unity and
@@ -1718,6 +1795,8 @@ private fun directionLabel(d: Int): String = when (d) {
 fun KicksApp(
     statusMessage: String?,
     lastChoices: String?,
+    lastMatch: LastMatchSummary?,
+    onDismissLastMatch: () -> Unit,
     hasActiveSession: Boolean,
     network: MidnightNetwork,
     onNetworkChange: (MidnightNetwork) -> Unit,
@@ -1814,6 +1893,10 @@ fun KicksApp(
                             verticalArrangement = Arrangement.Center,
                         ) {
                             panel(Modifier)
+                            if (lastMatch != null) {
+                                Spacer(modifier = Modifier.height(16.dp))
+                                LastMatchCard(summary = lastMatch, onDismiss = onDismissLastMatch)
+                            }
                         }
                     }
                 } else {
@@ -1829,11 +1912,39 @@ fun KicksApp(
                         MenuBrand()
                         Spacer(modifier = Modifier.height(48.dp))
                         panel(Modifier)
+                        if (lastMatch != null) {
+                            Spacer(modifier = Modifier.height(20.dp))
+                            LastMatchCard(summary = lastMatch, onDismiss = onDismissLastMatch)
+                        }
                         MenuStatus(statusMessage, lastChoices, topGap = 48.dp)
                         Spacer(modifier = Modifier.height(48.dp))
                         MenuFooter()
                     }
                 }
+            }
+
+            // Lobby music mute toggle — overlay at bottom-start so it clears the top
+            // wallet/sigil pills and the centered menu. Persisted via LobbyMusic.
+            val musicCtx = LocalContext.current
+            var musicMuted by remember { mutableStateOf(LobbyMusic.isMuted(musicCtx)) }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(16.dp)
+                    .kicksPressable(shape = RoundedCornerShape(percent = 50)) {
+                        musicMuted = !musicMuted
+                        LobbyMusic.setMuted(musicCtx, musicMuted)
+                    }
+                    .background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(percent = 50))
+                    .padding(horizontal = 14.dp, vertical = 9.dp),
+            ) {
+                Text(
+                    if (musicMuted) "🔇  MUSIC OFF" else "🔊  MUSIC ON",
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = 11.sp,
+                    letterSpacing = 1.5.sp,
+                )
             }
         }
     }

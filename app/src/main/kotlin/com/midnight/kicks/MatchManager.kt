@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.math.BigInteger
 import java.security.SecureRandom
@@ -159,11 +160,11 @@ open class MatchManager(
      * (proving/balancing) stay on the in-game HUD ([stageReporter]) where the live screen
      * shows them — the background notification speaks in match phases, not tx internals.
      *
-     * SCOPE: currently applied to the PvAI paths ([playAgainstAi] / [resumeAgainstAi]). The
-     * live PvP orchestrators ([playAsP1]/[playAsP2]/[resumePlayAsP1]/[resumePlayAsP2]) still run
-     * under the tracked operation (process survival + the base label intact) but don't yet drive
-     * the phase suffix — extending the mirror to PvP (where [MatchState.labelFor] already has the
-     * P2-perspective "your turn" text) is a tracked follow-up.
+     * SCOPE: applied to every match orchestrator — the PvAI paths
+     * ([playAgainstAi] / [resumeAgainstAi]) and the live PvP paths
+     * ([playAsP1] / [playAsP2] / [resumePlayAsP1] / [resumePlayAsP2]). PvP is role-aware via
+     * [MatchState.labelFor] (the collector passes [localRole]), so each device's notification
+     * speaks in its own perspective ("your turn to reveal" vs "opponent revealing…").
      */
     private suspend fun <T> withMatchNotification(block: suspend () -> T): T = coroutineScope {
         val notifyJob = launch {
@@ -1857,31 +1858,36 @@ open class MatchManager(
         // re-reads `state.value` so we naturally fall through to
         // later steps as we advance.
         unwrapFailedState("playAsP1")
-        if (state.value is MatchState.Joined) submitP1Picks(shoots, keeps)
-        if (state.value is MatchState.P1Committed) waitForP2Committed()
-        if (state.value is MatchState.BothCommitted) revealP1()
-        var result: MatchResult? =
-            if (state.value is MatchState.P1Revealed) waitForP2Revealed() else null
+        // Mirror the live match phase into the background notification (#275)
+        // so a backgrounded PvP player reads "Sudden death round 2" / "Match
+        // complete!", the same as the PvAI paths.
+        return withMatchNotification {
+            if (state.value is MatchState.Joined) submitP1Picks(shoots, keeps)
+            if (state.value is MatchState.P1Committed) waitForP2Committed()
+            if (state.value is MatchState.BothCommitted) revealP1()
+            var result: MatchResult? =
+                if (state.value is MatchState.P1Revealed) waitForP2Revealed() else null
 
-        // SD loop — picks come from [getSdPicks] (UI for real players,
-        // random by default for tests / smoke runs).
-        while (result == null) {
-            val round = currentSdRoundOrError()
-            if (state.value is MatchState.SdRoundOpen) {
-                val (pShoot, pKeep) = getSdPicks(round)
-                submitP1SdPick(pShoot, pKeep)
+            // SD loop — picks come from [getSdPicks] (UI for real players,
+            // random by default for tests / smoke runs).
+            while (result == null) {
+                val round = currentSdRoundOrError()
+                if (state.value is MatchState.SdRoundOpen) {
+                    val (pShoot, pKeep) = getSdPicks(round)
+                    submitP1SdPick(pShoot, pKeep)
+                }
+                if (state.value is MatchState.P1SdCommitted) waitForP2SdCommitted()
+                if (state.value is MatchState.BothSdCommitted) revealP1Sd()
+                if (state.value is MatchState.P1SdRevealed) {
+                    result = waitForP2SdRevealed()
+                } else {
+                    throw IllegalStateException(
+                        "playAsP1 SD loop stalled at ${state.value::class.simpleName} for round $round",
+                    )
+                }
             }
-            if (state.value is MatchState.P1SdCommitted) waitForP2SdCommitted()
-            if (state.value is MatchState.BothSdCommitted) revealP1Sd()
-            if (state.value is MatchState.P1SdRevealed) {
-                result = waitForP2SdRevealed()
-            } else {
-                throw IllegalStateException(
-                    "playAsP1 SD loop stalled at ${state.value::class.simpleName} for round $round",
-                )
-            }
+            result
         }
-        return result
     }
 
     /**
@@ -1900,42 +1906,91 @@ open class MatchManager(
         // Handles both fresh joins (state == Joined) and resumed
         // mid-match flows (state == P1Committed and beyond).
         unwrapFailedState("playAsP2")
-        if (state.value is MatchState.Joined) waitForP1Committed()
-        if (state.value is MatchState.P1Committed) submitP2Picks(shoots, keeps)
-        if (state.value is MatchState.BothCommitted) waitForP1Revealed()
-        var result: MatchResult? =
-            if (state.value is MatchState.P1Revealed) revealP2() else null
+        // Mirror the live match phase into the background notification (#275),
+        // role-aware via [MatchState.labelFor] — same as P1 / PvAI.
+        return withMatchNotification {
+            if (state.value is MatchState.Joined) waitForP1Committed()
+            if (state.value is MatchState.P1Committed) submitP2Picks(shoots, keeps)
+            if (state.value is MatchState.BothCommitted) waitForP1Revealed()
+            var result: MatchResult? =
+                if (state.value is MatchState.P1Revealed) revealP2() else null
 
-        // SD loop — pre-launch the picker so it's visible while we
-        // wait on P1's SD commit. The contract doesn't care about
-        // commit order (only that both land before either reveals),
-        // so we collect this device's pick concurrently. A serial
-        // wait-then-prompt would leave the user staring at an empty
-        // field until P1's tx lands.
-        coroutineScope {
-            while (result == null) {
-                val round = currentSdRoundOrError()
-                val pickedAsync = if (state.value is MatchState.SdRoundOpen) {
-                    async { getSdPicks(round) }
-                } else null
-                if (state.value is MatchState.SdRoundOpen) waitForP1SdCommitted()
-                if (state.value is MatchState.P1SdCommitted) {
-                    val (pShoot, pKeep) = pickedAsync?.await() ?: getSdPicks(round)
-                    submitP2SdPick(pShoot, pKeep)
-                } else {
-                    pickedAsync?.cancel()
-                }
-                if (state.value is MatchState.BothSdCommitted) waitForP1SdRevealed()
-                if (state.value is MatchState.P1SdRevealed) {
-                    result = revealP2Sd()
-                } else {
-                    throw IllegalStateException(
-                        "playAsP2 SD loop stalled at ${state.value::class.simpleName} for round $round",
-                    )
+            // SD loop — pre-launch the picker so it's visible while we
+            // wait on P1's SD commit. The contract doesn't care about
+            // commit order (only that both land before either reveals),
+            // so we collect this device's pick concurrently. A serial
+            // wait-then-prompt would leave the user staring at an empty
+            // field until P1's tx lands.
+            coroutineScope {
+                while (result == null) {
+                    val round = currentSdRoundOrError()
+                    val pickedAsync = if (state.value is MatchState.SdRoundOpen) {
+                        async { getSdPicks(round) }
+                    } else null
+                    if (state.value is MatchState.SdRoundOpen) waitForP1SdCommitted()
+                    if (state.value is MatchState.P1SdCommitted) {
+                        val (pShoot, pKeep) = pickedAsync?.await() ?: getSdPicks(round)
+                        submitP2SdPick(pShoot, pKeep)
+                    } else {
+                        pickedAsync?.cancel()
+                    }
+                    if (state.value is MatchState.BothSdCommitted) waitForP1SdRevealed()
+                    if (state.value is MatchState.P1SdRevealed) {
+                        result = revealP2Sd()
+                    } else {
+                        throw IllegalStateException(
+                            "playAsP2 SD loop stalled at ${state.value::class.simpleName} for round $round",
+                        )
+                    }
                 }
             }
+            result!!
         }
-        return result!!
+    }
+
+    /**
+     * Before a resume step-ladder runs, settle any tx that's still in flight.
+     *
+     * A resume can re-enter while a submission this device started is still
+     * proving/submitting on the wallet's surviving foreground-op scope — the
+     * state is then a transient `*Committing`/`*Revealing`
+     * ([MatchState.isTxInFlight]). The ladders branch only on stable states,
+     * so without this they hit their `else` and threw
+     * "resumePlayAsP1 SD loop stalled at P1SdRevealing" — an uncaught crash
+     * that, because Unity had already been launched, left the user on a black
+     * screen.
+     *
+     * Resolution order:
+     *  1. Wait (bounded) for the in-flight submission to settle on its own —
+     *     the surviving op advances the state to its stable successor.
+     *  2. If it never settles (the originating op is truly gone), re-derive the
+     *     canonical state from the chain via [chainPhaseToState]. Transient
+     *     states are never chain-derivable, so the chain read always yields a
+     *     stable state the ladder can act on.
+     */
+    private suspend fun settleInFlightState() {
+        if (state.value is MatchState.Failed) unwrapFailedState("settleInFlightState")
+        val pending = state.value
+        if (!pending.isTxInFlight) return
+
+        Log.i(TAG, "resume: ${pending::class.simpleName} is mid-submission — waiting for it to settle")
+        val settled = withTimeoutOrNull(DEFAULT_OPPONENT_WAIT_MS) {
+            state.first { !it.isTxInFlight }
+        }
+        if (settled != null) {
+            Log.i(TAG, "resume: in-flight submission settled to ${settled::class.simpleName}")
+            if (settled is MatchState.Failed) unwrapFailedState("settleInFlightState")
+            return
+        }
+
+        Log.w(TAG, "resume: in-flight submission didn't settle — reconciling from chain")
+        val address = pending.address ?: return
+        val snap = runCatching { awaitContractState(DEFAULT_OPPONENT_WAIT_MS) { true } }.getOrNull()
+            ?: return
+        chainPhaseToState(address, snap)?.let { reconciled ->
+            Log.i(TAG, "resume: reconciled ${pending::class.simpleName} → ${reconciled::class.simpleName} from chain")
+            setState(reconciled)
+        }
     }
 
     /**
@@ -1967,6 +2022,14 @@ open class MatchManager(
         // are themselves idempotent — they'll either advance or hit
         // a new timeout).
         unwrapFailedState("resumePlayAsP1")
+        // Settle any submission still in flight so the ladder below sees a
+        // stable state, not a transient it would crash on (the black-screen-
+        // on-CONTINUE bug). May wait it out or reconcile from chain.
+        settleInFlightState()
+        // Already finished (a match can resolve while the user is away) — hand
+        // the result back so the caller routes to the result UI instead of
+        // driving a now-stateless ladder.
+        (state.value as? MatchState.Resolved)?.let { return it.result }
         // Soft preconditions: throw typed exceptions instead of
         // hard `require`. This lets the activity branch the user to
         // the right entry point (e.g. `playAsP1` when picks are
@@ -1982,34 +2045,39 @@ open class MatchManager(
         }
         Log.i(TAG, "resumePlayAsP1: starting from ${current::class.simpleName}")
 
-        // Regulation phase — skip whatever's already done. Each `if`
-        // tests the CURRENT state.value (re-read after each step) so
-        // we naturally fall through to later steps as we go.
-        if (state.value is MatchState.P1Committed) waitForP2Committed()
-        if (state.value is MatchState.BothCommitted) revealP1()
-        var result: MatchResult? =
-            if (state.value is MatchState.P1Revealed) waitForP2Revealed() else null
+        // Mirror the live match phase into the background notification (#275)
+        // so a backgrounded PvP player reads "Sudden death round 2" / "Match
+        // complete!", the same as the PvAI paths.
+        return withMatchNotification {
+            // Regulation phase — skip whatever's already done. Each `if`
+            // tests the CURRENT state.value (re-read after each step) so
+            // we naturally fall through to later steps as we go.
+            if (state.value is MatchState.P1Committed) waitForP2Committed()
+            if (state.value is MatchState.BothCommitted) revealP1()
+            var result: MatchResult? =
+                if (state.value is MatchState.P1Revealed) waitForP2Revealed() else null
 
-        // SD loop — same shape as the regulation block, repeated per
-        // round. We re-read state.value each iteration because each SD
-        // round can re-enter at a different step.
-        while (result == null) {
-            val round = currentSdRoundOrError()
-            if (state.value is MatchState.SdRoundOpen) {
-                val (pShoot, pKeep) = getSdPicks(round)
-                submitP1SdPick(pShoot, pKeep)
+            // SD loop — same shape as the regulation block, repeated per
+            // round. We re-read state.value each iteration because each SD
+            // round can re-enter at a different step.
+            while (result == null) {
+                val round = currentSdRoundOrError()
+                if (state.value is MatchState.SdRoundOpen) {
+                    val (pShoot, pKeep) = getSdPicks(round)
+                    submitP1SdPick(pShoot, pKeep)
+                }
+                if (state.value is MatchState.P1SdCommitted) waitForP2SdCommitted()
+                if (state.value is MatchState.BothSdCommitted) revealP1Sd()
+                if (state.value is MatchState.P1SdRevealed) {
+                    result = waitForP2SdRevealed()
+                } else {
+                    throw IllegalStateException(
+                        "resumePlayAsP1 SD loop stalled at ${state.value::class.simpleName} for round $round",
+                    )
+                }
             }
-            if (state.value is MatchState.P1SdCommitted) waitForP2SdCommitted()
-            if (state.value is MatchState.BothSdCommitted) revealP1Sd()
-            if (state.value is MatchState.P1SdRevealed) {
-                result = waitForP2SdRevealed()
-            } else {
-                throw IllegalStateException(
-                    "resumePlayAsP1 SD loop stalled at ${state.value::class.simpleName} for round $round",
-                )
-            }
+            result
         }
-        return result
     }
 
     /**
@@ -2032,6 +2100,9 @@ open class MatchManager(
         getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
     ): MatchResult {
         unwrapFailedState("resumeAgainstAi")
+        // Settle any in-flight submission first (see [settleInFlightState]).
+        settleInFlightState()
+        (state.value as? MatchState.Resolved)?.let { return it.result }
         val current = state.value
         if (current.address == null) {
             throw NoActiveMatchException("resumeAgainstAi: no active match — state is ${current::class.simpleName}")
@@ -2066,6 +2137,10 @@ open class MatchManager(
         getSdPicks: suspend (round: Int) -> Pair<Int, Int> = ::randomSdPair,
     ): MatchResult {
         unwrapFailedState("resumePlayAsP2")
+        // Settle any in-flight submission so the ladder sees a stable state
+        // (see [settleInFlightState] / [resumePlayAsP1]).
+        settleInFlightState()
+        (state.value as? MatchState.Resolved)?.let { return it.result }
         val current = state.value
         if (current.address == null) {
             throw NoActiveMatchException("resumePlayAsP2: no active match — state is ${current::class.simpleName}")
@@ -2080,37 +2155,41 @@ open class MatchManager(
         }
         Log.i(TAG, "resumePlayAsP2: starting from ${current::class.simpleName}")
 
-        // Regulation phase.
-        if (state.value is MatchState.BothCommitted) waitForP1Revealed()
-        var result: MatchResult? =
-            if (state.value is MatchState.P1Revealed) revealP2() else null
+        // Mirror the live match phase into the background notification (#275),
+        // role-aware via [MatchState.labelFor] — same as P1 / PvAI.
+        return withMatchNotification {
+            // Regulation phase.
+            if (state.value is MatchState.BothCommitted) waitForP1Revealed()
+            var result: MatchResult? =
+                if (state.value is MatchState.P1Revealed) revealP2() else null
 
-        // SD loop — pre-launch P2's picker concurrently with the
-        // wait-for-P1-commit. See [playAsP2]'s loop for rationale.
-        coroutineScope {
-            while (result == null) {
-                val round = currentSdRoundOrError()
-                val pickedAsync = if (state.value is MatchState.SdRoundOpen) {
-                    async { getSdPicks(round) }
-                } else null
-                if (state.value is MatchState.SdRoundOpen) waitForP1SdCommitted()
-                if (state.value is MatchState.P1SdCommitted) {
-                    val (pShoot, pKeep) = pickedAsync?.await() ?: getSdPicks(round)
-                    submitP2SdPick(pShoot, pKeep)
-                } else {
-                    pickedAsync?.cancel()
-                }
-                if (state.value is MatchState.BothSdCommitted) waitForP1SdRevealed()
-                if (state.value is MatchState.P1SdRevealed) {
-                    result = revealP2Sd()
-                } else {
-                    throw IllegalStateException(
-                        "resumePlayAsP2 SD loop stalled at ${state.value::class.simpleName} for round $round",
-                    )
+            // SD loop — pre-launch P2's picker concurrently with the
+            // wait-for-P1-commit. See [playAsP2]'s loop for rationale.
+            coroutineScope {
+                while (result == null) {
+                    val round = currentSdRoundOrError()
+                    val pickedAsync = if (state.value is MatchState.SdRoundOpen) {
+                        async { getSdPicks(round) }
+                    } else null
+                    if (state.value is MatchState.SdRoundOpen) waitForP1SdCommitted()
+                    if (state.value is MatchState.P1SdCommitted) {
+                        val (pShoot, pKeep) = pickedAsync?.await() ?: getSdPicks(round)
+                        submitP2SdPick(pShoot, pKeep)
+                    } else {
+                        pickedAsync?.cancel()
+                    }
+                    if (state.value is MatchState.BothSdCommitted) waitForP1SdRevealed()
+                    if (state.value is MatchState.P1SdRevealed) {
+                        result = revealP2Sd()
+                    } else {
+                        throw IllegalStateException(
+                            "resumePlayAsP2 SD loop stalled at ${state.value::class.simpleName} for round $round",
+                        )
+                    }
                 }
             }
+            result!!
         }
-        return result!!
     }
 
     /**

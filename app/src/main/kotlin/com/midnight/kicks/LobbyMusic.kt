@@ -29,10 +29,31 @@ object LobbyMusic {
     /** Soft bed level — present but never competes with the user reading the menu. */
     private const val VOLUME = 0.5f
 
+    private const val PREFS = "kicks_lobby_music"
+    private const val KEY_MUTED = "muted"
+
     private var player: MediaPlayer? = null
 
-    /** Start (lazily creating) or resume the looping theme. Safe to call repeatedly. */
+    /** User mute preference (persisted), cached after the first read. */
+    private var muted: Boolean? = null
+
+    private fun prefs(context: Context) =
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /** Whether the lobby theme is muted (persisted across launches). */
+    fun isMuted(context: Context): Boolean =
+        muted ?: prefs(context).getBoolean(KEY_MUTED, false).also { muted = it }
+
+    /** Toggle/set mute: persist it and immediately pause (mute) or resume (unmute). */
+    fun setMuted(context: Context, value: Boolean) {
+        muted = value
+        prefs(context).edit().putBoolean(KEY_MUTED, value).apply()
+        if (value) pause() else resume(context)
+    }
+
+    /** Start (lazily creating) or resume the looping theme. Safe to call repeatedly. No-op when muted. */
     fun resume(context: Context) {
+        if (isMuted(context)) return
         val existing = player
         if (existing != null) {
             if (!existing.isPlaying) runCatching { existing.start() }
