@@ -259,6 +259,26 @@ class KicksActivity : FragmentActivity() {
         // via MatchHud.applyRemote (see KicksMatchActivity / MatchBridge).
         MatchHud.relayHook = { json -> MatchBridge.publishHud(json) }
 
+        // Take the user to the SHOOTOUT. When a replay is published (regulation
+        // tie, each SD round, the final), bring the Unity match to the foreground
+        // so the cinematic plays. #268 holds the cinematic until :unity is RESUMED
+        // ("never play the shootout unwatched"); a player who left Unity to wait
+        // out the on-chain proving — ALWAYS the case for the player whose reveal
+        // resolves the match — would otherwise be stuck on the lobby with the
+        // cinematic held in a backgrounded (CREATED) :unity, never seen. Launching
+        // KicksMatchActivity (singleTask) is a no-op when it's already foreground;
+        // runCatching guards the Android 12+ background-launch limit (when MAIN is
+        // itself backgrounded the user is already in :unity, so no launch needed).
+        lifecycleScope.launch {
+            MatchHud.replay.collect { replay ->
+                if (replay != null) {
+                    runCatching {
+                        startActivity(Intent(this@KicksActivity, KicksMatchActivity::class.java))
+                    }.onFailure { Log.i(TAG, "replay → Unity foreground skipped: ${it.message}") }
+                }
+            }
+        }
+
         // Surface RESUME MATCH if a previous session is on disk. Independent
         // from any deep-link handling: even a cold launch with no intent
         // data should show the resume affordance if a session exists.

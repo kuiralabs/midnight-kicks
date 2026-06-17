@@ -127,8 +127,10 @@ private fun ReplayBody(
         }
         // #268: the shootout is the whole show — never play it unwatched. If the match
         // resolved while the app was backgrounded, HOLD the cinematic here until the user
-        // is actually watching (the activity is RESUMED), then fire it. Stamping firedAtMs
-        // AFTER the wait keeps the per-kick correlation fresh.
+        // is actually watching (the activity is RESUMED), then fire it. KicksActivity brings
+        // the Unity match to the foreground whenever a replay is published, so the resolving
+        // player (whose :unity is backgrounded during proving) is returned here to watch it.
+        // Stamping firedAtMs AFTER the wait keeps the per-kick correlation fresh.
         lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
         firedAtMs = System.currentTimeMillis()
         // Kick off the 3D cinematic. The kicks are the whole show — only a small live
