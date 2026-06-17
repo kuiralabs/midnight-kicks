@@ -6,37 +6,41 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pure tests for [LastMatchSummary.hasPicks] / [hasScore] — the two gates that
- * decide whether the menu's [LastMatchCard] renders its score line and its
- * two-row pick recap.
+ * Pure tests for [LastMatchSummary.hasMarks] / [hasScore] — the two gates that
+ * decide whether the menu's [LastMatchCard] renders its scoreline and its
+ * per-kick goal/save scoring recap.
  *
  * Three shapes feed the card and each must render correctly:
- *  - a played-through result (score + picks),
+ *  - a played-through result (score + per-kick goal/save marks),
  *  - a bootstrap "prior match finished" result (score only — the chain knows the
- *    scoreline but not the per-kick picks),
- *  - an early-ended result (forfeit / cancel — neither a scoreline nor picks).
+ *    scoreline but not the per-kick outcomes),
+ *  - an early-ended result (forfeit / cancel — neither a scoreline nor marks).
  */
 class LastMatchSummaryTest {
 
     private fun summary(
         outcome: Outcome,
-        myPicks: List<String> = emptyList(),
-        theirPicks: List<String> = emptyList(),
+        myMarks: List<Boolean> = emptyList(),
+        theirMarks: List<Boolean> = emptyList(),
     ) = LastMatchSummary(
         outcome = outcome,
         myScore = 3,
         theirScore = 2,
         myName = "You",
         theirName = "Opponent",
-        myPicks = myPicks,
-        theirPicks = theirPicks,
+        myMarks = myMarks,
+        theirMarks = theirMarks,
     )
 
     @Test
-    fun `played-through result has both a scoreline and a pick recap`() {
-        val s = summary(Outcome.WIN, myPicks = listOf("L", "C", "R"), theirPicks = listOf("R", "R", "C"))
+    fun `played-through result has both a scoreline and a goal-save recap`() {
+        val s = summary(
+            Outcome.WIN,
+            myMarks = listOf(true, true, false),
+            theirMarks = listOf(false, true, false),
+        )
         assertTrue(s.hasScore)
-        assertTrue(s.hasPicks)
+        assertTrue(s.hasMarks)
     }
 
     @Test
@@ -47,27 +51,27 @@ class LastMatchSummaryTest {
     }
 
     @Test
-    fun `prior-finished (score-only) shows the scoreline but no pick recap`() {
-        // Bootstrap path: picks are unknown, so the card shows the result + score
-        // without the recap rows.
-        val s = summary(Outcome.WIN) // empty picks
+    fun `prior-finished (score-only) shows the scoreline but no recap`() {
+        // Bootstrap path: per-kick outcomes are unknown, so the card shows the
+        // result + score without the goal/save recap rows.
+        val s = summary(Outcome.WIN) // no marks
         assertTrue(s.hasScore)
-        assertFalse(s.hasPicks)
+        assertFalse(s.hasMarks)
     }
 
     @Test
-    fun `early-ended outcomes show neither a scoreline nor a pick recap`() {
+    fun `early-ended outcomes show neither a scoreline nor a recap`() {
         listOf(Outcome.FORFEIT_WIN, Outcome.CANCELLED_REFUND).forEach {
             val s = summary(it)
             assertFalse("$it should have no scoreline", s.hasScore)
-            assertFalse("$it should have no pick recap", s.hasPicks)
+            assertFalse("$it should have no recap", s.hasMarks)
         }
     }
 
     @Test
-    fun `a half-populated pick recap (one side empty) does not render`() {
+    fun `a half-populated recap (one side empty) does not render`() {
         // Defensive: the recap needs both sides; one-sided data is treated as no recap.
-        assertFalse(summary(Outcome.WIN, myPicks = listOf("L", "C", "R")).hasPicks)
-        assertFalse(summary(Outcome.WIN, theirPicks = listOf("L", "C", "R")).hasPicks)
+        assertFalse(summary(Outcome.WIN, myMarks = listOf(true, false)).hasMarks)
+        assertFalse(summary(Outcome.WIN, theirMarks = listOf(true, false)).hasMarks)
     }
 }

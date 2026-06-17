@@ -1039,7 +1039,7 @@ class KicksActivity : FragmentActivity() {
             Player.P1 -> manager.playAsP1(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
             Player.P2 -> manager.playAsP2(shoots, keeps, getSdPicks = ::gatherSdPicksFromUi)
         }
-        handleMatchResult(result, deviceLabels = labels)
+        handleMatchResult(result)
     }
 
     /**
@@ -1297,8 +1297,8 @@ class KicksActivity : FragmentActivity() {
             theirScore = them,
             myName = playerProfile.value.name.ifBlank { "You" },
             theirName = "Opponent",
-            myPicks = emptyList(),
-            theirPicks = emptyList(),
+            myMarks = emptyList(),
+            theirMarks = emptyList(),
         )
     }
 
@@ -1425,7 +1425,7 @@ class KicksActivity : FragmentActivity() {
                             p2Score = p2,
                         ),
                     )
-                    handleMatchResult(result, deviceLabels = labels)
+                    handleMatchResult(result)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -1469,13 +1469,10 @@ class KicksActivity : FragmentActivity() {
      * dismissal wait → status update → opponent-picks line →
      * sendReplay) without duplicating the block.
      *
-     * @param result        the orchestrator's final [MatchResult].
-     * @param deviceLabels  direction labels for the picks THIS device
-     *   committed. Live path passes the freshly-locked Unity picks;
-     *   resume path passes the rehydrated picks pulled out of
-     *   [result] (since the user didn't re-pick).
+     * @param result the orchestrator's final [MatchResult]; its per-kick
+     *   goal/save outcomes feed the menu's [LastMatchCard] scoring recap.
      */
-    private suspend fun handleMatchResult(result: MatchResult, deviceLabels: List<String>) {
+    private suspend fun handleMatchResult(result: MatchResult) {
         // The final replay (published by the orchestrator before it returned)
         // becomes the end screen — a decisive ResultHud that the user exits via
         // REMATCH / MENU, not a dismissal. So this no longer waits on the replay
@@ -1494,9 +1491,6 @@ class KicksActivity : FragmentActivity() {
         val (mine, theirs) = if (currentRole == Player.P2) p2Score to p1Score else p1Score to p2Score
         val youLabel = playerProfile.value.name.ifBlank { "You" }
         val themLabel = if (currentRole == null) "AI" else "Opponent"
-        // Opponent's regulation shoots — whichever side this device is,
-        // the *other* player's picks form the recap's second line.
-        val opponentShoots = if (currentRole == Player.P2) result.p1Shoots else result.p2Shoots
         val earlyEnd = result.endedEarly
         val outcome = when {
             earlyEnd == EarlyOutcome.WON_BY_FORFEIT -> LastMatchSummary.Outcome.FORFEIT_WIN
@@ -1505,6 +1499,14 @@ class KicksActivity : FragmentActivity() {
             theirs > mine -> LastMatchSummary.Outcome.LOSS
             else -> LastMatchSummary.Outcome.DRAW
         }
+        // Per-kick goal/save scoring for the card, split by shooter — the SAME
+        // goal/save outcomes the in-match scoreboard shows. Empty for an
+        // early-ended (forfeit / cancel) match, where toRoundResults() is empty.
+        val rounds = result.toRoundResults()
+        val p1Marks = rounds.filter { it.shooter == "P1" }.map { it.result == "goal" }
+        val p2Marks = rounds.filter { it.shooter == "P2" }.map { it.result == "goal" }
+        val (myMarks, theirMarks) =
+            if (currentRole == Player.P2) p2Marks to p1Marks else p1Marks to p2Marks
         // The result now lives in its own card ([LastMatchCard]). Clear the
         // transient lines so neither a stale "Resuming…" nor a "You picked…"
         // confirmation lingers beneath it.
@@ -1516,9 +1518,8 @@ class KicksActivity : FragmentActivity() {
             theirScore = theirs,
             myName = youLabel,
             theirName = themLabel,
-            // No per-kick replay for an early-ended (forfeit / cancel) match.
-            myPicks = if (earlyEnd != null) emptyList() else deviceLabels,
-            theirPicks = if (earlyEnd != null) emptyList() else opponentShoots.map(::directionLabel),
+            myMarks = myMarks,
+            theirMarks = theirMarks,
         )
 
         // Match is resolved on chain — MatchManager already deleted this
@@ -1594,9 +1595,7 @@ class KicksActivity : FragmentActivity() {
                             role == Player.P1 -> manager.resumePlayAsP1(getSdPicks = ::gatherSdPicksFromUi)
                             else -> manager.resumePlayAsP2(getSdPicks = ::gatherSdPicksFromUi)
                         }
-                        // Device's own pick labels for the bottom-of-screen recap.
-                        val deviceShoots = if (role == Player.P2) result.p2Shoots else result.p1Shoots
-                        handleMatchResult(result, deviceLabels = deviceShoots.map(::directionLabel))
+                        handleMatchResult(result)
                     }
                 } catch (e: NeedFreshPicksException) {
                     // State machine isn't past the role's commit yet — the user needs to pick

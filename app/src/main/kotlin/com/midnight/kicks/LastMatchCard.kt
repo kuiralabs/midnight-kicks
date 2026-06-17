@@ -2,6 +2,7 @@ package com.midnight.kicks
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,7 +18,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -32,9 +32,10 @@ import androidx.compose.ui.unit.sp
  * one amber line and read identically. Now the result gets its own colour-coded
  * surface and the amber line is free to speak only about what needs attention.
  *
- * Picks are the per-kick direction labels (L/C/R). They're absent for an
+ * The recap is the per-kick scoring — a goal/save pip per kick (the same green ✓ /
+ * red ✕ pips the in-match scoreboard uses), in kicking order. It's absent for an
  * early-ended match (forfeit / cancel) and for the bootstrap "your prior match
- * finished" path, which only knows the scoreline — [hasPicks] / [hasScore] gate
+ * finished" path, which only knows the scoreline — [hasMarks] / [hasScore] gate
  * the optional rows so the card renders correctly in every case.
  */
 data class LastMatchSummary(
@@ -43,13 +44,15 @@ data class LastMatchSummary(
     val theirScore: Int,
     val myName: String,
     val theirName: String,
-    val myPicks: List<String>,
-    val theirPicks: List<String>,
+    /** Per-kick goal(true)/save(false) for THIS device, in kicking order (regulation then SD). */
+    val myMarks: List<Boolean>,
+    /** Per-kick goal/save for the opponent, same order. */
+    val theirMarks: List<Boolean>,
 ) {
     enum class Outcome { WIN, LOSS, DRAW, FORFEIT_WIN, CANCELLED_REFUND }
 
-    /** A full play-through carries a two-row pick recap; early-ended ones don't. */
-    val hasPicks: Boolean get() = myPicks.isNotEmpty() && theirPicks.isNotEmpty()
+    /** A full play-through carries the per-kick scoring recap; early-ended ones don't. */
+    val hasMarks: Boolean get() = myMarks.isNotEmpty() && theirMarks.isNotEmpty()
 
     /** Forfeit / cancel outcomes have no meaningful scoreline. */
     val hasScore: Boolean
@@ -59,8 +62,8 @@ data class LastMatchSummary(
 /**
  * The menu's glass "Last Match" result card — matches [MenuPanel]'s glass
  * aesthetic, tinted by the outcome. Shows a colour-coded headline, the
- * scoreline (mine – theirs), and a two-row pick recap. Persists until the next
- * action clears it; [onDismiss] is the ✕.
+ * scoreline (mine – theirs), and a per-kick goal/save scoring recap. Persists
+ * until the next action clears it; [onDismiss] is the ✕.
  */
 @Composable
 fun LastMatchCard(
@@ -141,7 +144,7 @@ fun LastMatchCard(
             Text(subtitle, color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp)
         }
 
-        if (summary.hasPicks) {
+        if (summary.hasMarks) {
             Spacer(modifier = Modifier.height(16.dp))
             Box(
                 modifier = Modifier
@@ -150,19 +153,28 @@ fun LastMatchCard(
                     .background(Color.White.copy(alpha = 0.08f)),
             )
             Spacer(modifier = Modifier.height(12.dp))
-            PickRecapRow(name = summary.myName, picks = summary.myPicks, nameColor = accent)
+            Text(
+                "✓ scored   ✕ saved",
+                color = Color.White.copy(alpha = 0.4f),
+                fontSize = 10.sp,
+                letterSpacing = 1.sp,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            ScorePipRow(name = summary.myName, marks = summary.myMarks, nameColor = accent)
             Spacer(modifier = Modifier.height(8.dp))
-            PickRecapRow(
+            ScorePipRow(
                 name = summary.theirName,
-                picks = summary.theirPicks,
+                marks = summary.theirMarks,
                 nameColor = Color.White.copy(alpha = 0.6f),
             )
         }
     }
 }
 
+/** One player's row: their name + a goal/save pip per kick (reuses the in-match
+ *  [ShotPip], so the menu recap and the live scoreboard read identically). */
 @Composable
-private fun PickRecapRow(name: String, picks: List<String>, nameColor: Color) {
+private fun ScorePipRow(name: String, marks: List<Boolean>, nameColor: Color) {
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             name,
@@ -171,14 +183,14 @@ private fun PickRecapRow(name: String, picks: List<String>, nameColor: Color) {
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.width(96.dp),
+            modifier = Modifier.width(88.dp),
         )
-        Text(
-            picks.joinToString("  "),
-            color = Color.White.copy(alpha = 0.85f),
-            fontSize = 14.sp,
-            fontFamily = FontFamily.Monospace,
-            letterSpacing = 2.sp,
-        )
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            marks.forEachIndexed { idx, goal ->
+                // Gap between regulation kicks and sudden death — mirrors the in-match scoreboard.
+                if (idx == REGULATION_KICKS_PER_PLAYER) Spacer(modifier = Modifier.width(6.dp))
+                ShotPip(ShotMark(revealed = true, goal = goal))
+            }
+        }
     }
 }

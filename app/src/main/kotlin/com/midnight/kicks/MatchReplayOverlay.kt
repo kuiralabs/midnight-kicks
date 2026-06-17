@@ -240,7 +240,9 @@ private fun LiveScoreboard(
     }
 }
 
-private data class ShotMark(val revealed: Boolean, val goal: Boolean)
+/** A single shootout mark: a taken-and-[revealed] kick that was a [goal] or a save.
+ *  Shared with the menu's [LastMatchCard] so both use the same goal/save pips. */
+internal data class ShotMark(val revealed: Boolean, val goal: Boolean)
 
 @Composable
 private fun ScoreboardRow(label: String, marks: List<ShotMark>, accent: Color) {
@@ -269,8 +271,10 @@ private fun ScoreboardRow(label: String, marks: List<ShotMark>, accent: Color) {
     }
 }
 
+/** Goal/save pip — green ✓ scored, red ✕ saved, outlined if not yet revealed.
+ *  Shared with the menu's [LastMatchCard]. */
 @Composable
-private fun ShotPip(mark: ShotMark) {
+internal fun ShotPip(mark: ShotMark) {
     val box = Modifier.size(15.dp).clip(RoundedCornerShape(4.dp))
     when {
         !mark.revealed -> Box(box.border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(4.dp)))
@@ -543,7 +547,7 @@ private fun ShootoutRecap(playerLabel: String, rounds: List<RoundResult>, localR
     }
 }
 
-private const val REGULATION_KICKS_PER_PLAYER = 5
+internal const val REGULATION_KICKS_PER_PLAYER = 5
 
 @Composable
 private fun RecapRow(label: String, marks: List<Boolean>) {
