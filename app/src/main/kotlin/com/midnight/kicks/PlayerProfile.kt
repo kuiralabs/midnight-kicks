@@ -22,9 +22,8 @@ data class PlayerProfile(
 }
 
 /**
- * SharedPreferences-backed persistence for [PlayerProfile] — the same plain-prefs
- * pattern as the network preference ([NetworkPref]); the data isn't sensitive.
- * Returns [PlayerProfile.DEFAULT] until the player customizes.
+ * SharedPreferences-backed persistence for [PlayerProfile] — a plain-prefs pattern
+ * (the data isn't sensitive). Returns [PlayerProfile.DEFAULT] until the player customizes.
  */
 object PlayerProfileStore {
     private const val PREFS = "kicks_player_profile"

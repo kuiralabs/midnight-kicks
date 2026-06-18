@@ -311,9 +311,12 @@ class KicksActivity : FragmentActivity() {
                     lastMatch = lastMatch.value,
                     onDismissLastMatch = { lastMatch.value = null },
                     hasActiveSession = hasActiveSession.value,
-                    network = NetworkPref.load(this),
+                    // #285: the SDK's durable NetworkPreferenceStore is the single source
+                    // of truth (shared with the wallet pill); read + write it via the
+                    // provider instead of a Kicks-local pref that could desync / be lost.
+                    network = sdkProvider.selectedNetwork.value,
                     openWalletSignal = walletOpenSignal.value,
-                    onNetworkChange = { NetworkPref.save(this, it) },
+                    onNetworkChange = { sdkProvider.selectNetwork(it) },
                     onCreateMatch = {
                         clearMenuStatus()
                         startCreateMatch()
@@ -830,9 +833,9 @@ class KicksActivity : FragmentActivity() {
         lifecycleScope.launch {
             try {
                 // Reconcile the shared SDK to the user's CURRENT network on EVERY
-                // action, not just first launch. A network switch only saves
-                // NetworkPref + refreshes the wallet panel; the Kicks action path
-                // must independently re-point the provider, else a Create/Join
+                // action, not just first launch. A network switch only persists to
+                // the shared NetworkPreferenceStore + refreshes the wallet panel; the
+                // Kicks action path must independently re-point the provider, else a Create/Join
                 // after switching runs against the boot network's wallet (stale
                 // dust → "Insufficient dust balance"). MatchManager (a follower)
                 // reads the provider's live SDK, so re-pointing here is enough —
@@ -840,7 +843,7 @@ class KicksActivity : FragmentActivity() {
                 // unchanged config (cheap on the hot path). Throws
                 // SigilRequiredException until a passkey is forged — the catch
                 // below turns that into a "forge your sigil first" prompt.
-                val currentNetwork = NetworkPref.load(this@KicksActivity)
+                val currentNetwork = sdkProvider.selectedNetwork.value
                 sdkProvider.ensureSdk(
                     this@KicksActivity,
                     WalletConfig(network = currentNetwork),
@@ -2056,27 +2059,3 @@ private fun MenuButton(text: String, onClick: () -> Unit) {
     KicksButton(label = text, onClick = onClick)
 }
 
-/**
- * App-layer persistence of the user's selected network. The SDK is
- * network-agnostic — it takes a network config and emits onNetworkChange;
- * remembering the choice across launches is the app's responsibility, so the
- * wallet boots on the network the user last used instead of always defaulting
- * to UNDEPLOYED. Plain (non-encrypted) prefs — the network id isn't a secret.
- */
-private object NetworkPref {
-    private const val PREFS = "kicks_network_pref"
-    private const val KEY = "selected_network"
-
-    fun load(ctx: Context): MidnightNetwork =
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY, null)
-            ?.let { name -> runCatching { MidnightNetwork.valueOf(name) }.getOrNull() }
-            ?: MidnightNetwork.UNDEPLOYED
-
-    fun save(ctx: Context, network: MidnightNetwork) {
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY, network.name)
-            .apply()
-    }
-}
