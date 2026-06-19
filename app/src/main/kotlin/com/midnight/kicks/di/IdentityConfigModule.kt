@@ -13,7 +13,8 @@ import javax.inject.Singleton
  * The SDK provides no default `PasskeyConfig` (wishlist #22) — `rpId` is the
  * passkey domain and must match the `assetlinks.json` this app hosts, so each
  * consuming app declares its own. Kicks uses the shared dev DAL host for now;
- * `rpName` is what shows in the biometric prompt.
+ * `rpName` is the human-readable label the credential carries in Google Password
+ * Manager / the system passkey UI.
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -30,5 +31,11 @@ object IdentityConfigModule {
     // Shared across the Kuira example apps so one sigil restores across all of
     // them; the matching assetlinks.json lists every app's package + cert.
     private const val RP_ID = "kuiralabs.github.io"
-    private const val RP_NAME = "Midnight Kicks"
+
+    // Because every Kuira app shares RP_ID, they share ONE passkey credential —
+    // whichever app forges first stamps its rpName as the GPM label for ALL of
+    // them (other apps reuse the credential via sign-in and never set a name).
+    // So rpName is the brand "Kuira Sigil", not this app's name: GPM reads the
+    // same no matter which app a user started from. Keep it identical across apps.
+    private const val RP_NAME = "Kuira Sigil"
 }
