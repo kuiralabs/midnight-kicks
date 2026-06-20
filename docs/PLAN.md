@@ -72,7 +72,7 @@ Separate repo: `midnight-kicks/` (app/ + unity/ + contract/). Consumes Kuira SDK
 | Access key | secp256k1 (advocate P-256 to Midnight) | Self-verifiable keyAuthorization | Delegation policies |
 | Recovery | PRF-encrypted cloud backup | Zero words, passkey syncs | TEE-hardened key material |
 
-**Our edge over rvcas:** self-verifiable keyAuthorization (TEE signs directly, no server trust). Full investigation in the parent Kuira repo at `kuira-android-wallet/docs/planning/IDENTITY_INVESTIGATION.md` (not copied here — it spans both Kicks and Kuira).
+**Our edge over rvcas:** self-verifiable keyAuthorization (TEE signs directly, no server trust). The detailed identity investigation lives in our internal planning docs (not copied here — it spans both Kicks and Kuira).
 
 ---
 
