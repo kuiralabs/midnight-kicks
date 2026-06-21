@@ -50,7 +50,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.midnight.kuira.dapp.PanelBar
 import com.midnight.kuira.core.identity.backup.SigilRequiredException
 import com.midnight.kuira.core.network.MidnightNetwork
@@ -269,12 +271,37 @@ class KicksActivity : FragmentActivity() {
         // KicksMatchActivity (singleTask) is a no-op when it's already foreground;
         // runCatching guards the Android 12+ background-launch limit (when MAIN is
         // itself backgrounded the user is already in :unity, so no launch needed).
+        // The publisher whose reveal RESOLVES the match (P1) is backgrounded while it proves
+        // on-chain, so this publish-time startActivity is blocked by Android 12+'s background-launch
+        // limit → the held cinematic is never seen and the notification tap drops the user on the
+        // lobby (#268's hold can't help if the overlay never gets a window). Remember a blocked
+        // bring and retry it once when MAIN next returns to the foreground (the notification tap),
+        // when the launch is finally allowed — so the shootout plays instead of being bypassed.
+        var replayBringSkipped = false
         lifecycleScope.launch {
             MatchHud.replay.collect { replay ->
-                if (replay != null) {
+                if (replay == null) {
+                    replayBringSkipped = false
+                    return@collect
+                }
+                runCatching {
+                    startActivity(Intent(this@KicksActivity, KicksMatchActivity::class.java))
+                }.onFailure {
+                    Log.i(TAG, "replay → Unity foreground skipped (retry on resume): ${it.message}")
+                    replayBringSkipped = true
+                }
+            }
+        }
+        // Retry only a BLOCKED bring (the flag), not "whenever a replay exists" — a decisive end
+        // screen keeps the replay non-null until REMATCH/MENU, so an unconditional re-launch would
+        // loop the match activity. One retry on RESUMED is all the backgrounded case needs.
+        lifecycleScope.launch {
+            lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                if (replayBringSkipped && MatchHud.replay.value != null) {
+                    replayBringSkipped = false
                     runCatching {
                         startActivity(Intent(this@KicksActivity, KicksMatchActivity::class.java))
-                    }.onFailure { Log.i(TAG, "replay → Unity foreground skipped: ${it.message}") }
+                    }.onFailure { Log.i(TAG, "replay → Unity foreground retry failed: ${it.message}") }
                 }
             }
         }
@@ -1870,16 +1897,11 @@ fun KicksApp(
                 )
             }
 
-            // PanelBar sits ATOP the menu in a Column (its documented pattern),
-            // not overlaid in the Box — so the menu content fills only the space
-            // *below* the pills and can never rise under them (the landscape
-            // panel was colliding with the top-right wallet pill). The stadium
-            // image + scrim above remain full-bleed behind this Column.
-            // PanelBar already clears the status bar; the content below only
-            // needs the side + bottom safe insets (landscape nav bar / cutout).
+            // The menu fills the screen; the sigil + wallet chips FLOAT over it as an overlay
+            // (PanelBar(floating = true), added last in the Box below so it sits on top). The
+            // stadium image + scrim stay full-bleed behind. Menu content is vertically centered,
+            // clear of the floaters at the top corners.
             Column(modifier = Modifier.fillMaxSize()) {
-                PanelBar(network = network, onNetworkChange = onNetworkChange, openWalletSignal = openWalletSignal)
-
                 val contentInsets = Modifier.windowInsetsPadding(
                     WindowInsets.safeDrawing.only(
                         WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom,
@@ -1944,6 +1966,14 @@ fun KicksApp(
                     }
                 }
             }
+
+            // Sigil + wallet chips as draggable, resizable floaters over the menu (floating mode).
+            PanelBar(
+                floating = true,
+                network = network,
+                onNetworkChange = onNetworkChange,
+                openWalletSignal = openWalletSignal,
+            )
 
             // Lobby music mute toggle — overlay at bottom-start so it clears the top
             // wallet/sigil pills and the centered menu. Persisted via LobbyMusic.
