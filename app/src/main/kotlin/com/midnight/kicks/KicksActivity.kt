@@ -59,7 +59,7 @@ import com.midnight.kuira.core.network.MidnightNetwork
 import com.midnight.kuira.core.identity.sigil.SigilStateStore
 import com.midnight.kuira.sdk.walletruntime.WalletNotifications
 import com.midnight.kuira.sdk.walletruntime.MidnightSdkProvider
-import com.midnight.kuira.dapp.lock.SessionLockGate
+import com.midnight.kuira.dapp.wallet.WalletAppShell
 import com.midnight.kuira.sdk.walletruntime.SessionLock
 import com.midnight.kuira.sdk.walletruntime.WalletConfig
 import dagger.hilt.android.AndroidEntryPoint
@@ -316,11 +316,13 @@ class KicksActivity : FragmentActivity() {
         handleWalletShortcut(intent)
 
         setContent {
-            // Whole-app session lock (#14): gate the entire menu surface — the
-            // wallet pill + sigil live here. The Unity match (KicksMatchActivity)
-            // is a separate process and a GameActivity (not a FragmentActivity, so
-            // it can't host the unlock biometric); it is intentionally not gated.
-            SessionLockGate {
+            // Whole-app session lock (#14) + the wallet's full-screen overlays:
+            // WalletAppShell wraps SessionLockGate (gate the entire menu surface — the
+            // wallet pill + sigil live here) around WalletOverlayHost (Send / Receive /
+            // Settings render in the activity window). The Unity match (KicksMatchActivity)
+            // is a separate process and a GameActivity (not a FragmentActivity, so it
+            // can't host the unlock biometric); it is intentionally not gated.
+            WalletAppShell {
             // Adaptive WindowSizeClass for the whole UI tree; recomputes on
             // rotation (observes Configuration) under this activity's configChanges.
             ProvideWindowSizeClass(this@KicksActivity) {
@@ -472,7 +474,7 @@ class KicksActivity : FragmentActivity() {
                 )
             }
             } // ProvideWindowSizeClass
-            } // SessionLockGate
+            } // WalletAppShell
         }
     }
 
