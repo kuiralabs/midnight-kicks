@@ -285,7 +285,7 @@ class KicksActivity : FragmentActivity() {
                     return@collect
                 }
                 runCatching {
-                    startActivity(Intent(this@KicksActivity, KicksMatchActivity::class.java))
+                    launchMatchActivity()
                 }.onFailure {
                     Log.i(TAG, "replay → Unity foreground skipped (retry on resume): ${it.message}")
                     replayBringSkipped = true
@@ -300,7 +300,7 @@ class KicksActivity : FragmentActivity() {
                 if (replayBringSkipped && MatchHud.replay.value != null) {
                     replayBringSkipped = false
                     runCatching {
-                        startActivity(Intent(this@KicksActivity, KicksMatchActivity::class.java))
+                        launchMatchActivity()
                     }.onFailure { Log.i(TAG, "replay → Unity foreground retry failed: ${it.message}") }
                 }
             }
@@ -834,6 +834,39 @@ class KicksActivity : FragmentActivity() {
         // Unity match audio and resumes here on return. Held off during the
         // cold-start splash — that hands the theme off itself when it finishes.
         if (!splashVisible.value) LobbyMusic.resume(this)
+
+        // Return-to-match on an icon / recents return. The home-icon fires a
+        // MAIN/LAUNCHER intent at this singleTask lobby; because the Unity match now
+        // lives in its OWN task (distinct taskAffinity, see the manifest), the
+        // launcher no longer tears it down. So if the Unity match is still ALIVE
+        // (:unity bound — covers BOTH on-chain matches and off-chain practice, unlike
+        // orchestratorJob which only tracks the on-chain orchestration) we were
+        // surfaced here by the launcher, not by choice — bring the LIVING match
+        // forward. The icon/recents analog of the match-notification return (#268). A
+        // deliberate LEAVE / MENU unbinds :unity ([MatchBridge.onUnityGone]), so this
+        // never hijacks an intentional return to the menu.
+        if (MatchBridge.isUnityBound()) {
+            Log.i(TAG, "onResume: Unity match alive — returning to it")
+            launchMatchActivity()
+        }
+    }
+
+    /**
+     * Launch — or bring forward — the Unity match activity.
+     *
+     * [KicksMatchActivity] runs in its own task (distinct `taskAffinity` in the
+     * manifest) and process (`:unity`). `FLAG_ACTIVITY_NEW_TASK` routes the launch to
+     * that task; `FLAG_ACTIVITY_REORDER_TO_FRONT` brings the LIVE instance forward
+     * when one already exists (the match notification's return uses the same flags).
+     * Its own task is what stops the home-icon launch of this singleTask lobby from
+     * destroying it — Unity is a single-instance native engine with a slow teardown,
+     * and relaunching it mid-destroy blacks the screen out.
+     */
+    private fun launchMatchActivity() {
+        startActivity(
+            Intent(this@KicksActivity, KicksMatchActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+        )
     }
 
     override fun onPause() {
@@ -1018,8 +1051,7 @@ class KicksActivity : FragmentActivity() {
             // MatchHudOverlay ComposeView on top of Unity's surface so
             // the user sees state / tx-progress / opponent-wait during
             // gameplay instead of a frozen 3D scene.
-            val intent = Intent(this@KicksActivity, KicksMatchActivity::class.java)
-            startActivity(intent)
+            launchMatchActivity()
 
             // Wait briefly for Unity's Activity to come up before sending
             // the first bridge message — UnityPlayer needs to be alive to
@@ -1085,7 +1117,7 @@ class KicksActivity : FragmentActivity() {
         currentRole = null // human is P1 in the role pattern
         statusMessage.value = "Pick your 5 directions!"
         Log.i(TAG, "Launching Unity for QUICK PRACTICE (off-chain)…")
-        startActivity(Intent(this@KicksActivity, KicksMatchActivity::class.java))
+        launchMatchActivity()
         lifecycleScope.launch {
             delay(UNITY_BOOT_DELAY_MS)
             sendPlayerAppearanceToUnity()
@@ -1599,7 +1631,7 @@ class KicksActivity : FragmentActivity() {
         // orchestrator keeps driving and Unity re-binds to the current phase.
         if (orchestratorJob?.isActive == true) {
             Log.i(TAG, "resumeOrchestrator: match already being driven — bringing Unity forward, not re-launching")
-            startActivity(Intent(this@KicksActivity, KicksMatchActivity::class.java))
+            launchMatchActivity()
             return
         }
         ensureSdkReady {
@@ -1649,7 +1681,7 @@ class KicksActivity : FragmentActivity() {
             }
             // Boot Unity AFTER the op enrolled (the launch above runs inline up to the
             // delay, so the FGS observer still sees main foreground when it reacts).
-            startActivity(Intent(this@KicksActivity, KicksMatchActivity::class.java))
+            launchMatchActivity()
         }
     }
 

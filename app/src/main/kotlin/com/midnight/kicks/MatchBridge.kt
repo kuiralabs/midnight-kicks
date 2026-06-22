@@ -50,6 +50,15 @@ object MatchBridge {
     @Volatile private var unityInbox: Messenger? = null
 
     /**
+     * Whether the `:unity` match process is currently bound — i.e. a Unity match
+     * activity is alive (on-chain match OR off-chain practice). Cleared by
+     * [onUnityGone] when `:unity` unbinds (a deliberate LEAVE / MENU, or process death).
+     * The lobby's onResume uses this to bring a still-live match back when the launcher
+     * surfaced the menu over it.
+     */
+    fun isUnityBound(): Boolean = unityInbox != null
+
+    /**
      * Unity-bound messages ([MSG_TO_UNITY]) sent before `:unity` finished
      * binding. The first `choicePhase` is fired off a fixed boot delay in
      * [KicksActivity]; with Unity now in its **own process** that cold-start is
