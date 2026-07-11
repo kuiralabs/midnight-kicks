@@ -3,6 +3,7 @@ package com.midnight.kicks
 import android.content.Context
 import android.util.Log
 import androidx.compose.ui.graphics.toArgb
+import com.midnight.kuira.contract.generated.PenaltyContract
 import com.midnight.kuira.core.compact.ContractCallStage
 import com.midnight.kuira.dapp.defaultLabel
 import com.midnight.kuira.dapp.progressFraction
@@ -801,7 +802,7 @@ open class MatchManager(
         deadline: BigInteger,
     ) {
         retryUntilIndexerReady(JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS) {
-            callCircuit(secretKey, address, "joinMatch", arrayOf(deadline))
+            onContract(secretKey, address, "joinMatch") { joinMatch(deadline, onProgress = it) }
         }
     }
 
@@ -818,7 +819,7 @@ open class MatchManager(
         isVsAi = true
         updateCurrentMatch { it.copy(ai = MatchStore.AiState(secretKey = p2SecretKey.copyOf())) }
         retryUntilIndexerReady(JOIN_RETRY_LIMIT, JOIN_RETRY_DELAY_MS) {
-            callCircuit(p2SecretKey, prev.address, "joinMatch", arrayOf(deadline))
+            onContract(p2SecretKey, prev.address, "joinMatch") { joinMatch(deadline, onProgress = it) }
         }
     }
 
@@ -2576,7 +2577,7 @@ open class MatchManager(
         val address = prev.address ?: error("claimForfeit: no active match")
         val match = store.load(address) ?: error("claimForfeit: no stored match for $address")
         try {
-            callCircuit(match.secretKey, address, "claimTimeout")
+            onContract(match.secretKey, address, "claimTimeout") { claimTimeout(onProgress = it) }
             setState(MatchState.Resolved(forfeitResult(address, EarlyOutcome.WON_BY_FORFEIT)))
         } catch (e: Exception) {
             Log.w(TAG, "claimForfeit failed", e)
@@ -2596,7 +2597,7 @@ open class MatchManager(
         val address = prev.address ?: error("cancelMatch: no active match")
         val match = store.load(address) ?: error("cancelMatch: no stored match for $address")
         try {
-            callCircuit(match.secretKey, address, "cancelMatch")
+            onContract(match.secretKey, address, "cancelMatch") { cancelMatch(onProgress = it) }
             setState(MatchState.Resolved(forfeitResult(address, EarlyOutcome.CANCELLED_REFUND)))
         } catch (e: Exception) {
             Log.w(TAG, "cancelMatch failed", e)
@@ -2614,14 +2615,18 @@ open class MatchManager(
         endedEarly = outcome,
     )
 
-    private suspend fun callCircuit(
+    /**
+     * Run [action] on the typed generated [PenaltyContract] facade inside a proving session, wiring
+     * the shared [stageReporter] (labelled [stageName]) as its onProgress. Replaces the old dynamic
+     * `contract.call(circuitName, *args)` dispatch with the compile-checked facade methods.
+     */
+    private suspend fun onContract(
         secretKey: ByteArray,
         address: String,
-        circuitName: String,
-        args: Array<Any?> = emptyArray(),
+        stageName: String,
+        action: suspend PenaltyContract.(onProgress: suspend (ContractCallStage) -> Unit) -> Unit,
     ) = holdingSession {
-        val contract = createContractHandle(secretKey, address)
-        contract.call(circuitName, *args, onProgress = stageReporter(circuitName))
+        PenaltyContract(createContractHandle(secretKey, address)).action(stageReporter(stageName))
     }
 
     private suspend fun commitRegulation(
@@ -2634,7 +2639,7 @@ open class MatchManager(
         val contract = createContractHandle(
             secretKey, address, shoots = shoots, keeps = keeps, nonce = nonce,
         )
-        contract.call("commitRegulation", onProgress = stageReporter("commitRegulation"))
+        PenaltyContract(contract).commitRegulation(onProgress = stageReporter("commitRegulation"))
     }
 
     private suspend fun revealRegulation(
@@ -2647,7 +2652,7 @@ open class MatchManager(
         val contract = createContractHandle(
             secretKey, address, shoots = shoots, keeps = keeps, nonce = nonce,
         )
-        contract.call("revealRegulation", onProgress = stageReporter("revealRegulation"))
+        PenaltyContract(contract).revealRegulation(onProgress = stageReporter("revealRegulation"))
     }
 
     private suspend fun commitSuddenDeath(
@@ -2660,7 +2665,7 @@ open class MatchManager(
         val contract = createContractHandle(
             secretKey, address, sdShoot = sdShoot, sdKeep = sdKeep, nonce = nonce,
         )
-        contract.call("commitSuddenDeath", onProgress = stageReporter("commitSD"))
+        PenaltyContract(contract).commitSuddenDeath(onProgress = stageReporter("commitSD"))
     }
 
     private suspend fun revealSuddenDeath(
@@ -2673,7 +2678,7 @@ open class MatchManager(
         val contract = createContractHandle(
             secretKey, address, sdShoot = sdShoot, sdKeep = sdKeep, nonce = nonce,
         )
-        contract.call("revealSuddenDeath", onProgress = stageReporter("revealSD"))
+        PenaltyContract(contract).revealSuddenDeath(onProgress = stageReporter("revealSD"))
     }
 
     /**
