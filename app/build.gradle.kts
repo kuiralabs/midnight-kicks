@@ -10,10 +10,10 @@ plugins {
     // contract/package.json — currently compactc 0.31.0 → runtime 0.16.0).
     // The plugin wires the sync task into preBuild + fails fast if the
     // contract hasn't been compiled.
-    id("io.github.kuiralabs.contract") version "0.1.0-alpha04"
+    id("io.github.kuiralabs.contract") version "0.1.0-alpha05"
     // Auto `adb reverse` of the localnet ports on installDebug to a physical
     // device — no manual step. No-op on emulators (they use 10.0.2.2).
-    id("io.github.kuiralabs.localnet") version "0.1.0-alpha04"
+    id("io.github.kuiralabs.localnet") version "0.1.0-alpha05"
 }
 
 kuiraContract {
@@ -102,7 +102,7 @@ dependencies {
     // SDK surface Kicks touches directly (compact-engine, identity, network,
     // wallet-runtime, wallet-seed, auth, ledger, …) so the types are on Kicks's
     // compile classpath transitively. No per-module redeclaration needed.
-    implementation("io.github.kuiralabs:dapp-ui:0.1.0-alpha04")
+    implementation("io.github.kuiralabs:dapp-ui:0.1.0-alpha05")
 
     // AndroidX directly used by Kicks's own code (FragmentActivity host,
     // Compose). Things Kuira pulls in transitively (biometric, credentials,

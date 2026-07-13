@@ -2219,8 +2219,13 @@ open class MatchManager(
         // Only close the SDK if we built it (standalone). When it came from the
         // shared MidnightSdkProvider, the provider owns its lifecycle — closing
         // it here would tear down the wallet panel's SDK out from under it.
-        if (sdkProvider == null) sdk?.close()
+        // sdk.close() is suspend (it waits for any in-flight balance before freeing the dust
+        // state), but this close() is a non-suspend activity-destroy hook — fire-and-forget the
+        // teardown on a detached scope, the same shape MidnightSdkProvider uses internally.
+        // Detached (not managerScope) because managerScope was just cancelled above.
+        val standaloneSdk = if (sdkProvider == null) sdk else null
         sdk = null
+        standaloneSdk?.let { CoroutineScope(Dispatchers.Default).launch { it.close() } }
         p1SecretKey.fill(0)
         p2SecretKey.fill(0)
         p1RegulationNonce?.fill(0)
