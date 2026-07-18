@@ -18,6 +18,11 @@ plugins {
 
 kuiraContract {
     source.set("../contract/src/managed/penalty")
+    // Second contract: the payment contract from kuiralabs/kuira-sdk-android#4,
+    // used by PaymentMoneyPathTest to prove the unshielded money-path workaround.
+    contracts {
+        register("payment") { source.set("../contract/src/managed/payment") }
+    }
     // Offline bundle (#256): ship the protocol wallet proving keys in the APK so a
     // fresh device proves without the runtime S3 download. ~33MB; downloaded once
     // at build time into a shared Gradle cache, then staged into assets/wallet-keys.
