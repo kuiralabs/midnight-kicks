@@ -21,7 +21,7 @@ import org.junit.runner.RunWith
 import java.math.BigInteger
 
 /**
- * Proves the unshielded money-path workaround for kuiralabs/kuira-sdk-android#4 end-to-end
+ * Proves the unshielded money-path workaround end-to-end
  * on localnet, using the reporter's exact `payment.compact` (deposit via `receiveUnshielded`).
  *
  * It is a fails-before / passes-after proof:

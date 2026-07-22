@@ -2,7 +2,7 @@ pragma language_version 0.23;
 
 import CompactStandardLibrary;
 
-// Mirrors kuiralabs/kuira-sdk-android#4 exactly: a payment contract whose
+// Mirrors the reported issue exactly: a payment contract whose
 // deposit uses receiveUnshielded and withdraw uses sendUnshielded (NIGHT).
 // Used to prove the unshielded money-path workaround end-to-end.
 
