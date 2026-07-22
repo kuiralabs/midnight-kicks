@@ -50,7 +50,7 @@ midnight-kicks/
 |---|---|---|
 | **JDK 17** | Gradle build | `java -version` → 17 |
 | **Android Studio + Android SDK** | Build/run the app | `compileSdk 36` · `minSdk 30`. A fresh clone needs `local.properties` with `sdk.dir=/path/to/Android/sdk` — Android Studio writes it on first open, or create it by hand. |
-| **A device or emulator on Android 13+ (API 33+), with a screen lock set** | Run the app | SDK `alpha04` ships `arm64-v8a` **and** `x86_64`, so a physical device or an Intel/Apple-silicon emulator both work. A screen lock is required for passkeys. |
+| **A device or emulator on Android 13+ (API 33+), with a screen lock set** | Run the app | SDK `alpha05` ships `arm64-v8a` **and** `x86_64`, so a physical device or an Intel/Apple-silicon emulator both work. A screen lock is required for passkeys. |
 | **Node.js 18+ and Compact `0.31.0`** | Compile the contract | `compact update 0.31.0`, then `compact --version` → `0.31.0` (produces runtime `0.16.0`). |
 | **A Midnight localnet + a funded wallet** | Deploy the contract and play on-chain | Start it via Kuira's [Develop against a localnet](https://kuiralabs.github.io/kuira-sdk-android/integration/) guide (Docker stack + Midnight Wallet CLI). The `io.github.kuiralabs.localnet` Gradle plugin auto-runs `adb reverse` for the localnet ports on `installDebug`, so a physical device reaches the localnet running on your machine. |
 | **Unity 6 — `6000.4.4f1`** | **Only** if you change the 3D side | Not needed just to build/run: the exported `unityLibrary/` is committed. |
@@ -61,7 +61,7 @@ Passkey identity is pre-wired to `rpId = kuiralabs.github.io` (whose `assetlinks
 
 ## Run it
 
-The app consumes the **published** SDK (`io.github.kuiralabs:dapp-ui:0.1.0-alpha04`) from Maven Central — no SDK-from-source build and no Rust toolchain needed.
+The app consumes the **published** SDK (`io.github.kuiralabs:dapp-ui:0.1.0-alpha05`) from Maven Central — no SDK-from-source build and no Rust toolchain needed.
 
 **1 · Compile the contract** — required; the build fails with a clear message if the managed artifacts are missing:
 
