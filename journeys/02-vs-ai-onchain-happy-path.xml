@@ -1,0 +1,43 @@
+<journey name="Kicks: VS AI on-chain happy path">
+  <description>
+    The money path the game exists for: one match that deploys its own contract, has the AI join
+    it, commits both sides' picks and reveals them. Four contract calls, each proved on the device
+    and finalized on chain, each paying its own dust fee from the wallet's UTXOs.
+
+    Nothing below is about the contracts. Every step here failed at least once on a real device
+    for a reason no unit test and no localnet run could show: a spill the platform deleted
+    mid-replay, a k=13 proof refused for want of free memory, a sigil gate no automated run could
+    pass, a checkpoint that sat behind its own cursor. The sequence is cheap to assert and is the
+    only thing that catches that class of failure.
+
+    Covers the deploy plus three of the penalty contract's circuits: joinMatch, commitRegulation
+    and revealRegulation. The other three cannot be reached from a happy path and
+    need journeys of their own: commitSuddenDeath and revealSuddenDeath only run when regulation
+    ends level, claimTimeout needs a deadline to pass, and cancelMatch needs an abandoned match.
+
+    Preconditions this journey does NOT set up, and fails honestly without:
+    - a debuggable build whose local.properties sets kuira.dev.seed, so there is a wallet without
+      a passkey ceremony, and kuira.blockfrost.projectId, so PreProd answers at all;
+    - that wallet funded on PreProd, with dust registered;
+    - a device with room for a k=13 proof — about 366MB free AT PROVING TIME, which a 2GB
+      emulator does not have once Unity is resident, however much it has at rest.
+
+    The first match on a wallet with no checkpoint spends ~12 minutes syncing dust before the
+    deploy can pay its fee. That is expected, happens once per wallet per device, and the deploy
+    sits on "Deploying match…" throughout.
+  </description>
+  <actions>
+    <action>Verify the screen shows "VS AI · ON-CHAIN"</action>
+    <action>Tap "VS AI · ON-CHAIN"</action>
+    <action>Verify the screen shows "SHOOTING · 1 of 5"</action>
+    <action>Tap "LEFT", and repeat for each of the five shots</action>
+    <action>Verify the screen shows "KEEPING · 1 of 5"</action>
+    <action>Tap "RIGHT", and repeat for each of the five saves</action>
+    <action>Verify the screen shows "Deploying match…"</action>
+    <action>Verify the screen shows "Committing your picks…"</action>
+    <action>Verify the screen shows "Opponent revealing…"</action>
+    <action>Verify the screen shows "OPPONENT"</action>
+    <action>Verify the screen shows a "REMATCH" control</action>
+    <action>Verify the screen shows a "MENU" control</action>
+  </actions>
+</journey>
