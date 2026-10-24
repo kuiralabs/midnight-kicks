@@ -1,0 +1,24 @@
+<journey name="Kicks: sigil-less launch">
+  <description>
+    A fresh install must reach the match lobby with every entry point present, before any sigil
+    exists, with the SDK's wallet pill mounted and no lock trapping the session.
+
+    Kicks is the hardest consumer to regress quietly: it is dual-process, it backgrounds its main
+    process for an entire match while gameplay runs elsewhere, and SessionLock deliberately does
+    not arm a background wipe because of it. That makes it the app where a lock-policy change is
+    most likely to do damage and least likely to be noticed — so the no-lock assertions here are
+    load-bearing, not boilerplate.
+  </description>
+  <actions>
+    <action>Verify the screen shows "MIDNIGHT"</action>
+    <action>Verify the screen shows "KICKS"</action>
+    <action>Verify the screen shows a "CREATE MATCH" control</action>
+    <action>Verify the screen shows a "JOIN MATCH" control</action>
+    <action>Verify the screen shows a "QUICK PRACTICE" control</action>
+    <action>Verify the screen shows "Sigil"</action>
+    <action>Verify the screen shows "NIGHT"</action>
+    <action>Verify the screen does NOT show "LOCKED"</action>
+    <action>Verify the screen does NOT show "Authentication didn't complete"</action>
+    <action>Verify the screen does NOT show "Something went wrong"</action>
+  </actions>
+</journey>
