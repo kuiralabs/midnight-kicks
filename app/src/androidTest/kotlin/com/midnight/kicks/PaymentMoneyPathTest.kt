@@ -84,12 +84,17 @@ class PaymentMoneyPathTest {
 
         // ── Layer 2: a PLAIN deposit (no offer supplied) auto-funds from the wallet and lands ──
         // call() throws on any failure and only returns after submit + indexing, so a returned
-        // SUBMITTED receipt means the SDK detected the receiveUnshielded, built the funding offer
-        // itself, and the node accepted the tx.
+        // FINALIZED receipt means the SDK detected the receiveUnshielded, built the funding offer
+        // itself, and the tx is in a finalized block.
         val receipt = paymentHandle(sdk, ctx, address)
             .call("deposit", depositAmount, onProgress = { Log.i(tag, "auto-fund deposit: $it") })
         Log.i(tag, "auto-funded deposit receipt: status=${receipt.status}")
-        assertEquals("plain deposit should auto-fund + submit", TransactionStatus.SUBMITTED, receipt.status)
+        assertEquals("plain deposit should auto-fund and finalize", TransactionStatus.FINALIZED, receipt.status)
+        assertTrue(
+            "a finalized deposit must carry its 64-hex transaction hash: ${receipt.txHash}",
+            receipt.txHash?.matches(Regex("^[0-9a-f]{64}$")) == true,
+        )
+        assertTrue("a finalized deposit must carry its block height", (receipt.blockHeight ?: 0L) > 0L)
 
         val totalDeposited = paymentHandle(sdk, ctx, address).ledger().getUintBig("totalDeposited")
         Log.i(tag, "on-chain totalDeposited = $totalDeposited (expected $depositAmount)")
